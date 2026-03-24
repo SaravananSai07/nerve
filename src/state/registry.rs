@@ -52,15 +52,6 @@ impl SessionRegistry {
         self.sessions.insert(id, session);
     }
 
-    pub fn remove(&mut self, id: &str) -> Option<Session> {
-        self.order.retain(|i| i != id);
-        self.sessions.remove(id)
-    }
-
-    pub fn get(&self, id: &str) -> Option<&Session> {
-        self.sessions.get(id)
-    }
-
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
         self.sessions.get_mut(id)
     }
@@ -105,18 +96,12 @@ impl SessionRegistry {
         self.sessions.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
-    }
-
     pub fn count_by_state(&self) -> StateCount {
         let mut count = StateCount::default();
         for session in self.sessions.values() {
             match session.state {
                 SessionState::Processing | SessionState::ToolRunning(_) => count.active += 1,
-                SessionState::WaitingForInput | SessionState::WaitingForPermission => {
-                    count.waiting += 1
-                }
+                SessionState::WaitingForInput => count.waiting += 1,
                 SessionState::Idle => count.idle += 1,
                 SessionState::Error => count.error += 1,
                 SessionState::Stale => count.stale += 1,

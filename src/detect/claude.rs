@@ -14,12 +14,9 @@ struct SessionFile {
     #[serde(rename = "sessionId")]
     session_id: String,
     cwd: String,
-    #[serde(rename = "startedAt")]
-    #[allow(dead_code)]
-    started_at: Option<u64>,
 }
 
-pub fn sessions_dir() -> Option<PathBuf> {
+fn sessions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
 }
 
