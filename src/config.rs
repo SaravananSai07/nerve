@@ -16,12 +16,10 @@ pub struct Config {
 }
 
 #[derive(Deserialize)]
+#[serde(default)]
 pub struct GeneralConfig {
-    #[serde(default = "default_refresh")]
     pub refresh_interval_ms: u64,
-    #[serde(default = "default_process_scan")]
     pub process_scan_interval_ms: u64,
-    #[serde(default = "default_terminal")]
     pub terminal: String,
 }
 
@@ -35,15 +33,10 @@ impl Default for GeneralConfig {
     }
 }
 
-fn default_refresh() -> u64 { 1000 }
-fn default_process_scan() -> u64 { 5000 }
-fn default_terminal() -> String { "auto".into() }
-
 #[derive(Deserialize)]
+#[serde(default)]
 pub struct AppearanceConfig {
-    #[serde(default = "default_theme")]
     pub theme: String,
-    #[serde(default = "default_layout")]
     pub layout: String,
 }
 
@@ -56,16 +49,11 @@ impl Default for AppearanceConfig {
     }
 }
 
-fn default_theme() -> String { "nightfox".into() }
-fn default_layout() -> String { "cards".into() }
-
 #[derive(Deserialize)]
+#[serde(default)]
 pub struct NotificationConfig {
-    #[serde(default = "default_true")]
     pub on_waiting: bool,
-    #[serde(default = "default_true")]
     pub on_error: bool,
-    #[serde(default = "default_sound")]
     pub sound: String,
 }
 
@@ -78,9 +66,6 @@ impl Default for NotificationConfig {
         }
     }
 }
-
-fn default_true() -> bool { true }
-fn default_sound() -> String { "bell".into() }
 
 impl Config {
     pub fn load() -> Self {
