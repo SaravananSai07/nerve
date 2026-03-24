@@ -176,12 +176,18 @@ impl App {
 
     fn refresh_sessions(&mut self) {
         let discovered = claude::discover_sessions();
-        let active_ids: Vec<String> = discovered.iter().map(|s| s.id.clone()).collect();
+        let active_ids: std::collections::HashSet<&str> =
+            discovered.iter().map(|s| s.id.as_str()).collect();
 
-        for id in self.registry.ids() {
-            if !active_ids.contains(&id) {
-                self.registry.mark_stale(&id);
-            }
+        let stale_ids: Vec<String> = self
+            .registry
+            .ids()
+            .iter()
+            .filter(|id| !active_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale_ids {
+            self.registry.mark_stale(&id);
         }
 
         for session in discovered {

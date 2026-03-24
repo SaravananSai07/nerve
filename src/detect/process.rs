@@ -52,8 +52,12 @@ pub fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
     procs.iter().find(|p| p.pid == pid)
 }
 
-pub fn has_child_named(procs: &[ProcessInfo], parent_pid: u32, name: &str) -> bool {
-    let child_map = build_child_map(procs);
+pub fn has_child_named(
+    procs: &[ProcessInfo],
+    child_map: &HashMap<u32, Vec<u32>>,
+    parent_pid: u32,
+    name: &str,
+) -> bool {
     let mut stack = vec![parent_pid];
     while let Some(pid) = stack.pop() {
         if let Some(children) = child_map.get(&pid) {

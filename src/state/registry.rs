@@ -117,22 +117,14 @@ impl SessionRegistry {
     }
 
     pub fn remove_stale(&mut self, max_age_secs: u64) {
-        let to_remove: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|(_, s)| {
-                s.state == SessionState::Stale && s.state_duration().as_secs() > max_age_secs
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in to_remove {
-            self.order.retain(|i| i != &id);
-            self.sessions.remove(&id);
-        }
+        self.sessions.retain(|_, s| {
+            !(s.state == SessionState::Stale && s.state_duration().as_secs() > max_age_secs)
+        });
+        self.order.retain(|id| self.sessions.contains_key(id));
     }
 
-    pub fn ids(&self) -> Vec<String> {
-        self.order.clone()
+    pub fn ids(&self) -> &[String] {
+        &self.order
     }
 }
 

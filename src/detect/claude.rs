@@ -27,6 +27,7 @@ pub fn discover_sessions() -> Vec<Session> {
     };
 
     let procs = process::scan_processes();
+    let child_map = process::build_child_map(&procs);
     let mut sessions = Vec::new();
 
     let entries = match fs::read_dir(&dir) {
@@ -37,7 +38,7 @@ pub fn discover_sessions() -> Vec<Session> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json") {
-            if let Some(session) = load_session(&path, &procs) {
+            if let Some(session) = load_session(&path, &procs, &child_map) {
                 sessions.push(session);
             }
         }
@@ -47,7 +48,11 @@ pub fn discover_sessions() -> Vec<Session> {
     sessions
 }
 
-fn load_session(path: &Path, procs: &[process::ProcessInfo]) -> Option<Session> {
+fn load_session(
+    path: &Path,
+    procs: &[process::ProcessInfo],
+    child_map: &std::collections::HashMap<u32, Vec<u32>>,
+) -> Option<Session> {
     let content = fs::read_to_string(path).ok()?;
     let sf: SessionFile = serde_json::from_str(&content).ok()?;
 
@@ -64,7 +69,7 @@ fn load_session(path: &Path, procs: &[process::ProcessInfo]) -> Option<Session> 
 
     let jsonl_path = find_jsonl(&sf.session_id, &cwd);
     if let Some(ref jp) = jsonl_path {
-        session.state = infer_state_from_jsonl(jp, sf.pid, procs);
+        session.state = infer_state_from_jsonl(jp, sf.pid, procs, child_map);
         session.jsonl_path = Some(jp.clone());
     } else {
         session.state = infer_state_from_cpu(session.cpu_percent);
@@ -125,12 +130,13 @@ pub fn infer_state_from_jsonl(
     path: &Path,
     pid: u32,
     procs: &[process::ProcessInfo],
+    child_map: &std::collections::HashMap<u32, Vec<u32>>,
 ) -> SessionState {
     let mtime_age = file_age_secs(path);
     let cpu = process::get_cpu_for_pid(procs, pid);
 
     if mtime_age > 300.0 {
-        if cpu > 5.0 || process::has_child_named(procs, pid, "caffeinate") {
+        if cpu > 5.0 || process::has_child_named(procs, child_map, pid, "caffeinate") {
             return SessionState::Processing;
         }
         return SessionState::Idle;
@@ -142,7 +148,7 @@ pub fn infer_state_from_jsonl(
         }
     }
 
-    if process::has_child_named(procs, pid, "caffeinate") {
+    if process::has_child_named(procs, child_map, pid, "caffeinate") {
         return SessionState::Processing;
     }
 
