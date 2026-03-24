@@ -8,7 +8,14 @@ use crate::state::registry::SessionRegistry;
 use crate::state::session::Session;
 use crate::tui::theme::Theme;
 
-pub fn render(frame: &mut Frame, area: Rect, registry: &SessionRegistry, selected: usize, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    registry: &SessionRegistry,
+    selected: usize,
+    theme: &Theme,
+    status_message: Option<&str>,
+) {
     let sessions = registry.sorted_sessions();
 
     if sessions.is_empty() {
@@ -32,7 +39,7 @@ pub fn render(frame: &mut Frame, area: Rect, registry: &SessionRegistry, selecte
     };
 
     render_cards(frame, card_area, &sessions, selected, theme);
-    render_status_bar(frame, status_area, registry, theme);
+    render_status_bar(frame, status_area, registry, theme, status_message);
 }
 
 fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: usize, theme: &Theme) {
@@ -172,26 +179,39 @@ fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bo
     frame.render_widget(para, inner);
 }
 
-fn render_status_bar(frame: &mut Frame, area: Rect, registry: &SessionRegistry, theme: &Theme) {
-    let counts = registry.count_by_state();
-    let total = registry.len();
-    let sort_label = registry.sort_mode().label();
+fn render_status_bar(
+    frame: &mut Frame,
+    area: Rect,
+    registry: &SessionRegistry,
+    theme: &Theme,
+    status_message: Option<&str>,
+) {
+    let line = if let Some(msg) = status_message {
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(theme.error),
+        ))
+    } else {
+        let counts = registry.count_by_state();
+        let total = registry.len();
+        let sort_label = registry.sort_mode().label();
 
-    let line = Line::from(vec![
-        Span::styled(format!(" {total} sessions"), Style::default().fg(theme.text)),
-        Span::raw("   "),
-        Span::styled(format!("{} active", counts.active), Style::default().fg(theme.processing)),
-        Span::raw("   "),
-        Span::styled(format!("{} waiting", counts.waiting), Style::default().fg(theme.waiting)),
-        Span::raw("   "),
-        Span::styled(format!("{} idle", counts.idle), Style::default().fg(theme.idle)),
-        Span::raw("   "),
-        Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.idle)),
-        Span::raw("  "),
-        Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.idle)),
-        Span::raw("  "),
-        Span::styled("[?] help", Style::default().fg(theme.idle)),
-    ]);
+        Line::from(vec![
+            Span::styled(format!(" {total} sessions"), Style::default().fg(theme.text)),
+            Span::raw("   "),
+            Span::styled(format!("{} active", counts.active), Style::default().fg(theme.processing)),
+            Span::raw("   "),
+            Span::styled(format!("{} waiting", counts.waiting), Style::default().fg(theme.waiting)),
+            Span::raw("   "),
+            Span::styled(format!("{} idle", counts.idle), Style::default().fg(theme.idle)),
+            Span::raw("   "),
+            Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.idle)),
+            Span::raw("  "),
+            Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.idle)),
+            Span::raw("  "),
+            Span::styled("[?] help", Style::default().fg(theme.idle)),
+        ])
+    };
 
     let para = Paragraph::new(line);
     frame.render_widget(para, area);

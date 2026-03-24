@@ -61,7 +61,14 @@ impl App {
             terminal.draw(|frame| {
                 let area = frame.area();
                 self.cols = if area.width >= 80 { 2 } else { 1 };
-                cards::render(frame, area, &self.registry, self.selected, &self.theme);
+                cards::render(
+                    frame,
+                    area,
+                    &self.registry,
+                    self.selected,
+                    &self.theme,
+                    self.status_message.as_deref(),
+                );
                 if self.overlay == Overlay::Help {
                     help::render(frame, &self.theme);
                 }
