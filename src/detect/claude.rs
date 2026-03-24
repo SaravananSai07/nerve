@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -51,7 +52,7 @@ pub fn discover_sessions() -> Vec<Session> {
 fn load_session(
     path: &Path,
     procs: &[process::ProcessInfo],
-    child_map: &std::collections::HashMap<u32, Vec<u32>>,
+    child_map: &HashMap<u32, Vec<u32>>,
 ) -> Option<Session> {
     let content = fs::read_to_string(path).ok()?;
     let sf: SessionFile = serde_json::from_str(&content).ok()?;
@@ -130,7 +131,7 @@ pub fn infer_state_from_jsonl(
     path: &Path,
     pid: u32,
     procs: &[process::ProcessInfo],
-    child_map: &std::collections::HashMap<u32, Vec<u32>>,
+    child_map: &HashMap<u32, Vec<u32>>,
 ) -> SessionState {
     let mtime_age = file_age_secs(path);
     let cpu = process::get_cpu_for_pid(procs, pid);
@@ -185,9 +186,9 @@ fn read_tail_jsonl(path: &Path) -> Option<String> {
     file.read_to_string(&mut buf).ok()?;
 
     buf.lines()
+        .rev()
         .filter(|l| !l.trim().is_empty())
-        .filter(|l| {
-            // Skip progress/file-history entries — find last meaningful line
+        .find(|l| {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
                 let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 t != "progress" && t != "file-history-snapshot"
@@ -195,7 +196,6 @@ fn read_tail_jsonl(path: &Path) -> Option<String> {
                 false
             }
         })
-        .last()
         .map(|s| s.to_string())
 }
 
@@ -214,11 +214,6 @@ fn parse_jsonl_state(line: &str) -> Option<SessionState> {
             return Some(SessionState::Error);
         }
         return Some(SessionState::WaitingForInput);
-    }
-
-    // Skip progress/file-history-snapshot entries — not meaningful for state
-    if entry_type == "progress" || entry_type == "file-history-snapshot" {
-        return None;
     }
 
     if role == "assistant" {
@@ -248,12 +243,12 @@ fn parse_jsonl_state(line: &str) -> Option<SessionState> {
 }
 
 fn disambiguate_names(sessions: &mut [Session]) {
-    let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
     for s in sessions.iter() {
         *name_counts.entry(s.name.clone()).or_default() += 1;
     }
 
-    let mut name_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut name_indices: HashMap<String, usize> = HashMap::new();
     for s in sessions.iter_mut() {
         if name_counts.get(&s.name).copied().unwrap_or(0) > 1 {
             let idx = name_indices.entry(s.name.clone()).or_insert(0);

@@ -50,6 +50,10 @@ fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: 
         .constraints(row_constraints)
         .split(area);
 
+    let col_constraints: Vec<Constraint> = (0..cols)
+        .map(|_| Constraint::Percentage((100 / cols) as u16))
+        .collect();
+
     for (i, session) in sessions.iter().enumerate() {
         let row = i / cols;
         let col = i % cols;
@@ -57,12 +61,9 @@ fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: 
             break;
         }
 
-        let col_constraints: Vec<Constraint> = (0..cols)
-            .map(|_| Constraint::Percentage((100 / cols) as u16))
-            .collect();
         let col_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(col_constraints)
+            .constraints(&col_constraints)
             .split(row_chunks[row]);
 
         if col < col_chunks.len() {
@@ -146,9 +147,9 @@ fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bo
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(format!("{tty_str}"), Style::default().fg(secondary_fg)),
+            Span::styled(tty_str, Style::default().fg(secondary_fg)),
             Span::styled("  ⎇ ", Style::default().fg(border_color)),
-            Span::styled(branch_str.to_string(), Style::default().fg(text_fg)),
+            Span::styled(branch_str, Style::default().fg(text_fg)),
         ]),
     ];
 
