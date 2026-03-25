@@ -8,13 +8,13 @@ use crate::detect::claude;
 use crate::platform::Bridge;
 use crate::state::registry::SessionRegistry;
 use crate::state::session::SessionState;
-use crate::tui::{cards, help};
+use crate::tui::{cards, help, rename};
 use crate::tui::theme::Theme;
 
-#[derive(PartialEq)]
 enum Overlay {
     None,
     Help,
+    Rename(String),
 }
 
 pub struct App {
@@ -69,8 +69,10 @@ impl App {
                     &self.theme,
                     self.status_message.as_deref(),
                 );
-                if self.overlay == Overlay::Help {
-                    help::render(frame, &self.theme);
+                match &self.overlay {
+                    Overlay::Help => help::render(frame, &self.theme),
+                    Overlay::Rename(buf) => rename::render(frame, &self.theme, buf),
+                    Overlay::None => {}
                 }
             })?;
 
@@ -87,13 +89,20 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        if self.overlay == Overlay::Help {
-            match code {
-                KeyCode::Char('?') | KeyCode::Esc => self.overlay = Overlay::None,
-                KeyCode::Char('q') => self.should_quit = true,
-                _ => {}
+        match &self.overlay {
+            Overlay::Help => {
+                match code {
+                    KeyCode::Char('?') | KeyCode::Esc => self.overlay = Overlay::None,
+                    KeyCode::Char('q') => self.should_quit = true,
+                    _ => {}
+                }
+                return;
             }
-            return;
+            Overlay::Rename(_) => {
+                self.handle_rename_key(code);
+                return;
+            }
+            Overlay::None => {}
         }
 
         self.status_message = None;
@@ -136,6 +145,9 @@ impl App {
             KeyCode::Char('t') => {
                 self.cycle_theme();
             }
+            KeyCode::Char('n') => {
+                self.start_rename();
+            }
             KeyCode::Char('?') => {
                 self.overlay = Overlay::Help;
             }
@@ -146,6 +158,51 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn start_rename(&mut self) {
+        let sessions = self.registry.sorted_sessions();
+        if let Some(session) = sessions.get(self.selected) {
+            self.overlay = Overlay::Rename(session.name.clone());
+        }
+    }
+
+    fn handle_rename_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => {
+                if let Overlay::Rename(buf) = std::mem::replace(&mut self.overlay, Overlay::None) {
+                    let trimmed = buf.trim().to_string();
+                    if !trimmed.is_empty() {
+                        self.commit_rename(trimmed);
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Backspace => {
+                if let Overlay::Rename(ref mut buf) = self.overlay {
+                    buf.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Overlay::Rename(ref mut buf) = self.overlay {
+                    buf.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn commit_rename(&mut self, new_name: String) {
+        let sessions = self.registry.sorted_sessions();
+        let Some(id) = sessions.get(self.selected).map(|s| s.id.clone()) else {
+            return;
+        };
+        if let Some(session) = self.registry.get_mut(&id) {
+            session.name = new_name;
+            session.renamed = true;
         }
     }
 
@@ -207,8 +264,10 @@ impl App {
                 existing.tty = session.tty;
                 existing.branch = session.branch;
 
-                if let Some(override_name) = self.config.session_name_for(&cwd_str) {
-                    existing.name = override_name.clone();
+                if !existing.renamed {
+                    if let Some(override_name) = self.config.session_name_for(&cwd_str) {
+                        existing.name = override_name.clone();
+                    }
                 }
 
                 if detected_state == SessionState::Processing

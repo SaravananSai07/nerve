@@ -12,6 +12,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ("Enter / g", "Go to session tab"),
     ("s", "Cycle sort: stable → state → name → age"),
     ("t", "Cycle theme"),
+    ("n", "Rename session"),
     ("1-9", "Jump to session"),
     ("?", "Toggle this help"),
     ("q", "Quit"),
