@@ -320,7 +320,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerve"
+name = "nerve-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",

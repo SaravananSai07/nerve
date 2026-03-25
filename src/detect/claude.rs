@@ -90,6 +90,7 @@ fn is_alive(pid: u32) -> bool {
 fn detect_branch(cwd: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["-C", &cwd.to_string_lossy(), "rev-parse", "--abbrev-ref", "HEAD"])
+        .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
     if output.status.success() {
@@ -253,9 +254,7 @@ fn disambiguate_names(sessions: &mut [Session]) {
         if name_counts.get(&s.name).copied().unwrap_or(0) > 1 {
             let idx = name_indices.entry(s.name.clone()).or_insert(0);
             *idx += 1;
-            if *idx > 1 {
-                s.name = format!("{} ({})", s.name, idx);
-            }
+            s.name = format!("{} ({})", s.name, idx);
         }
     }
 }

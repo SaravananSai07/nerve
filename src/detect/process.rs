@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -12,6 +12,7 @@ pub struct ProcessInfo {
 pub fn scan_processes() -> Vec<ProcessInfo> {
     let output = match std::process::Command::new("ps")
         .args(["-eo", "pid,ppid,tty,comm,%cpu"])
+        .stderr(std::process::Stdio::null())
         .output()
     {
         Ok(o) => o,
@@ -59,11 +60,16 @@ pub fn has_child_named(
     name: &str,
 ) -> bool {
     let mut stack = vec![parent_pid];
+    let mut visited = HashSet::new();
     while let Some(pid) = stack.pop() {
+        if !visited.insert(pid) {
+            continue;
+        }
         if let Some(children) = child_map.get(&pid) {
             for &child_pid in children {
                 if let Some(child) = find_process(procs, child_pid) {
-                    if child.comm.contains(name) {
+                    let comm_name = child.comm.rsplit('/').next().unwrap_or(&child.comm);
+                    if comm_name == name {
                         return true;
                     }
                 }
