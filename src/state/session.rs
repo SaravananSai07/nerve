@@ -38,7 +38,6 @@ impl SessionState {
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
-    pub pid: u32,
     pub cwd: PathBuf,
     pub name: String,
     pub state: SessionState,
@@ -57,14 +56,13 @@ pub struct Session {
 const CONFIRM_TICKS: u8 = 3;
 
 impl Session {
-    pub fn new(id: String, pid: u32, cwd: PathBuf) -> Self {
+    pub fn new(id: String, cwd: PathBuf) -> Self {
         let name = cwd
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "unknown".into());
         Self {
             id,
-            pid,
             cwd,
             name,
             state: SessionState::Processing,

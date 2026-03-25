@@ -62,7 +62,7 @@ fn load_session(
     }
 
     let cwd = PathBuf::from(&sf.cwd);
-    let mut session = Session::new(sf.session_id.clone(), sf.pid, cwd.clone());
+    let mut session = Session::new(sf.session_id.clone(), cwd.clone());
 
     session.tty = process::get_tty_for_pid(procs, sf.pid);
     session.cpu_percent = process::get_cpu_for_pid(procs, sf.pid);
