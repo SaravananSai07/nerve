@@ -49,6 +49,7 @@ pub struct Session {
     pub current_tool: Option<String>,
     pub activity: ActivityHistory,
     pub jsonl_path: Option<PathBuf>,
+    pub renamed: bool,
     pending_state: Option<SessionState>,
     pending_count: u8,
 }
@@ -74,6 +75,7 @@ impl Session {
             current_tool: None,
             activity: ActivityHistory::new(),
             jsonl_path: None,
+            renamed: false,
             pending_state: None,
             pending_count: 0,
         }
@@ -145,7 +147,7 @@ impl ActivityHistory {
         self.last_update = Instant::now();
     }
 
-    fn shift_if_needed(&mut self) {
+    pub fn shift_if_needed(&mut self) {
         let elapsed = self.last_update.elapsed().as_secs();
         let shifts = (elapsed / 30).min(10) as usize;
         if shifts > 0 {

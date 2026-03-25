@@ -188,7 +188,9 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let Overlay::Rename(ref mut buf) = self.overlay {
-                    buf.push(c);
+                    if buf.len() < 48 {
+                        buf.push(c);
+                    }
                 }
             }
             _ => {}
@@ -230,6 +232,8 @@ impl App {
             if let Err(e) = bridge.go_to_session(&cwd, &name, &dir_name) {
                 self.status_message = Some(e.to_string());
             }
+        } else {
+            self.status_message = Some("no terminal bridge detected (try Ghostty or tmux)".into());
         }
     }
 
@@ -289,6 +293,8 @@ impl App {
                 self.registry.upsert(new_session);
             }
         }
+
+        self.registry.shift_all_activity();
 
         let count = self.registry.len();
         if count > 0 && self.selected >= count {

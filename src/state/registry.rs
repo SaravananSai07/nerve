@@ -123,6 +123,12 @@ impl SessionRegistry {
         self.order.retain(|id| self.sessions.contains_key(id));
     }
 
+    pub fn shift_all_activity(&mut self) {
+        for session in self.sessions.values_mut() {
+            session.activity.shift_if_needed();
+        }
+    }
+
     pub fn ids(&self) -> &[String] {
         &self.order
     }
