@@ -1,7 +1,15 @@
 [package]
-name = "nerve"
+name = "nerve-tui"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
+description = "TUI for monitoring AI coding sessions across terminal tabs"
+license = "MIT"
+repository = "https://github.com/SaravananSai07/nerve"
+authors = ["Sai Saravanan"]
+readme = "README.md"
+keywords = ["tui", "claude", "ai", "terminal", "monitoring"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 ratatui = "0.29"
