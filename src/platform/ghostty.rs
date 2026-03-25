@@ -161,11 +161,16 @@ fn common_prefix_len(a: &std::path::Path, b: &std::path::Path) -> usize {
         .count()
 }
 
+fn escape_applescript(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn focus_terminal(terminal_id: &str) -> anyhow::Result<()> {
+    let safe_id = escape_applescript(terminal_id);
     let script = format!(
         "tell application \"Ghostty\"\n\
              activate\n\
-             focus terminal id \"{terminal_id}\"\n\
+             focus terminal id \"{safe_id}\"\n\
          end tell"
     );
     let output = Command::new("osascript")
