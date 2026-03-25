@@ -69,10 +69,12 @@ impl Default for NotificationConfig {
 
 impl Config {
     pub fn load() -> Self {
-        config_path()
+        let mut config: Self = config_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        config.general.refresh_interval_ms = config.general.refresh_interval_ms.clamp(100, 30_000);
+        config
     }
 
     pub fn session_name_for(&self, cwd: &str) -> Option<&String> {
