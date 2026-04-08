@@ -1,4 +1,3 @@
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -10,16 +9,19 @@ const BINDINGS: &[(&str, &str)] = &[
     ("j/k  ↑/↓", "Navigate rows"),
     ("h/l  ←/→", "Navigate columns"),
     ("Enter / g", "Go to session tab"),
+    ("p", "Preview session log"),
+    ("x", "Kill session"),
     ("s", "Cycle sort: stable → state → name → age"),
     ("t", "Cycle theme"),
     ("n", "Rename session"),
+    ("m", "Toggle notification mute"),
     ("1-9", "Jump to session"),
     ("?", "Toggle this help"),
     ("q", "Quit"),
 ];
 
 pub fn render(frame: &mut Frame, theme: &Theme) {
-    let area = centered(frame.area(), 52, (BINDINGS.len() as u16) + 4);
+    let area = super::centered(frame.area(), 52, (BINDINGS.len() as u16) + 4);
 
     frame.render_widget(Clear, area);
 
@@ -56,11 +58,3 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
     frame.render_widget(para, inner);
 }
 
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let vertical = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .split(area);
-    Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .split(vertical[0])[0]
-}

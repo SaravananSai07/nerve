@@ -15,6 +15,7 @@ pub fn render(
     selected: usize,
     theme: &Theme,
     status_message: Option<&str>,
+    notifications_muted: bool,
 ) {
     let sessions = registry.sorted_sessions();
 
@@ -39,16 +40,28 @@ pub fn render(
     };
 
     render_cards(frame, card_area, &sessions, selected, theme);
-    render_status_bar(frame, status_area, registry, theme, status_message);
+    render_status_bar(frame, status_area, registry, theme, status_message, notifications_muted);
 }
 
 fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: usize, theme: &Theme) {
     let width = area.width as usize;
     let cols = if width >= 80 { 2 } else { 1 };
-    let rows = (sessions.len() + cols - 1) / cols;
+    let total_rows = (sessions.len() + cols - 1) / cols;
 
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Length(5))
+    const CARD_HEIGHT: u16 = 5;
+    let visible_rows = (area.height / CARD_HEIGHT) as usize;
+
+    let selected_row = selected / cols;
+    let scroll_offset = if total_rows <= visible_rows {
+        0
+    } else {
+        selected_row.min(total_rows - visible_rows)
+    };
+
+    let render_rows = visible_rows.min(total_rows - scroll_offset);
+
+    let row_constraints: Vec<Constraint> = (0..render_rows)
+        .map(|_| Constraint::Length(CARD_HEIGHT))
         .chain(std::iter::once(Constraint::Min(0)))
         .collect();
 
@@ -61,20 +74,22 @@ fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: 
         .map(|_| Constraint::Percentage((100 / cols) as u16))
         .collect();
 
-    for (i, session) in sessions.iter().enumerate() {
-        let row = i / cols;
-        let col = i % cols;
-        if row >= row_chunks.len() - 1 {
-            break;
-        }
+    for visible_row in 0..render_rows {
+        let actual_row = visible_row + scroll_offset;
+        for col in 0..cols {
+            let i = actual_row * cols + col;
+            if i >= sessions.len() {
+                break;
+            }
 
-        let col_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(&col_constraints)
-            .split(row_chunks[row]);
+            let col_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(&col_constraints)
+                .split(row_chunks[visible_row]);
 
-        if col < col_chunks.len() {
-            render_card(frame, col_chunks[col], session, i == selected, theme);
+            if col < col_chunks.len() {
+                render_card(frame, col_chunks[col], &sessions[i], i == selected, theme);
+            }
         }
     }
 }
@@ -167,13 +182,20 @@ fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bo
         ]));
     }
 
-    lines.push(Line::from(vec![
+    let mut sparkline_spans = vec![
         Span::styled(session.activity.sparkline(), Style::default().fg(state_color)),
         Span::styled(
             format!("  {:.0}% cpu", session.cpu_percent),
             Style::default().fg(secondary_fg),
         ),
-    ]));
+    ];
+    if session.usage.total_tokens() > 0 {
+        sparkline_spans.push(Span::styled(
+            format!("  {}", session.usage.compact_display()),
+            Style::default().fg(secondary_fg),
+        ));
+    }
+    lines.push(Line::from(sparkline_spans));
 
     let para = Paragraph::new(lines).style(Style::default().bg(card_bg));
     frame.render_widget(para, inner);
@@ -185,6 +207,7 @@ fn render_status_bar(
     registry: &SessionRegistry,
     theme: &Theme,
     status_message: Option<&str>,
+    notifications_muted: bool,
 ) {
     let line = if let Some(msg) = status_message {
         Line::from(Span::styled(
@@ -195,8 +218,13 @@ fn render_status_bar(
         let counts = registry.count_by_state();
         let total = registry.len();
         let sort_label = registry.sort_mode().label();
+        let total_cost: f64 = registry
+            .sorted_sessions()
+            .iter()
+            .map(|s| s.usage.cost_usd)
+            .sum();
 
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!(" {total} sessions"), Style::default().fg(theme.text)),
             Span::raw("   "),
             Span::styled(format!("{} active", counts.active), Style::default().fg(theme.processing)),
@@ -204,13 +232,27 @@ fn render_status_bar(
             Span::styled(format!("{} waiting", counts.waiting), Style::default().fg(theme.waiting)),
             Span::raw("   "),
             Span::styled(format!("{} idle", counts.idle), Style::default().fg(theme.idle)),
+        ];
+        if total_cost >= 0.01 {
+            spans.push(Span::raw("   "));
+            spans.push(Span::styled(
+                format!("${:.2} total", total_cost),
+                Style::default().fg(theme.text),
+            ));
+        }
+        spans.extend([
             Span::raw("   "),
             Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.idle)),
             Span::raw("  "),
             Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.idle)),
             Span::raw("  "),
             Span::styled("[?] help", Style::default().fg(theme.idle)),
-        ])
+        ]);
+        if notifications_muted {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("[muted]", Style::default().fg(theme.error)));
+        }
+        Line::from(spans)
     };
 
     let para = Paragraph::new(line);

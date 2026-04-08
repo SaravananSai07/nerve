@@ -10,7 +10,27 @@ pub struct Config {
     #[serde(default)]
     pub appearance: AppearanceConfig,
     #[serde(default)]
+    pub notifications: NotificationConfig,
+    #[serde(default)]
     pub session_names: HashMap<String, String>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(default)]
+pub struct NotificationConfig {
+    pub on_waiting: bool,
+    pub on_error: bool,
+    pub sound: bool,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            on_waiting: true,
+            on_error: true,
+            sound: true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -35,14 +55,12 @@ impl Default for GeneralConfig {
 #[serde(default)]
 pub struct AppearanceConfig {
     pub theme: String,
-    pub layout: String,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
             theme: "nightfox".into(),
-            layout: "cards".into(),
         }
     }
 }

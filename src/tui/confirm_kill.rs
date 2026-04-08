@@ -5,35 +5,35 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 
-pub fn render(frame: &mut Frame, theme: &Theme, input: &str) {
-    let area = super::centered(frame.area(), 44, 5);
+pub fn render(frame: &mut Frame, theme: &Theme, name: &str) {
+    let area = super::centered(frame.area(), 48, 5);
 
     frame.render_widget(Clear, area);
 
     let block = Block::default()
         .title(Span::styled(
-            " rename ",
+            " kill session ",
             Style::default()
-                .fg(theme.text)
+                .fg(theme.error)
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.processing));
+        .border_style(Style::default().fg(theme.error));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let lines = vec![
         Line::from(Span::styled(
-            format!(" {input}▏"),
-            Style::default().fg(theme.selected_text),
+            format!(" Kill '{name}'?"),
+            Style::default().fg(theme.text),
         )),
         Line::raw(""),
         Line::from(vec![
-            Span::styled(" Enter", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
+            Span::styled(" [y]", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
             Span::styled(" confirm  ", Style::default().fg(theme.idle)),
-            Span::styled("Esc", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
+            Span::styled("[n/Esc]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
             Span::styled(" cancel", Style::default().fg(theme.idle)),
         ]),
     ];

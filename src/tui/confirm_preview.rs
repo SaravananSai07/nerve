@@ -5,16 +5,16 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 
-pub fn render(frame: &mut Frame, theme: &Theme, input: &str) {
-    let area = super::centered(frame.area(), 44, 5);
+pub fn render(frame: &mut Frame, theme: &Theme) {
+    let area = super::centered(frame.area(), 52, 7);
 
     frame.render_widget(Clear, area);
 
     let block = Block::default()
         .title(Span::styled(
-            " rename ",
+            " preview ",
             Style::default()
-                .fg(theme.text)
+                .fg(theme.processing)
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -26,14 +26,20 @@ pub fn render(frame: &mut Frame, theme: &Theme, input: &str) {
 
     let lines = vec![
         Line::from(Span::styled(
-            format!(" {input}▏"),
-            Style::default().fg(theme.selected_text),
+            " Briefly switches tabs to capture the terminal",
+            Style::default().fg(theme.text),
+        )),
+        Line::from(Span::styled(
+            " buffer.",
+            Style::default().fg(theme.text),
         )),
         Line::raw(""),
         Line::from(vec![
-            Span::styled(" Enter", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
-            Span::styled(" confirm  ", Style::default().fg(theme.idle)),
-            Span::styled("Esc", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
+            Span::styled(" [y]", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
+            Span::styled(" continue  ", Style::default().fg(theme.idle)),
+            Span::styled("[d]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
+            Span::styled(" don't ask again  ", Style::default().fg(theme.idle)),
+            Span::styled("[n/Esc]", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
             Span::styled(" cancel", Style::default().fg(theme.idle)),
         ]),
     ];
