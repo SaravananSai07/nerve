@@ -2,6 +2,13 @@
 pub mod ghostty;
 pub mod tmux;
 
+pub struct SessionTarget {
+    pub cwd: String,
+    pub name: String,
+    pub dir_name: String,
+    pub tty: Option<String>,
+}
+
 pub enum Bridge {
     #[cfg(target_os = "macos")]
     Ghostty(ghostty::GhosttyBridge),
@@ -25,11 +32,19 @@ impl Bridge {
         }
     }
 
-    pub fn go_to_session(&self, cwd: &str, session_name: &str, dir_name: &str) -> anyhow::Result<()> {
+    pub fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
         match self {
             #[cfg(target_os = "macos")]
-            Self::Ghostty(g) => g.go_to_session(cwd, session_name, dir_name),
-            Self::Tmux(t) => t.go_to_session(cwd),
+            Self::Ghostty(g) => g.go_to_session(target),
+            Self::Tmux(t) => t.go_to_session(target),
+        }
+    }
+
+    pub fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Ghostty(g) => g.capture_screen(target),
+            Self::Tmux(t) => t.capture_screen(target),
         }
     }
 }

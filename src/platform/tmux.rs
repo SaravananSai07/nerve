@@ -1,3 +1,5 @@
+use super::SessionTarget;
+
 struct Tab {
     id: String,
     title: String,
@@ -6,6 +8,31 @@ struct Tab {
 pub struct TmuxBridge;
 
 impl TmuxBridge {
+    pub fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
+        let cwd = &target.cwd;
+        let tabs = self.enumerate_tabs().ok()?;
+        let cwd_path = std::path::Path::new(cwd);
+
+        let pane = tabs.iter().find(|tab| {
+            tab.title == *cwd || std::path::Path::new(&tab.title) == cwd_path
+        })?;
+
+        let output = std::process::Command::new("tmux")
+            .args(["capture-pane", "-t", &pane.id, "-p", "-S", "-100"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(text)
+    }
+
     fn enumerate_tabs(&self) -> anyhow::Result<Vec<Tab>> {
         let output = std::process::Command::new("tmux")
             .args(["list-panes", "-a", "-F", "#{pane_id} #{pane_current_path}"])
@@ -33,12 +60,13 @@ impl TmuxBridge {
         Ok(())
     }
 
-    pub fn go_to_session(&self, cwd: &str) -> anyhow::Result<()> {
+    pub fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
+        let cwd = &target.cwd;
         let tabs = self.enumerate_tabs()?;
         let cwd_path = std::path::Path::new(cwd);
 
         for tab in &tabs {
-            if tab.title == cwd || std::path::Path::new(&tab.title) == cwd_path {
+            if tab.title == *cwd || std::path::Path::new(&tab.title) == cwd_path {
                 return self.switch_to(tab);
             }
         }
