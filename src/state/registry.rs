@@ -117,8 +117,22 @@ impl SessionRegistry {
     }
 
     pub fn remove_stale(&mut self, max_age_secs: u64) {
+        let active_cwds: std::collections::HashSet<std::path::PathBuf> = self
+            .sessions
+            .values()
+            .filter(|s| s.state != SessionState::Stale)
+            .map(|s| s.cwd.clone())
+            .collect();
+
         self.sessions.retain(|_, s| {
-            !(s.state == SessionState::Stale && s.state_duration().as_secs() > max_age_secs)
+            if s.state != SessionState::Stale {
+                return true;
+            }
+            // Evict immediately if an active session covers the same CWD
+            if active_cwds.contains(&s.cwd) {
+                return false;
+            }
+            s.state_duration().as_secs() <= max_age_secs
         });
         self.order.retain(|id| self.sessions.contains_key(id));
     }
@@ -129,9 +143,68 @@ impl SessionRegistry {
         }
     }
 
+    pub fn re_disambiguate_names(&mut self) {
+        let reserved: std::collections::HashSet<String> = self
+            .sessions
+            .values()
+            .filter(|s| s.renamed)
+            .map(|s| s.name.clone())
+            .collect();
+
+        let mut base_to_ids: HashMap<String, Vec<String>> = HashMap::new();
+        for (id, session) in &self.sessions {
+            if session.renamed {
+                continue;
+            }
+            let base = strip_disambiguation_suffix(&session.name);
+            base_to_ids.entry(base).or_default().push(id.clone());
+        }
+
+        for (base, mut ids) in base_to_ids {
+            if ids.len() <= 1 && !reserved.contains(&base) {
+                if let Some(session) = self.sessions.get_mut(&ids[0]) {
+                    session.name = base;
+                }
+                continue;
+            }
+            ids.sort();
+            let mut n = 1;
+            for id in &ids {
+                let candidate = loop {
+                    let name = format!("{} ({})", base, n);
+                    n += 1;
+                    if !reserved.contains(&name) {
+                        break name;
+                    }
+                };
+                if let Some(session) = self.sessions.get_mut(id) {
+                    session.name = candidate;
+                }
+            }
+        }
+    }
+
+    pub fn name_taken(&self, name: &str, exclude_id: &str) -> bool {
+        self.sessions
+            .iter()
+            .any(|(id, s)| s.name == name && id != exclude_id)
+    }
+
     pub fn ids(&self) -> &[String] {
         &self.order
     }
+}
+
+fn strip_disambiguation_suffix(name: &str) -> String {
+    if let Some(idx) = name.rfind(" (") {
+        if name.ends_with(')') {
+            let inner = &name[idx + 2..name.len() - 1];
+            if inner.chars().all(|c| c.is_ascii_digit()) {
+                return name[..idx].to_string();
+            }
+        }
+    }
+    name.to_string()
 }
 
 #[derive(Default)]
