@@ -16,11 +16,14 @@ impl Notifier {
             return;
         }
         match state {
+            SessionState::Idle if self.config.on_complete => {
+                self.send("nerve", &format!("{session_name} is done"));
+            }
             SessionState::WaitingForInput if self.config.on_waiting => {
-                self.send("nerve", &format!("{session_name}: Waiting for input"));
+                self.send("nerve", &format!("{session_name} needs input"));
             }
             SessionState::Error if self.config.on_error => {
-                self.send("nerve", &format!("{session_name}: Error"));
+                self.send("nerve", &format!("{session_name} hit an error"));
             }
             _ => {}
         }

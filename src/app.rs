@@ -518,6 +518,7 @@ impl App {
                     || matches!(detected_state, SessionState::ToolRunning(_))
                 {
                     existing.activity.record_activity();
+                    existing.last_notified_state = None;
                 }
 
                 if let SessionState::ToolRunning(ref tool) = detected_state {

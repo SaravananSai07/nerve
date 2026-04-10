@@ -18,6 +18,7 @@ pub struct Config {
 #[derive(Deserialize, Clone)]
 #[serde(default)]
 pub struct NotificationConfig {
+    pub on_complete: bool,
     pub on_waiting: bool,
     pub on_error: bool,
     pub sound: bool,
@@ -26,6 +27,7 @@ pub struct NotificationConfig {
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
+            on_complete: true,
             on_waiting: true,
             on_error: true,
             sound: true,
