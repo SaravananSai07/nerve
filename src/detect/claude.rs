@@ -225,9 +225,6 @@ fn parse_jsonl_state(line: &str) -> Option<SessionState> {
     }
 
     if entry_type == "system" {
-        if val.get("subtype").and_then(|s| s.as_str()) == Some("turn_duration") {
-            return Some(SessionState::Idle);
-        }
         return None;
     }
 
