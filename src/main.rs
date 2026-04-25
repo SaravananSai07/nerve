@@ -6,7 +6,10 @@ mod platform;
 mod state;
 mod tui;
 
+use std::str::FromStr;
+
 use app::App;
+use platform::BridgeId;
 
 fn discover_with_usage() -> Vec<state::session::Session> {
     let mut sessions = detect::claude::discover_sessions();
@@ -20,7 +23,45 @@ fn discover_with_usage() -> Vec<state::session::Session> {
     sessions
 }
 
+fn parse_focus_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--focus" {
+            return args.next();
+        }
+        if let Some(val) = a.strip_prefix("--focus=") {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+fn handle_focus(s: &str) {
+    let focused = BridgeId::from_str(s).and_then(|id| id.focus());
+    if focused.is_ok() {
+        return;
+    }
+
+    // Stale id (closed tab) or parse error: fall back to plain Ghostty activation
+    // so a notification click is never a silent no-op. Linux/non-Ghostty: nothing
+    // useful to do — exit quietly.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"Ghostty\" to activate"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
 fn main() -> std::io::Result<()> {
+    if let Some(arg) = parse_focus_arg() {
+        handle_focus(&arg);
+        return Ok(());
+    }
+
     if std::env::args().any(|a| a == "--dump") {
         let sessions = discover_with_usage();
         println!("{}", serde_json::to_string_pretty(&sessions).unwrap_or_else(|e| format!("error: {e}")));

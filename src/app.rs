@@ -543,9 +543,21 @@ impl App {
                 if transitioned {
                     let current = existing.state.clone();
                     if existing.last_notified_state.as_ref() != Some(&current) {
+                        let target = SessionTarget {
+                            cwd: existing.cwd.to_string_lossy().into_owned(),
+                            name: existing.name.clone(),
+                            dir_name: existing
+                                .cwd
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            tty: existing.tty.clone(),
+                        };
                         self.notifier.maybe_notify(
                             &existing.name,
                             &current,
+                            &target,
+                            self.bridge.as_ref(),
                             self.prefs.notifications_muted,
                         );
                         existing.last_notified_state = Some(current);

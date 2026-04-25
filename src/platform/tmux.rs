@@ -1,23 +1,20 @@
+use std::process::Command;
+
 use super::SessionTarget;
 
-struct Tab {
+struct Pane {
     id: String,
-    title: String,
+    tty: String,
+    cwd: String,
 }
 
 pub struct TmuxBridge;
 
 impl TmuxBridge {
     pub fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
-        let cwd = &target.cwd;
-        let tabs = self.enumerate_tabs().ok()?;
-        let cwd_path = std::path::Path::new(cwd);
+        let pane = self.find_pane(target)?;
 
-        let pane = tabs.iter().find(|tab| {
-            tab.title == *cwd || std::path::Path::new(&tab.title) == cwd_path
-        })?;
-
-        let output = std::process::Command::new("tmux")
+        let output = Command::new("tmux")
             .args(["capture-pane", "-t", &pane.id, "-p", "-S", "-100"])
             .output()
             .ok()?;
@@ -33,44 +30,68 @@ impl TmuxBridge {
         Some(text)
     }
 
-    fn enumerate_tabs(&self) -> anyhow::Result<Vec<Tab>> {
-        let output = std::process::Command::new("tmux")
-            .args(["list-panes", "-a", "-F", "#{pane_id} #{pane_current_path}"])
+    fn enumerate_panes(&self) -> anyhow::Result<Vec<Pane>> {
+        let output = Command::new("tmux")
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id} #{pane_tty} #{pane_current_path}",
+            ])
             .output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let tabs: Vec<Tab> = stdout
+        let panes: Vec<Pane> = stdout
             .lines()
             .filter_map(|line| {
-                let (id, title) = line.split_once(' ')?;
-                Some(Tab {
-                    id: id.to_string(),
-                    title: title.to_string(),
-                })
+                let mut parts = line.splitn(3, ' ');
+                let id = parts.next()?.to_string();
+                let tty = parts.next()?.to_string();
+                let cwd = parts.next()?.to_string();
+                Some(Pane { id, tty, cwd })
             })
             .collect();
 
-        Ok(tabs)
+        Ok(panes)
     }
 
-    fn switch_to(&self, tab: &Tab) -> anyhow::Result<()> {
-        std::process::Command::new("tmux")
-            .args(["select-pane", "-t", &tab.id])
-            .output()?;
-        Ok(())
-    }
+    fn find_pane(&self, target: &SessionTarget) -> Option<Pane> {
+        let panes = self.enumerate_panes().ok()?;
+        let cwd_path = std::path::Path::new(&target.cwd);
 
-    pub fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
-        let cwd = &target.cwd;
-        let tabs = self.enumerate_tabs()?;
-        let cwd_path = std::path::Path::new(cwd);
-
-        for tab in &tabs {
-            if tab.title == *cwd || std::path::Path::new(&tab.title) == cwd_path {
-                return self.switch_to(tab);
+        if let Some(tty) = target.tty.as_deref() {
+            if let Some(p) = panes.iter().find(|p| p.tty == tty) {
+                return Some(Pane {
+                    id: p.id.clone(),
+                    tty: p.tty.clone(),
+                    cwd: p.cwd.clone(),
+                });
             }
         }
 
-        anyhow::bail!("no pane found for cwd {cwd}")
+        panes
+            .into_iter()
+            .find(|p| p.cwd == target.cwd || std::path::Path::new(&p.cwd) == cwd_path)
     }
+
+    pub fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
+        let pane = self
+            .find_pane(target)
+            .ok_or_else(|| anyhow::anyhow!("no pane found for cwd {}", target.cwd))?;
+        focus_pane(&pane.id)
+    }
+
+    pub fn resolve_pane_id(&self, target: &SessionTarget) -> Option<String> {
+        self.find_pane(target).map(|p| p.id)
+    }
+}
+
+pub(crate) fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
+    let status = Command::new("tmux")
+        .args(["select-pane", "-t", pane_id])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("tmux select-pane failed for {pane_id}");
+    }
+    Ok(())
 }

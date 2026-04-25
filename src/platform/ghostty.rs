@@ -108,6 +108,19 @@ return capturedText
 
         focus_terminal(&found.terminal_id)
     }
+
+    pub fn resolve_terminal_id(&self, target: &SessionTarget) -> Option<String> {
+        let terminals = query_terminals().ok()?;
+        find_terminal_for_session(
+            &terminals,
+            &target.cwd,
+            &target.name,
+            &target.dir_name,
+            self.nerve_terminal_id.as_deref(),
+            target.tty.as_deref(),
+        )
+        .map(|t| t.terminal_id.clone())
+    }
 }
 
 fn detect_own_terminal() -> Option<String> {
@@ -414,7 +427,7 @@ fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn focus_terminal(terminal_id: &str) -> anyhow::Result<()> {
+pub(crate) fn focus_terminal(terminal_id: &str) -> anyhow::Result<()> {
     let safe_id = escape_applescript(terminal_id);
     let script = format!(
         "tell application \"Ghostty\"\n\
