@@ -22,8 +22,32 @@ warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
 err()   { printf "${RED}✗${RESET} %s\n" "$1"; }
 
 if ! command -v cargo &>/dev/null; then
-    err "cargo not found. Install Rust first: https://rustup.rs"
-    exit 1
+    if [[ ! -e /dev/tty ]]; then
+        err "cargo not found. Install Rust first: https://rustup.rs"
+        exit 1
+    fi
+
+    warn "Rust toolchain not found."
+    printf "  Install via rustup (https://rustup.rs)? [y/N] "
+    read -r answer </dev/tty
+    case "$answer" in
+        y|Y)
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            if [[ -f "$HOME/.cargo/env" ]]; then
+                # shellcheck source=/dev/null
+                source "$HOME/.cargo/env"
+            fi
+            if ! command -v cargo &>/dev/null; then
+                err "rustup finished but cargo is still not on PATH. Open a new shell and re-run."
+                exit 1
+            fi
+            info "Rust installed"
+            ;;
+        *)
+            err "Install Rust first: https://rustup.rs"
+            exit 1
+            ;;
+    esac
 fi
 
 INSTALL_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
