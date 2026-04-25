@@ -75,14 +75,17 @@ sound = true
 ## Install
 
 ```bash
-# From source
+# One-liner (installs from crates.io)
+curl -fsSL https://raw.githubusercontent.com/SaravananSai07/nerve/master/install.sh | bash
+
+# From a cloned repo (builds from source)
 ./install.sh
 
-# Or manually
+# Or manually via cargo
 cargo install nerve-tui
 ```
 
-The install script builds from source, copies the binary to `~/.cargo/bin/nerve`, and offers to install optional macOS extras like `terminal-notifier`.
+The install script places the binary at `~/.cargo/bin/nerve` and, on macOS, offers to install optional extras like `terminal-notifier`.
 
 ## CLI
 
