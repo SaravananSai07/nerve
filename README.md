@@ -85,7 +85,7 @@ curl -fsSL https://raw.githubusercontent.com/SaravananSai07/nerve/master/install
 cargo install nerve-tui
 ```
 
-The install script places the binary at `~/.cargo/bin/nerve` and, on macOS, offers to install optional extras like `terminal-notifier`.
+The install script places the binary at `~/.cargo/bin/nerve` and, on macOS, offers to install optional extras like `terminal-notifier`. First-time install takes a few minutes (Rust toolchain if missing, plus crate compilation).
 
 ## CLI
 

@@ -21,6 +21,10 @@ info()  { printf "${GREEN}✓${RESET} %s\n" "$1"; }
 warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
 err()   { printf "${RED}✗${RESET} %s\n" "$1"; }
 
+printf "\n${BOLD}nerve installer${RESET}\n"
+printf "${DIM}First-time install takes a few minutes — Rust toolchain (if missing)${RESET}\n"
+printf "${DIM}plus compiling nerve from source. Subsequent runs are instant.${RESET}\n"
+
 if ! command -v cargo &>/dev/null; then
     if [[ ! -e /dev/tty ]]; then
         err "cargo not found. Install Rust first: https://rustup.rs"
