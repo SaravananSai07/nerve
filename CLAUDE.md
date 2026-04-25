@@ -30,11 +30,12 @@ src/
     registry.rs       HashMap<session_id, Session> with sort/disambiguate
     prefs.rs          Persistent user preferences
   platform/
-    mod.rs            Bridge trait for terminal integration
+    mod.rs            Bridge enum (Ghostty/Tmux variants) + auto_detect()
     ghostty.rs        Ghostty tab navigation and screen capture (macOS only)
     tmux.rs           tmux pane navigation
   tui/
-    mod.rs            Theme definitions
+    mod.rs            Module declarations + centered() overlay helper
+    theme.rs          Theme struct and built-in theme palette
     cards.rs          Main grid view rendering
     help.rs           Help overlay
     rename.rs         Rename overlay
