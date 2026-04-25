@@ -85,7 +85,34 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Optional dependencies (macOS only)
+# 2. Update-check preference
+# ---------------------------------------------------------------------------
+if [[ -e /dev/tty ]]; then
+    printf "\n${BOLD}Update checks${RESET}\n"
+    printf "${DIM}Once a day, nerve can check crates.io for a newer release and${RESET}\n"
+    printf "${DIM}show a quiet banner at the top of the TUI. Off-the-wire, no telemetry.${RESET}\n"
+    printf "Enable update checks on launch? [Y/n] "
+    read -r answer </dev/tty
+    case "$answer" in
+        n|N)
+            CONFIG_DIR="$HOME/.config/nerve"
+            CONFIG_FILE="$CONFIG_DIR/config.toml"
+            mkdir -p "$CONFIG_DIR"
+            if [[ -f "$CONFIG_FILE" ]]; then
+                warn "$CONFIG_FILE already exists — set [updates] check_on_launch = false manually to disable"
+            else
+                printf "[updates]\ncheck_on_launch = false\n" > "$CONFIG_FILE"
+                info "Update checks disabled (wrote $CONFIG_FILE)"
+            fi
+            ;;
+        *)
+            info "Update checks enabled"
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Optional dependencies (macOS only)
 # ---------------------------------------------------------------------------
 if [[ "$(uname)" == "Darwin" ]] && [[ -t 0 || -e /dev/tty ]]; then
     printf "\n${BOLD}Optional macOS extras${RESET}\n"
@@ -128,7 +155,7 @@ if [[ "$(uname)" == "Darwin" ]] && [[ -t 0 || -e /dev/tty ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Done
+# 4. Done
 # ---------------------------------------------------------------------------
 printf "\n${GREEN}${BOLD}nerve installed successfully.${RESET}\n"
 printf "Run ${BOLD}nerve${RESET} to start the TUI.\n\n"

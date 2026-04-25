@@ -41,6 +41,7 @@ pub struct App {
     preview_lines: Vec<String>,
     has_terminal_capture: bool,
     visited_session: Option<String>,
+    update_banner: Option<String>,
 }
 
 impl App {
@@ -60,6 +61,10 @@ impl App {
         };
         let notifier = Notifier::new(config.notifications.clone(), terminal_app);
         let prefs = Prefs::load();
+
+        crate::updater::maybe_check_in_background(config.updates.check_on_launch);
+        let update_banner = crate::updater::pending_update(env!("CARGO_PKG_VERSION"));
+
         Self {
             config,
             registry: SessionRegistry::new(),
@@ -78,6 +83,7 @@ impl App {
             preview_lines: Vec::new(),
             has_terminal_capture: false,
             visited_session: None,
+            update_banner,
         }
     }
 
@@ -97,6 +103,7 @@ impl App {
                     &self.theme,
                     self.status_message.as_deref(),
                     self.prefs.notifications_muted,
+                    self.update_banner.as_deref(),
                 );
                 match &self.overlay {
                     Overlay::Help => help::render(frame, &self.theme),

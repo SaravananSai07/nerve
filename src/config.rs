@@ -12,7 +12,21 @@ pub struct Config {
     #[serde(default)]
     pub notifications: NotificationConfig,
     #[serde(default)]
+    pub updates: UpdatesConfig,
+    #[serde(default)]
     pub session_names: HashMap<String, String>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(default)]
+pub struct UpdatesConfig {
+    pub check_on_launch: bool,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self { check_on_launch: true }
+    }
 }
 
 #[derive(Deserialize, Clone)]

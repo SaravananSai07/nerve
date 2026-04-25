@@ -87,10 +87,20 @@ cargo install nerve-tui
 
 The install script places the binary at `~/.cargo/bin/nerve` and, on macOS, offers to install optional extras like `terminal-notifier`. First-time install takes a few minutes (Rust toolchain if missing, plus crate compilation).
 
+### Updating
+
+```bash
+nerve update                    # in-app: re-runs cargo install nerve-tui --force
+cargo install nerve-tui --force # equivalent, manual form
+```
+
+By default, nerve checks crates.io once a day and shows a quiet banner at the top of the TUI when a newer version is available. The installer prompts to opt out; or set `check_on_launch = false` under `[updates]` in `~/.config/nerve/config.toml`.
+
 ## CLI
 
 ```
 nerve          # launch TUI
+nerve update   # upgrade to the latest crates.io release
 nerve --list   # print sessions to stdout
 nerve --dump   # JSON dump of all sessions
 ```

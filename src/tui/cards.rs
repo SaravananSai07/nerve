@@ -16,6 +16,7 @@ pub fn render(
     theme: &Theme,
     status_message: Option<&str>,
     notifications_muted: bool,
+    update_banner: Option<&str>,
 ) {
     let sessions = registry.sorted_sessions();
 
@@ -31,16 +32,49 @@ pub fn render(
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let (card_area, status_area) = {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(inner);
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(3);
+    if update_banner.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(3));
+    constraints.push(Constraint::Length(1));
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let (card_area, status_area) = if let Some(version) = update_banner {
+        render_update_banner(frame, chunks[0], theme, version);
+        (chunks[1], chunks[2])
+    } else {
         (chunks[0], chunks[1])
     };
 
     render_cards(frame, card_area, &sessions, selected, theme);
     render_status_bar(frame, status_area, registry, theme, status_message, notifications_muted);
+}
+
+fn render_update_banner(frame: &mut Frame, area: Rect, theme: &Theme, version: &str) {
+    let line = Line::from(vec![
+        Span::styled(
+            "  ↑ Update available: ",
+            Style::default().fg(theme.text).add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            version,
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  — run ",
+            Style::default().fg(theme.text).add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            "nerve update",
+            Style::default().fg(theme.text),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: usize, theme: &Theme) {

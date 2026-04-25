@@ -5,6 +5,7 @@ mod notify;
 mod platform;
 mod state;
 mod tui;
+mod updater;
 
 use std::str::FromStr;
 
@@ -56,10 +57,27 @@ fn handle_focus(s: &str) {
     }
 }
 
+fn handle_update() -> std::io::Result<()> {
+    println!("Updating nerve via cargo install nerve-tui --force");
+    let status = std::process::Command::new("cargo")
+        .args(["install", "nerve-tui", "--force"])
+        .status()?;
+    if status.success() {
+        println!("\nnerve updated. Restart any running instance to use the new version.");
+    } else {
+        eprintln!("\nUpdate failed. Run `cargo install nerve-tui --force` directly to see errors.");
+    }
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     if let Some(arg) = parse_focus_arg() {
         handle_focus(&arg);
         return Ok(());
+    }
+
+    if std::env::args().any(|a| a == "update") {
+        return handle_update();
     }
 
     if std::env::args().any(|a| a == "--dump") {
