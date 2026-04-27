@@ -77,7 +77,7 @@ impl SessionRegistry {
                 sessions.sort_by(|a, b| a.name.cmp(&b.name));
             }
             SortMode::Age => {
-                sessions.sort_by(|a, b| b.state_duration().cmp(&a.state_duration()));
+                sessions.sort_by_key(|s| std::cmp::Reverse(s.state_duration()));
             }
         }
 

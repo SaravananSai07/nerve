@@ -8,6 +8,7 @@ use crate::state::registry::SessionRegistry;
 use crate::state::session::Session;
 use crate::tui::theme::Theme;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -80,7 +81,7 @@ fn render_update_banner(frame: &mut Frame, area: Rect, theme: &Theme, version: &
 fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: usize, theme: &Theme) {
     let width = area.width as usize;
     let cols = if width >= 80 { 2 } else { 1 };
-    let total_rows = (sessions.len() + cols - 1) / cols;
+    let total_rows = sessions.len().div_ceil(cols);
 
     const CARD_HEIGHT: u16 = 5;
     let visible_rows = (area.height / CARD_HEIGHT) as usize;
@@ -122,7 +123,7 @@ fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: 
                 .split(row_chunks[visible_row]);
 
             if col < col_chunks.len() {
-                render_card(frame, col_chunks[col], &sessions[i], i == selected, theme);
+                render_card(frame, col_chunks[col], sessions[i], i == selected, theme);
             }
         }
     }
