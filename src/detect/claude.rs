@@ -15,6 +15,7 @@ struct SessionFile {
     #[serde(rename = "sessionId")]
     session_id: String,
     cwd: String,
+    status: Option<String>,
 }
 
 fn sessions_dir() -> Option<PathBuf> {
@@ -76,21 +77,37 @@ fn load_session(
         }
     }
 
+    // Claude Code rewrites the per-PID session file's sessionId after a
+    // --resume, but the actual transcript JSONL keeps the original id. Trust
+    // the command line as the source of truth — both for finding the JSONL and
+    // as nerve's canonical session id, so the registry isn't churned every
+    // time Claude rewrites sf.session_id mid-run.
+    let resolved_id = process::resume_session_id(&proc.args)
+        .unwrap_or(sf.session_id.as_str())
+        .to_string();
+
     let cwd = PathBuf::from(&sf.cwd);
-    let mut session = Session::new(sf.session_id.clone(), cwd.clone());
+    let mut session = Session::new(resolved_id.clone(), cwd.clone());
     session.pid = Some(sf.pid);
 
     session.tty = process::get_tty_for_pid(procs, sf.pid);
     session.cpu_percent = process::get_cpu_for_pid(procs, sf.pid);
     session.branch = detect_branch(&cwd);
 
-    let jsonl_path = find_jsonl(&sf.session_id, &cwd);
+    let jsonl_path = find_jsonl(&resolved_id, &cwd);
     if let Some(ref jp) = jsonl_path {
         session.state = infer_state_from_jsonl(jp, sf.pid, procs, child_map);
         session.jsonl_path = Some(jp.clone());
         session.jsonl_age_secs = Some(file_age_secs(jp));
     } else {
-        session.state = infer_state_from_cpu(session.cpu_percent);
+        // No transcript to read. Trust Claude's own status field if it set one;
+        // otherwise default to Idle. CPU is deliberately not used — Claude's
+        // TUI burns CPU on keystroke rendering, which would otherwise flip an
+        // idle session to Processing whenever the user is typing.
+        session.state = match sf.status.as_deref() {
+            Some("busy") => SessionState::Processing,
+            _ => SessionState::Idle,
+        };
     }
 
     if let SessionState::ToolRunning(ref tool) = session.state {
@@ -164,8 +181,14 @@ pub fn infer_state_from_jsonl(
             }
             return SessionState::Stale;
         }
+        // Stick with the tail-derived Processing state only when there's
+        // independent evidence the session is still doing work: a recent JSONL
+        // write (Claude writes on every roundtrip / tool result) or a
+        // caffeinate child (long-running task holding the system awake).
+        // CPU is deliberately NOT used here — Claude's TUI burns CPU on
+        // keystroke rendering, which would otherwise flip an idle session to
+        // Processing whenever the user is typing.
         if mtime_age <= 300.0
-            || cpu > 5.0
             || process::has_child_named(procs, child_map, pid, "caffeinate")
         {
             return state;
@@ -173,18 +196,11 @@ pub fn infer_state_from_jsonl(
         return SessionState::Idle;
     }
 
-    if cpu > 5.0 || process::has_child_named(procs, child_map, pid, "caffeinate") {
-        return SessionState::Processing;
-    }
+    // No state-bearing entry found in the tail. With Claude Code 2.x the JSONL
+    // is padded with metadata types (file-history-snapshot, last-prompt, etc.)
+    // that can crowd out real state at the tail; treating that as Processing
+    // misfires whenever the user is typing and the Claude TUI is burning CPU.
     SessionState::Idle
-}
-
-fn infer_state_from_cpu(cpu: f32) -> SessionState {
-    if cpu > 5.0 {
-        SessionState::Processing
-    } else {
-        SessionState::Idle
-    }
 }
 
 fn file_age_secs(path: &Path) -> f64 {
@@ -200,7 +216,12 @@ fn read_tail_state(path: &Path) -> Option<SessionState> {
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
 
-    let seek_pos = len.saturating_sub(8192);
+    // Claude Code 2.x writes large entries that we skip past:
+    // - file-history-snapshot: ~22KB each
+    // - assistant entries with extended thinking: 50–100KB+
+    // The tail window has to step past at least one of each, so we read a
+    // generous slice rather than try to parse the whole file.
+    let seek_pos = len.saturating_sub(262_144);
     file.seek(SeekFrom::Start(seek_pos)).ok()?;
 
     let mut buf = String::new();

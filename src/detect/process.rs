@@ -7,11 +7,12 @@ pub struct ProcessInfo {
     pub tty: String,
     pub comm: String,
     pub cpu: f32,
+    pub args: String,
 }
 
 pub fn scan_processes() -> Vec<ProcessInfo> {
     let output = match std::process::Command::new("ps")
-        .args(["-eo", "pid,ppid,tty,comm,%cpu"])
+        .args(["-eo", "pid,ppid,tty,comm,%cpu,args"])
         .stderr(std::process::Stdio::null())
         .output()
     {
@@ -28,17 +29,55 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
 }
 
 fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
-    }
+    // Split off the first five whitespace-separated columns and keep everything
+    // after as `args` verbatim. The `comm` column can contain a path with
+    // slashes but never whitespace, so this is unambiguous.
+    let mut iter = line.split_whitespace();
+    let pid = iter.next()?.parse().ok()?;
+    let ppid = iter.next()?.parse().ok()?;
+    let tty = iter.next()?.to_string();
+    let comm = iter.next()?.to_string();
+    let cpu = iter.next()?.parse().unwrap_or(0.0);
+    let args = iter.collect::<Vec<_>>().join(" ");
     Some(ProcessInfo {
-        pid: parts[0].parse().ok()?,
-        ppid: parts[1].parse().ok()?,
-        tty: parts[2].to_string(),
-        comm: parts[3].to_string(),
-        cpu: parts[4].parse().unwrap_or(0.0),
+        pid,
+        ppid,
+        tty,
+        comm,
+        cpu,
+        args,
     })
+}
+
+pub fn resume_session_id(args: &str) -> Option<&str> {
+    // Claude Code rewrites the per-PID session file's sessionId after a
+    // --resume, but the actual transcript JSONL keeps the original id. The
+    // command line is the only place that still names it correctly.
+    let mut tokens = args.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok == "--resume" || tok == "-r" {
+            return tokens.next().filter(|v| !v.is_empty());
+        }
+        if let Some(rest) = tok.strip_prefix("--resume=") {
+            return Some(rest).filter(|v| !v.is_empty());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resume_session_id;
+
+    #[test]
+    fn resume_session_id_handles_all_forms() {
+        assert_eq!(resume_session_id("claude --resume abc-123 --foo"), Some("abc-123"));
+        assert_eq!(resume_session_id("claude -r abc-123"), Some("abc-123"));
+        assert_eq!(resume_session_id("claude --resume=abc-123"), Some("abc-123"));
+        assert_eq!(resume_session_id("claude --foo"), None);
+        assert_eq!(resume_session_id("claude --resume"), None);
+        assert_eq!(resume_session_id("claude --resume="), None);
+    }
 }
 
 pub fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
