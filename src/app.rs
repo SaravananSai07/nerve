@@ -10,6 +10,7 @@ use crate::notify::Notifier;
 use crate::paths::Paths;
 use crate::platform::{Bridge, SessionTarget};
 use crate::signals::ShutdownFlag;
+use crate::state::filtered_view::FilteredView;
 use crate::state::session::{Session, SessionId, SessionState};
 use crate::state::prefs::Prefs;
 use crate::state::registry::SessionRegistry;
@@ -58,6 +59,7 @@ pub struct App {
     shutdown: ShutdownFlag,
     config: Config,
     registry: SessionRegistry,
+    filtered: FilteredView,
     theme: Theme,
     theme_index: usize,
     bridge: Bridge,
@@ -104,6 +106,7 @@ impl App {
             shutdown,
             config,
             registry: SessionRegistry::new(),
+            filtered: FilteredView::new(),
             theme,
             theme_index,
             bridge,
@@ -133,18 +136,19 @@ impl App {
             // self-aliasing borrow with the immutable reads elsewhere in the closure
             let mut preview_scroll = self.preview_scroll;
 
+            // Refresh the cached FilteredView before drawing. On steady
+            // state (registry version + query unchanged) this is a single
+            // comparison; only mutations or query keystrokes trigger a
+            // rebuild. Closes A1 — the filter is no longer computed
+            // multiple times per frame.
+            self.filtered
+                .refresh(&self.registry, self.search_query.as_deref());
+
             terminal.draw(|frame| {
                 let area = frame.area();
                 self.cols = if area.width >= 80 { 2 } else { 1 };
 
-                let all = self.registry.sorted_sessions();
-                let visible: Vec<&Session> = match self.search_query.as_deref() {
-                    Some(q) if !q.is_empty() => {
-                        let q_lower = q.to_ascii_lowercase();
-                        all.into_iter().filter(|s| s.matches_query(&q_lower)).collect()
-                    }
-                    _ => all,
-                };
+                let visible: Vec<&Session> = self.filtered.iter(&self.registry).collect();
 
                 cards::render(
                     frame,
@@ -579,6 +583,9 @@ impl App {
             session.name = new_name;
             session.renamed = true;
         }
+        // Name change affects both filter (matches_query) and Name-sort
+        // ordering, so the FilteredView cache must rebuild.
+        self.registry.bump_version();
         self.apply_filter();
     }
 
@@ -610,10 +617,14 @@ impl App {
         }
     }
 
-    /// Clamp `selected` to the current visible count. Call whenever the
-    /// filter result may have shrunk: keystroke, sort, rename, refresh.
+    /// Refresh the cached `FilteredView` against the current registry +
+    /// search query, then clamp `selected` to the new visible count.
+    /// Call whenever the filter result may have shrunk: keystroke, sort,
+    /// rename, refresh.
     fn apply_filter(&mut self) {
-        let count = self.num_filtered();
+        self.filtered
+            .refresh(&self.registry, self.search_query.as_deref());
+        let count = self.filtered.len();
         if count == 0 {
             self.selected = 0;
         } else if self.selected >= count {
@@ -622,30 +633,11 @@ impl App {
     }
 
     fn num_filtered(&self) -> usize {
-        match self.search_query.as_deref() {
-            Some(q) if !q.is_empty() => {
-                let q_lower = q.to_ascii_lowercase();
-                self.registry
-                    .sorted_sessions()
-                    .iter()
-                    .filter(|s| s.matches_query(&q_lower))
-                    .count()
-            }
-            _ => self.registry.len(),
-        }
+        self.filtered.len()
     }
 
     fn nth_filtered(&self, index: usize) -> Option<&Session> {
-        let all = self.registry.sorted_sessions();
-        match self.search_query.as_deref() {
-            Some(q) if !q.is_empty() => {
-                let q_lower = q.to_ascii_lowercase();
-                all.into_iter()
-                    .filter(|s| s.matches_query(&q_lower))
-                    .nth(index)
-            }
-            _ => all.into_iter().nth(index),
-        }
+        self.filtered.get(&self.registry, index)
     }
 
     fn tick(&mut self) {
@@ -678,6 +670,8 @@ impl App {
         for id in stale_ids {
             self.registry.mark_stale(id.as_str());
         }
+
+        let mut any_transition = false;
 
         for session in discovered {
             let detected_state = session.state.clone();
@@ -724,6 +718,7 @@ impl App {
 
                 let transitioned = existing.propose_state(detected_state);
                 if transitioned {
+                    any_transition = true;
                     let current = existing.state.clone();
                     if existing.last_notified_state.as_ref() != Some(&current) {
                         let target = SessionTarget {
@@ -762,6 +757,14 @@ impl App {
 
         self.registry.re_disambiguate_names();
         self.registry.shift_all_activity();
+
+        // Any confirmed state transition has to invalidate the cached
+        // FilteredView so the next refresh sees the new sort order /
+        // membership. upsert / mark_stale / cycle_sort already bump
+        // automatically.
+        if any_transition {
+            self.registry.bump_version();
+        }
 
         let count = self.registry.len();
         if count > 0 && self.selected >= count {

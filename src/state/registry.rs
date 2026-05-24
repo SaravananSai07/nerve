@@ -33,6 +33,13 @@ pub struct SessionRegistry {
     sessions: HashMap<SessionId, Session>,
     order: Vec<SessionId>,
     sort_mode: SortMode,
+    /// Monotonic counter incremented whenever a mutation could affect the
+    /// rendered/filtered view (insertion, removal, state change, rename,
+    /// activity tick, sort change). Consumers like `FilteredView` snapshot
+    /// the value and rebuild only when it changes — eliminating the
+    /// per-frame filter-rebuild cost when nothing has actually changed
+    /// (closes A1).
+    version: u64,
 }
 
 impl SessionRegistry {
@@ -41,7 +48,19 @@ impl SessionRegistry {
             sessions: HashMap::new(),
             order: Vec::new(),
             sort_mode: SortMode::Stable,
+            version: 0,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Bump the version counter. Public so callers that mutate sessions
+    /// via `get_mut` can announce that the rendered view should rebuild.
+    pub fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
     }
 
     pub fn upsert(&mut self, session: Session) {
@@ -50,10 +69,17 @@ impl SessionRegistry {
             self.order.push(id.clone());
         }
         self.sessions.insert(id, session);
+        self.bump_version();
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Session> {
+        self.sessions.get(id)
     }
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
         // SessionId: Borrow<str>, so HashMap lookups with &str work.
+        // Callers should call `bump_version()` if the mutation affects
+        // the rendered view (state, name, etc.).
         self.sessions.get_mut(id)
     }
 
@@ -87,6 +113,7 @@ impl SessionRegistry {
 
     pub fn cycle_sort(&mut self) {
         self.sort_mode = self.sort_mode.next();
+        self.bump_version();
     }
 
     pub fn sort_mode(&self) -> SortMode {
@@ -118,6 +145,7 @@ impl SessionRegistry {
     pub fn mark_stale(&mut self, id: &str) {
         if let Some(session) = self.sessions.get_mut(id) {
             session.set_state(SessionState::Stale);
+            self.version = self.version.wrapping_add(1);
         }
     }
 
@@ -129,6 +157,7 @@ impl SessionRegistry {
             .map(|s| s.cwd.clone())
             .collect();
 
+        let before = self.sessions.len();
         self.sessions.retain(|_, s| {
             if s.state != SessionState::Stale {
                 return true;
@@ -139,13 +168,22 @@ impl SessionRegistry {
             }
             s.state_duration().as_secs() <= max_age_secs
         });
-        self.order.retain(|id| self.sessions.contains_key(id));
+        if self.sessions.len() != before {
+            self.order.retain(|id| self.sessions.contains_key(id));
+            self.bump_version();
+        }
     }
 
     pub fn shift_all_activity(&mut self) {
         for session in self.sessions.values_mut() {
             session.activity.shift_if_needed();
         }
+        // No version bump: the cached `FilteredView` stores only session
+        // IDs, not their content. Renderers iterate the cache and
+        // resolve `&Session` references on demand, which means activity
+        // sparkline changes flow through automatically without needing
+        // the filter cache to invalidate. Bumping here would defeat the
+        // steady-state win.
     }
 
     pub fn re_disambiguate_names(&mut self) {
@@ -165,10 +203,14 @@ impl SessionRegistry {
             base_to_ids.entry(base).or_default().push(id.clone());
         }
 
+        let mut any_renamed = false;
         for (base, mut ids) in base_to_ids {
             if ids.len() <= 1 && !reserved.contains(&base) {
                 if let Some(session) = self.sessions.get_mut(&ids[0]) {
-                    session.name = base;
+                    if session.name != base {
+                        session.name = base;
+                        any_renamed = true;
+                    }
                 }
                 continue;
             }
@@ -183,9 +225,15 @@ impl SessionRegistry {
                     }
                 };
                 if let Some(session) = self.sessions.get_mut(id) {
-                    session.name = candidate;
+                    if session.name != candidate {
+                        session.name = candidate;
+                        any_renamed = true;
+                    }
                 }
             }
+        }
+        if any_renamed {
+            self.bump_version();
         }
     }
 
