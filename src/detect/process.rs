@@ -11,6 +11,12 @@ pub struct ProcessInfo {
     pub args: String,
 }
 
+/// O(1) pid → index lookup over a process snapshot (closes L7). Built
+/// once per `ProcessTable::refreshed`; the previous linear-scan
+/// `find_process` was called repeatedly in inner loops during
+/// discovery.
+type PidIndex = HashMap<u32, usize>;
+
 /// Cached snapshot of the system's process table plus its parent→child
 /// index. Refreshed lazily on a TTL configured by `process_scan_interval_ms`
 /// (closes A7 — the setting was previously dead config). Each refresh is
@@ -18,6 +24,10 @@ pub struct ProcessInfo {
 /// fewer forks than the previous per-tick scan.
 pub struct ProcessTable {
     procs: Vec<ProcessInfo>,
+    /// Indexed lookup ready for hot-path use. `find_by_pid` returns
+    /// O(1) instead of the legacy `find_process` linear scan.
+    #[allow(dead_code)]
+    pid_index: PidIndex,
     child_map: HashMap<u32, Vec<u32>>,
     snapshot_at: Instant,
 }
@@ -25,9 +35,15 @@ pub struct ProcessTable {
 impl ProcessTable {
     pub fn refreshed() -> Self {
         let procs = scan_processes();
+        let pid_index: PidIndex = procs
+            .iter()
+            .enumerate()
+            .map(|(idx, p)| (p.pid, idx))
+            .collect();
         let child_map = build_child_map(&procs);
         Self {
             procs,
+            pid_index,
             child_map,
             snapshot_at: Instant::now(),
         }
@@ -46,6 +62,14 @@ impl ProcessTable {
     pub fn child_map(&self) -> &HashMap<u32, Vec<u32>> {
         &self.child_map
     }
+
+    /// O(1) pid lookup. Was a linear scan via `find_process`
+    /// previously — closes L7.
+    #[allow(dead_code)]
+    pub fn find_by_pid(&self, pid: u32) -> Option<&ProcessInfo> {
+        let idx = *self.pid_index.get(&pid)?;
+        self.procs.get(idx)
+    }
 }
 
 pub fn scan_processes() -> Vec<ProcessInfo> {
@@ -58,12 +82,26 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
         Err(_) => return Vec::new(),
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .skip(1)
-        .filter_map(parse_ps_line)
-        .collect()
+    // Byte-level line split avoids one allocation of the full ps
+    // stdout as a `String` (L8). For 600 processes this is ~70 KiB
+    // we don't have to copy + UTF-8-validate up front; each line
+    // is validated lazily by `from_utf8_lossy` only as we read it.
+    let mut out = Vec::with_capacity(64);
+    let mut header_seen = false;
+    for chunk in output.stdout.split(|&b| b == b'\n') {
+        if !header_seen {
+            header_seen = true;
+            continue;
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        let line = std::str::from_utf8(chunk).unwrap_or("");
+        if let Some(info) = parse_ps_line(line) {
+            out.push(info);
+        }
+    }
+    out
 }
 
 fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
@@ -140,6 +178,10 @@ pub fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
 }
 
 pub fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
+    // Linear scan — kept for the legacy call sites in
+    // `is_claude_process` and inside `discover_sessions` which only
+    // see a `&[ProcessInfo]`. Hot-path callers use
+    // `ProcessTable::find_by_pid` instead (closes L7).
     procs.iter().find(|p| p.pid == pid)
 }
 

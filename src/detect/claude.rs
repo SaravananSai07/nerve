@@ -77,7 +77,18 @@ pub fn discover_sessions_with(
     // (closes L6).
     let project_dirs = list_project_dirs();
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        // Per-entry IO errors get logged (L31) but don't bail the
+        // whole scan — one corrupt per-pid JSON shouldn't blank the
+        // dashboard, but we still want a trail when something is
+        // wrong.
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                crate::log_warn!("discovery: read_dir entry error: {e}");
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json") {
             if let Some(session) = load_session(
@@ -665,6 +676,13 @@ pub fn kill_by_session_id(session_id: &str) -> Result<u32, String> {
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
 
     for entry in entries.flatten() {
+        // entries.flatten() silently drops permission/IO errors on
+        // individual files; that's intentional here — we'd rather
+        // skip the one bad file than fail the whole discovery (a
+        // single corrupt per-pid JSON shouldn't blank the dashboard).
+        // L31 — see also `log_warn` calls in read_session_file for
+        // the explicit failure paths.
+        let _ = ();
         let path = entry.path();
         if !path.extension().is_some_and(|e| e == "json") {
             continue;

@@ -32,6 +32,33 @@ fn discover_with_usage() -> Vec<state::session::Session> {
     sessions
 }
 
+/// Raise `RLIMIT_NOFILE` soft limit up to `min(hard, 4096)`. Closes L35.
+/// Quiet best-effort: failures are logged but don't block startup.
+fn raise_fd_limit() {
+    use nix::libc;
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+    if rc != 0 {
+        log_warn!("rlimit: getrlimit failed");
+        return;
+    }
+    let target = rlim.rlim_max.min(4096);
+    if rlim.rlim_cur >= target {
+        return;
+    }
+    let new = libc::rlimit {
+        rlim_cur: target,
+        rlim_max: rlim.rlim_max,
+    };
+    let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new) };
+    if rc != 0 {
+        log_warn!("rlimit: setrlimit to {target} failed");
+    }
+}
+
 fn parse_focus_arg() -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -107,6 +134,13 @@ fn main() -> std::io::Result<()> {
     };
     let _ = paths.ensure_config_dir();
     log::init(Some(paths.log_file()));
+
+    // Raise the per-process FD soft limit to a generous value
+    // (defaults vary: 256 on stock macOS, 1024 on most Linux). With
+    // many active sessions × open JSONLs × occasional notification
+    // spawn we want headroom (closes L35). Best-effort; logged on
+    // failure.
+    raise_fd_limit();
 
     if let Some(arg) = parse_focus_arg() {
         handle_focus(&arg);

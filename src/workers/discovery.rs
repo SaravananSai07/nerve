@@ -68,7 +68,20 @@ pub fn spawn(
                 }
 
                 table.refresh_if_stale(process_scan_interval);
+                let scan_start = std::time::Instant::now();
                 let sessions = discover_sessions_with(&table, &mut cache);
+                let scan_elapsed = scan_start.elapsed();
+                // Budget heuristic (closes L29). On a fast laptop a
+                // full scan is ~10-50 ms; persistent budget overruns
+                // mean disk or network mount slowness and warrant a
+                // trace.
+                if scan_elapsed > Duration::from_millis(750) {
+                    log_warn!(
+                        "discovery: scan took {} ms ({} sessions)",
+                        scan_elapsed.as_millis(),
+                        sessions.len()
+                    );
+                }
                 if tx.send(sessions).is_err() {
                     // UI dropped the receiver — exit quietly.
                     return;

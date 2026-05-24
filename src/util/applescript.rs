@@ -1,3 +1,4 @@
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Output, Stdio};
 
 /// Run an AppleScript with values passed via `argv`, never interpolated into
@@ -11,6 +12,7 @@ pub fn run(script: &str, args: &[&str]) -> std::io::Result<Output> {
     for a in args {
         cmd.arg(a);
     }
+    detach_from_pgrp(&mut cmd);
     cmd.stdin(Stdio::null()).output()
 }
 
@@ -22,8 +24,25 @@ pub fn spawn(script: &str, args: &[&str]) -> std::io::Result<std::process::Child
     for a in args {
         cmd.arg(a);
     }
+    detach_from_pgrp(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+}
+
+/// Run `setsid()` in the child between fork and exec so the child
+/// becomes its own session leader and is no longer in nerve's
+/// process group. Closes L14 — a SIGTERM to nerve no longer
+/// propagates to notification subprocs mid-display.
+fn detach_from_pgrp(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            // setsid() returns -1 only on the rare case where we're
+            // already the process-group leader; the spawn still
+            // succeeds, so an error here is non-fatal.
+            let _ = nix::libc::setsid();
+            Ok(())
+        });
+    }
 }
