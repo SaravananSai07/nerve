@@ -77,6 +77,11 @@ pub struct App {
     /// on `ps -eo` forks or slow JSONL reads (closes A20). The UI
     /// drains the latest snapshot per tick via `try_recv`.
     discovery: DiscoveryWorker,
+    /// True iff the host terminal currently has focus. Drives the
+    /// "skip the draw" optimisation in the main loop — when nerve
+    /// isn't visible we don't pay for ratatui's render at all,
+    /// just keep the discovery worker running (L26).
+    focused: bool,
     claude_installed: bool,
     /// Built-ins + any user themes loaded from ~/.config/nerve/themes/
     /// at startup (closes A13). Cycle order is deterministic.
@@ -155,6 +160,7 @@ impl App {
             registry: SessionRegistry::new(),
             filtered: FilteredView::new(),
             discovery,
+            focused: true,
             claude_installed,
             themes,
             theme,
@@ -177,6 +183,36 @@ impl App {
         }
     }
 
+    /// Floor each loop iteration to `MIN_LOOP_INTERVAL` so a runaway
+    /// poll-true (closed stdin returning POLLHUP, etc.) can't burn
+    /// CPU at MHz rates. Defends against the L1 / L33 incident class.
+    fn floor_iteration(&self, loop_start: std::time::Instant) {
+        let elapsed = loop_start.elapsed();
+        if elapsed < MIN_LOOP_INTERVAL {
+            std::thread::sleep(MIN_LOOP_INTERVAL - elapsed);
+        }
+    }
+
+    /// What the loop does when nerve is unfocused (L26): drain
+    /// pending events to keep the focus/quit/signal flags fresh and
+    /// pump discovery once, but skip the entire draw path. With FS
+    /// watcher driving the worker, idle CPU drops to near zero.
+    fn tick_unfocused(&mut self) -> std::io::Result<()> {
+        // Drain any queued events so a FocusGained or quit keystroke
+        // arrives promptly when the user comes back. Block up to a
+        // beat so we don't busy-poll while hidden.
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) => self.handle_key(key.code, key.modifiers),
+                Event::FocusGained => self.focused = true,
+                Event::FocusLost => self.focused = false,
+                _ => {}
+            }
+        }
+        self.tick();
+        Ok(())
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         // Seed the registry from the worker's first snapshot so the
         // initial paint isn't blank. Generous 500 ms cap — in practice
@@ -195,6 +231,16 @@ impl App {
             // preview_scroll is mutated by the preview overlay; hoist to avoid a
             // self-aliasing borrow with the immutable reads elsewhere in the closure
             let mut preview_scroll = self.preview_scroll;
+
+            // Skip the (expensive) draw when nerve isn't focused — the
+            // terminal is showing whatever's underneath us anyway, and
+            // the discovery worker keeps the registry warm for when we
+            // come back (L26).
+            if !self.focused {
+                self.tick_unfocused()?;
+                self.floor_iteration(loop_start);
+                continue;
+            }
 
             // Refresh the cached FilteredView before drawing. On steady
             // state (registry version + query unchanged) this is a single
@@ -284,8 +330,23 @@ impl App {
                 match event::read()? {
                     Event::Key(key) => self.handle_key(key.code, key.modifiers),
                     Event::FocusGained => {
+                        self.focused = true;
                         if let Some(name) = self.visited_session.take() {
                             self.status_message = Some(format!("returned from '{name}'"));
+                        }
+                    }
+                    Event::FocusLost => {
+                        self.focused = false;
+                    }
+                    Event::Resize(_, _) => {
+                        // Coalesce burst resize events that fire while
+                        // the user drags a window edge — drain every
+                        // queued event before the next render so we
+                        // don't paint once per pixel (L11).
+                        while event::poll(Duration::from_millis(0))? {
+                            if !matches!(event::read()?, Event::Resize(_, _)) {
+                                break;
+                            }
                         }
                     }
                     _ => {}
@@ -294,14 +355,7 @@ impl App {
                 self.tick();
             }
 
-            // Floor the iteration time. Under normal operation `event::poll`
-            // consumes the refresh interval naturally; this floor only matters
-            // when the event source misbehaves (closed tty returning POLLHUP
-            // immediately, etc.) and stops the loop from spinning at 100% CPU.
-            let elapsed = loop_start.elapsed();
-            if elapsed < MIN_LOOP_INTERVAL {
-                std::thread::sleep(MIN_LOOP_INTERVAL - elapsed);
-            }
+            self.floor_iteration(loop_start);
         }
 
         if !stdin_is_controlling_tty() {
