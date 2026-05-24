@@ -127,6 +127,7 @@ impl App {
         let discovery = crate::workers::discovery::spawn(
             refresh_interval,
             process_scan_interval,
+            paths.sessions_dir(),
             shutdown.clone(),
         )
         .expect("discovery worker must start");
