@@ -15,6 +15,8 @@ const BINDINGS: &[(&str, &str)] = &[
     ("t", "Cycle theme"),
     ("n", "Rename session"),
     ("m", "Toggle notification mute"),
+    ("/", "Search sessions (fuzzy)"),
+    ("Esc", "Clear search filter"),
     ("1-9", "Jump to session"),
     ("?", "Toggle this help"),
     ("q", "Quit"),

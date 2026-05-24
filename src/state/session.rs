@@ -164,6 +164,35 @@ impl Session {
     }
 }
 
+/// `query_lower` must already be ASCII-lowercase; lowercase the query once
+/// per filter pass at the call site to avoid per-target allocations.
+/// ASCII-only case folding — sufficient for filenames and paths.
+pub fn fuzzy_match(query_lower: &str, target: &str) -> bool {
+    let mut qi = query_lower.chars().peekable();
+    for tc in target.chars() {
+        if qi.peek().copied() == Some(tc.to_ascii_lowercase()) {
+            qi.next();
+        }
+    }
+    qi.peek().is_none()
+}
+
+impl Session {
+    pub fn matches_query(&self, query_lower: &str) -> bool {
+        if query_lower.is_empty() {
+            return true;
+        }
+        fuzzy_match(query_lower, &self.name)
+            || self
+                .cwd
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|dir| fuzzy_match(query_lower, dir))
+                .unwrap_or(false)
+            || fuzzy_match(query_lower, &self.cwd.to_string_lossy())
+    }
+}
+
 impl Serialize for Session {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -224,5 +253,107 @@ impl ActivityHistory {
             .iter()
             .map(|&active| if active { '▓' } else { '░' })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn fuzzy_match_exact() {
+        assert!(fuzzy_match("my-project", "my-project"));
+    }
+
+    #[test]
+    fn fuzzy_match_substring() {
+        assert!(fuzzy_match("proj", "my-project"));
+    }
+
+    #[test]
+    fn fuzzy_match_case_insensitive() {
+        assert!(fuzzy_match("my-project", "MY-PROJECT"));
+    }
+
+    #[test]
+    fn fuzzy_match_middle() {
+        assert!(fuzzy_match("pro", "my-project"));
+    }
+
+    #[test]
+    fn fuzzy_match_no_match() {
+        assert!(!fuzzy_match("xyz", "my-project"));
+    }
+
+    #[test]
+    fn fuzzy_match_non_contiguous() {
+        assert!(fuzzy_match("myp", "my-project"));
+    }
+
+    #[test]
+    fn fuzzy_match_wrong_order() {
+        assert!(!fuzzy_match("pmy", "my-project"));
+    }
+
+    #[test]
+    fn fuzzy_match_empty_query() {
+        assert!(fuzzy_match("", "anything"));
+    }
+
+    #[test]
+    fn fuzzy_match_empty_target() {
+        assert!(!fuzzy_match("a", ""));
+    }
+
+    #[test]
+    fn matches_query_fuzzy_by_name() {
+        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-long-project"));
+        assert!(session.matches_query("mlp"));
+    }
+
+    #[test]
+    fn matches_query_fuzzy_by_dir() {
+        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-long-project"));
+        assert!(session.matches_query("mylong"));
+    }
+
+    #[test]
+    fn matches_query_by_name() {
+        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
+        assert!(session.matches_query("my-project"));
+        assert!(session.matches_query("my"));
+    }
+
+    #[test]
+    fn matches_query_by_directory_name() {
+        let mut session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
+        session.name = "Custom Name".into();
+        assert!(session.matches_query("project"));
+    }
+
+    #[test]
+    fn matches_query_by_path_partial() {
+        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
+        assert!(session.matches_query("home"));
+        assert!(session.matches_query("user"));
+    }
+
+    #[test]
+    fn matches_query_fuzzy() {
+        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-long-project-name"));
+        assert!(session.matches_query("mlpn"));
+    }
+
+    #[test]
+    fn matches_query_no_match() {
+        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
+        assert!(!session.matches_query("nonexistent"));
+    }
+
+    #[test]
+    fn matches_query_empty() {
+        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
+        assert!(session.matches_query(""));
     }
 }

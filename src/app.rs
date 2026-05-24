@@ -1,22 +1,53 @@
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, EnableFocusChange, DisableFocusChange};
-use crossterm::execute;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::DefaultTerminal;
 
 use crate::config::Config;
 use crate::detect::claude::{self, LogEntry};
+use crate::log_info;
 use crate::notify::Notifier;
+use crate::paths::Paths;
 use crate::platform::{Bridge, SessionTarget};
+use crate::signals::ShutdownFlag;
+use crate::state::session::Session;
 use crate::state::prefs::Prefs;
 use crate::state::registry::SessionRegistry;
 use crate::state::session::SessionState;
 use crate::tui::{cards, confirm_kill, confirm_preview, help, preview, rename};
 use crate::tui::theme::Theme;
 
+/// Lower bound on iteration time. Defends the loop against runaway poll-true
+/// situations (closed stdin returning POLLHUP, etc.) without introducing
+/// noticeable input lag for human typing (50 ms ≈ 20 Hz cap).
+const MIN_LOOP_INTERVAL: Duration = Duration::from_millis(50);
+
+/// True when the given fd is attached to a controlling terminal. When Ghostty
+/// (or any host terminal) tears the pty down without delivering SIGHUP, this
+/// is the canary that lets us exit cleanly instead of orphaning.
+fn is_controlling_tty<F: std::os::fd::AsFd>(fd: F) -> bool {
+    nix::unistd::tcgetpgrp(fd.as_fd()).is_ok()
+}
+
+fn stdin_is_controlling_tty() -> bool {
+    is_controlling_tty(std::io::stdin())
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+
+    #[test]
+    fn devnull_is_not_a_controlling_tty() {
+        let dev_null = std::fs::File::open("/dev/null").expect("/dev/null open");
+        assert!(!is_controlling_tty(&dev_null));
+    }
+}
+
 enum Overlay {
     None,
     Help,
+    Search,
     Rename(String),
     Preview,
     ConfirmKill { name: String, id: String },
@@ -24,6 +55,8 @@ enum Overlay {
 }
 
 pub struct App {
+    paths: Paths,
+    shutdown: ShutdownFlag,
     config: Config,
     registry: SessionRegistry,
     theme: Theme,
@@ -32,6 +65,7 @@ pub struct App {
     selected: usize,
     cols: usize,
     overlay: Overlay,
+    search_query: Option<String>,
     status_message: Option<String>,
     should_quit: bool,
     notifier: Notifier,
@@ -45,8 +79,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
-        let config = Config::load();
+    pub fn new(paths: Paths, shutdown: ShutdownFlag) -> Self {
+        let config = Config::load(&paths);
         let theme_name = &config.appearance.theme;
         let theme_index = crate::tui::theme::THEME_NAMES
             .iter()
@@ -60,12 +94,15 @@ impl App {
             _ => None,
         };
         let notifier = Notifier::new(config.notifications.clone(), terminal_app);
-        let prefs = Prefs::load();
+        let prefs = Prefs::load(&paths);
 
-        crate::updater::maybe_check_in_background(config.updates.check_on_launch);
-        let update_banner = crate::updater::pending_update(env!("CARGO_PKG_VERSION"));
+        crate::updater::maybe_check_in_background(&paths, config.updates.check_on_launch);
+        let update_banner = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"));
+        let status_message = config.load_error.clone();
 
         Self {
+            paths,
+            shutdown,
             config,
             registry: SessionRegistry::new(),
             theme,
@@ -74,7 +111,8 @@ impl App {
             selected: 0,
             cols: 2,
             overlay: Overlay::None,
-            status_message: None,
+            search_query: None,
+            status_message,
             should_quit: false,
             notifier,
             prefs,
@@ -88,29 +126,73 @@ impl App {
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
-        execute!(std::io::stdout(), EnableFocusChange)?;
         self.refresh_sessions();
 
-        while !self.should_quit {
+        while !self.should_quit && !self.shutdown.requested() && stdin_is_controlling_tty() {
+            let loop_start = std::time::Instant::now();
+            // preview_scroll is mutated by the preview overlay; hoist to avoid a
+            // self-aliasing borrow with the immutable reads elsewhere in the closure
+            let mut preview_scroll = self.preview_scroll;
+
             terminal.draw(|frame| {
                 let area = frame.area();
                 self.cols = if area.width >= 80 { 2 } else { 1 };
+
+                let all = self.registry.sorted_sessions();
+                let visible: Vec<&Session> = match self.search_query.as_deref() {
+                    Some(q) if !q.is_empty() => {
+                        let q_lower = q.to_ascii_lowercase();
+                        all.into_iter().filter(|s| s.matches_query(&q_lower)).collect()
+                    }
+                    _ => all,
+                };
+
                 cards::render(
                     frame,
                     area,
                     &self.registry,
+                    &visible,
                     self.selected,
                     &self.theme,
                     self.status_message.as_deref(),
                     self.prefs.notifications_muted,
                     self.update_banner.as_deref(),
+                    self.search_query.as_deref(),
                 );
                 match &self.overlay {
                     Overlay::Help => help::render(frame, &self.theme),
                     Overlay::Rename(buf) => rename::render(frame, &self.theme, buf),
+                    Overlay::Search => {
+                        let query = self.search_query.as_deref().unwrap_or("");
+                        let search_area = crate::tui::centered(frame.area(), 60, 3);
+                        frame.render_widget(ratatui::widgets::Clear, search_area);
+                        let block = ratatui::widgets::Block::default()
+                            .title(ratatui::text::Span::styled(
+                                format!(" search  ({} matches) ", visible.len()),
+                                ratatui::style::Style::default()
+                                    .fg(self.theme.processing)
+                                    .add_modifier(ratatui::style::Modifier::BOLD),
+                            ))
+                            .borders(ratatui::widgets::Borders::ALL)
+                            .border_type(ratatui::widgets::BorderType::Rounded)
+                            .border_style(ratatui::style::Style::default().fg(self.theme.processing));
+                        let inner = block.inner(search_area);
+                        frame.render_widget(block, search_area);
+                        let display = if query.is_empty() {
+                            " type to search (name, dir, path)... "
+                        } else {
+                            query
+                        };
+                        let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                            ratatui::text::Span::styled(
+                                format!("/{display}"),
+                                ratatui::style::Style::default().fg(self.theme.text),
+                            ),
+                        ));
+                        frame.render_widget(para, inner);
+                    }
                     Overlay::Preview => {
-                        let sessions = self.registry.sorted_sessions();
-                        if let Some(session) = sessions.get(self.selected) {
+                        if let Some(session) = visible.get(self.selected) {
                             preview::render(
                                 frame,
                                 &self.theme,
@@ -118,7 +200,7 @@ impl App {
                                 &self.preview_entries,
                                 &self.preview_lines,
                                 self.has_terminal_capture,
-                                &mut self.preview_scroll,
+                                &mut preview_scroll,
                             );
                         }
                     }
@@ -131,6 +213,8 @@ impl App {
                     Overlay::None => {}
                 }
             })?;
+
+            self.preview_scroll = preview_scroll;
 
             if event::poll(Duration::from_millis(self.config.general.refresh_interval_ms))? {
                 match event::read()? {
@@ -145,9 +229,23 @@ impl App {
             } else {
                 self.tick();
             }
+
+            // Floor the iteration time. Under normal operation `event::poll`
+            // consumes the refresh interval naturally; this floor only matters
+            // when the event source misbehaves (closed tty returning POLLHUP
+            // immediately, etc.) and stops the loop from spinning at 100% CPU.
+            let elapsed = loop_start.elapsed();
+            if elapsed < MIN_LOOP_INTERVAL {
+                std::thread::sleep(MIN_LOOP_INTERVAL - elapsed);
+            }
         }
 
-        execute!(std::io::stdout(), DisableFocusChange)?;
+        if !stdin_is_controlling_tty() {
+            log_info!("app: lost controlling tty; exiting cleanly");
+        } else if self.shutdown.requested() {
+            log_info!("app: shutdown signal received; exiting cleanly");
+        }
+
         Ok(())
     }
 
@@ -159,6 +257,10 @@ impl App {
                     KeyCode::Char('q') => self.should_quit = true,
                     _ => {}
                 }
+                return;
+            }
+            Overlay::Search => {
+                self.handle_search_key(code);
                 return;
             }
             Overlay::Rename(_) => {
@@ -199,7 +301,6 @@ impl App {
         }
 
         self.status_message = None;
-        let session_count = self.registry.len();
 
         match code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -207,8 +308,9 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Char('j') | KeyCode::Down => {
+                let count = self.num_filtered();
                 let next = self.selected + self.cols;
-                if session_count > 0 && next < session_count {
+                if count > 0 && next < count {
                     self.selected = next;
                 }
             }
@@ -224,8 +326,9 @@ impl App {
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
+                let count = self.num_filtered();
                 let col = self.selected % self.cols;
-                if col + 1 < self.cols && self.selected + 1 < session_count {
+                if col + 1 < self.cols && self.selected + 1 < count {
                     self.selected += 1;
                 }
             }
@@ -234,6 +337,7 @@ impl App {
             }
             KeyCode::Char('s') => {
                 self.registry.cycle_sort();
+                self.apply_filter();
             }
             KeyCode::Char('t') => {
                 self.cycle_theme();
@@ -252,19 +356,31 @@ impl App {
             }
             KeyCode::Char('m') => {
                 self.prefs.notifications_muted = !self.prefs.notifications_muted;
-                self.prefs.save();
+                self.prefs.save(&self.paths);
                 self.status_message = Some(if self.prefs.notifications_muted {
                     "notifications muted".into()
                 } else {
                     "notifications unmuted".into()
                 });
             }
+            KeyCode::Char('/') => {
+                self.search_query.get_or_insert_with(String::new);
+                self.overlay = Overlay::Search;
+            }
             KeyCode::Char('?') => {
                 self.overlay = Overlay::Help;
             }
+            KeyCode::Esc => {
+                if self.search_query.is_some() {
+                    self.search_query = None;
+                    self.apply_filter();
+                    self.status_message = None;
+                }
+            }
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                 let idx = (c as usize) - ('1' as usize);
-                if idx < session_count {
+                let count = self.num_filtered();
+                if idx < count {
                     self.selected = idx;
                 }
             }
@@ -292,7 +408,7 @@ impl App {
             }
             KeyCode::Char('d') => {
                 self.prefs.preview_flicker_accepted = true;
-                self.prefs.save();
+                self.prefs.save(&self.paths);
                 self.overlay = Overlay::None;
                 self.execute_preview_capture();
             }
@@ -305,8 +421,7 @@ impl App {
     }
 
     fn execute_preview_capture(&mut self) {
-        let sessions = self.registry.sorted_sessions();
-        let Some(session) = sessions.get(self.selected) else {
+        let Some(session) = self.nth_filtered(self.selected) else {
             return;
         };
 
@@ -340,8 +455,8 @@ impl App {
     }
 
     fn open_log_preview(&mut self) {
-        let sessions = self.registry.sorted_sessions();
-        if let Some(session) = sessions.get(self.selected) {
+        let session = self.nth_filtered(self.selected);
+        if let Some(session) = session {
             let jsonl_path = session.jsonl_path.clone();
             self.load_log_entries(&jsonl_path);
         } else {
@@ -362,16 +477,16 @@ impl App {
     }
 
     fn start_kill(&mut self) {
-        let sessions = self.registry.sorted_sessions();
-        if let Some(session) = sessions.get(self.selected) {
-            if session.state == SessionState::Stale {
-                self.status_message = Some("session is already stale".into());
-                return;
-            }
-            let name = session.name.clone();
-            let id = session.id.clone();
-            self.overlay = Overlay::ConfirmKill { name, id };
+        let Some(session) = self.nth_filtered(self.selected) else {
+            return;
+        };
+        if session.state == SessionState::Stale {
+            self.status_message = Some("session is already stale".into());
+            return;
         }
+        let name = session.name.clone();
+        let id = session.id.clone();
+        self.overlay = Overlay::ConfirmKill { name, id };
     }
 
     fn execute_kill(&mut self, name: &str, id: &str) {
@@ -389,10 +504,10 @@ impl App {
     }
 
     fn start_rename(&mut self) {
-        let sessions = self.registry.sorted_sessions();
-        if let Some(session) = sessions.get(self.selected) {
-            self.overlay = Overlay::Rename(session.name.clone());
-        }
+        let Some(session) = self.nth_filtered(self.selected) else {
+            return;
+        };
+        self.overlay = Overlay::Rename(session.name.clone());
     }
 
     fn handle_rename_key(&mut self, code: KeyCode) {
@@ -424,11 +539,42 @@ impl App {
         }
     }
 
+    fn handle_search_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter => {
+                self.overlay = Overlay::None;
+                match self.search_query.as_deref() {
+                    Some(q) if !q.is_empty() => {
+                        let count = self.num_filtered();
+                        self.status_message = Some(format!("search: /{q}  ({count})"));
+                    }
+                    _ => self.search_query = None,
+                }
+            }
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                self.search_query = None;
+                self.apply_filter();
+            }
+            KeyCode::Backspace => {
+                if let Some(buf) = self.search_query.as_mut() {
+                    buf.pop();
+                }
+                self.apply_filter();
+            }
+            KeyCode::Char(c) => {
+                self.search_query.get_or_insert_with(String::new).push(c);
+                self.apply_filter();
+            }
+            _ => {}
+        }
+    }
+
     fn commit_rename(&mut self, new_name: String) {
-        let sessions = self.registry.sorted_sessions();
-        let Some(id) = sessions.get(self.selected).map(|s| s.id.clone()) else {
+        let Some(session) = self.nth_filtered(self.selected) else {
             return;
         };
+        let id = session.id.clone();
         if self.registry.name_taken(&new_name, &id) {
             self.status_message = Some(format!("name '{}' is already taken", new_name));
             return;
@@ -437,6 +583,7 @@ impl App {
             session.name = new_name;
             session.renamed = true;
         }
+        self.apply_filter();
     }
 
     fn cycle_theme(&mut self) {
@@ -446,8 +593,7 @@ impl App {
     }
 
     fn go_to_selected_tab(&mut self) {
-        let sessions = self.registry.sorted_sessions();
-        let Some(session) = sessions.get(self.selected) else {
+        let Some(session) = self.nth_filtered(self.selected) else {
             return;
         };
 
@@ -472,16 +618,55 @@ impl App {
         }
     }
 
+    /// Clamp `selected` to the current visible count. Call whenever the
+    /// filter result may have shrunk: keystroke, sort, rename, refresh.
+    fn apply_filter(&mut self) {
+        let count = self.num_filtered();
+        if count == 0 {
+            self.selected = 0;
+        } else if self.selected >= count {
+            self.selected = count - 1;
+        }
+    }
+
+    fn num_filtered(&self) -> usize {
+        match self.search_query.as_deref() {
+            Some(q) if !q.is_empty() => {
+                let q_lower = q.to_ascii_lowercase();
+                self.registry
+                    .sorted_sessions()
+                    .iter()
+                    .filter(|s| s.matches_query(&q_lower))
+                    .count()
+            }
+            _ => self.registry.len(),
+        }
+    }
+
+    fn nth_filtered(&self, index: usize) -> Option<&Session> {
+        let all = self.registry.sorted_sessions();
+        match self.search_query.as_deref() {
+            Some(q) if !q.is_empty() => {
+                let q_lower = q.to_ascii_lowercase();
+                all.into_iter()
+                    .filter(|s| s.matches_query(&q_lower))
+                    .nth(index)
+            }
+            _ => all.into_iter().nth(index),
+        }
+    }
+
     fn tick(&mut self) {
         self.refresh_sessions();
         self.registry.remove_stale(60);
+        self.apply_filter();
 
         if matches!(self.overlay, Overlay::Preview) && !self.has_terminal_capture {
-            let sessions = self.registry.sorted_sessions();
-            if let Some(session) = sessions.get(self.selected) {
-                if let Some(ref jp) = session.jsonl_path {
-                    self.preview_entries = claude::read_tail_entries(jp, 50);
-                }
+            let Some(session) = self.nth_filtered(self.selected) else {
+                return;
+            };
+            if let Some(ref jp) = session.jsonl_path {
+                self.preview_entries = claude::read_tail_entries(jp, 50);
             }
         }
     }

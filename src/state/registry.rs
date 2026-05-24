@@ -96,6 +96,10 @@ impl SessionRegistry {
         self.sessions.len()
     }
 
+    pub fn total_cost_usd(&self) -> f64 {
+        self.sessions.values().map(|s| s.usage.cost_usd).sum()
+    }
+
     pub fn count_by_state(&self) -> StateCount {
         let mut count = StateCount::default();
         for session in self.sessions.values() {

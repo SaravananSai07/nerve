@@ -1,15 +1,21 @@
 mod app;
 mod config;
 mod detect;
+mod lockfile;
+mod log;
 mod notify;
+mod paths;
 mod platform;
+mod signals;
 mod state;
+mod terminal_guard;
 mod tui;
 mod updater;
 
 use std::str::FromStr;
 
 use app::App;
+use paths::Paths;
 use platform::BridgeId;
 
 fn discover_with_usage() -> Vec<state::session::Session> {
@@ -71,6 +77,16 @@ fn handle_update() -> std::io::Result<()> {
 }
 
 fn main() -> std::io::Result<()> {
+    let paths = match Paths::discover() {
+        Some(p) => p,
+        None => {
+            eprintln!("nerve: unable to resolve $HOME or config dir; refusing to start");
+            return Ok(());
+        }
+    };
+    let _ = paths.ensure_config_dir();
+    log::init(Some(paths.log_file()));
+
     if let Some(arg) = parse_focus_arg() {
         handle_focus(&arg);
         return Ok(());
@@ -82,7 +98,10 @@ fn main() -> std::io::Result<()> {
 
     if std::env::args().any(|a| a == "--dump") {
         let sessions = discover_with_usage();
-        println!("{}", serde_json::to_string_pretty(&sessions).unwrap_or_else(|e| format!("error: {e}")));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&sessions).unwrap_or_else(|e| format!("error: {e}"))
+        );
         return Ok(());
     }
 
@@ -111,8 +130,22 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    let mut terminal = ratatui::init();
-    let result = App::new().run(&mut terminal);
-    ratatui::restore();
-    result
+    let shutdown = signals::ShutdownFlag::install()?;
+
+    let _lock = match lockfile::LockFile::acquire(&paths) {
+        Ok(l) => l,
+        Err(lockfile::LockError::AlreadyHeld { pid }) => {
+            match pid {
+                Some(p) => eprintln!(
+                    "nerve is already running as PID {p}. Switch to it (Cmd-Tab) or quit it with 'q'."
+                ),
+                None => eprintln!("nerve is already running. Quit the other instance with 'q'."),
+            }
+            return Ok(());
+        }
+        Err(lockfile::LockError::Io(e)) => return Err(e),
+    };
+
+    let mut guard = terminal_guard::TerminalGuard::install()?;
+    App::new(paths, shutdown).run(guard.terminal())
 }

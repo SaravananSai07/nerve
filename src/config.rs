@@ -1,7 +1,9 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use serde::Deserialize;
+
+use crate::log_warn;
+use crate::paths::Paths;
 
 #[derive(Deserialize, Default)]
 pub struct Config {
@@ -15,6 +17,8 @@ pub struct Config {
     pub updates: UpdatesConfig,
     #[serde(default)]
     pub session_names: HashMap<String, String>,
+    #[serde(skip)]
+    pub load_error: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -25,7 +29,9 @@ pub struct UpdatesConfig {
 
 impl Default for UpdatesConfig {
     fn default() -> Self {
-        Self { check_on_launch: true }
+        Self {
+            check_on_launch: true,
+        }
     }
 }
 
@@ -82,13 +88,38 @@ impl Default for AppearanceConfig {
 }
 
 impl Config {
-    pub fn load() -> Self {
-        let mut config: Self = config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
-        config.general.refresh_interval_ms = config.general.refresh_interval_ms.clamp(100, 30_000);
-        config
+    pub fn load(paths: &Paths) -> Self {
+        let path = paths.config_file();
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                let msg = format!("config: cannot read {}: {e}", path.display());
+                log_warn!("{msg}");
+                return Self {
+                    load_error: Some(msg),
+                    ..Default::default()
+                };
+            }
+        };
+        match toml::from_str::<Self>(&contents) {
+            Ok(mut config) => {
+                config.general.refresh_interval_ms =
+                    config.general.refresh_interval_ms.clamp(100, 30_000);
+                config
+            }
+            Err(e) => {
+                let msg = format!(
+                    "config: parse error at {} ({e}) — using defaults",
+                    path.display()
+                );
+                log_warn!("{msg}");
+                Self {
+                    load_error: Some(msg),
+                    ..Default::default()
+                }
+            }
+        }
     }
 
     pub fn session_name_for(&self, cwd: &str) -> Option<&String> {
@@ -96,6 +127,48 @@ impl Config {
     }
 }
 
-fn config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("nerve").join("config.toml"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_paths() -> (tempfile::TempDir, Paths) {
+        // Lean on the Paths fields directly by constructing a temp config dir.
+        // This keeps tests hermetic and independent of the user's real config.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::for_test(tmp.path().join("config"), tmp.path().join("home"));
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        (tmp, paths)
+    }
+
+    #[test]
+    fn missing_config_returns_defaults_without_error() {
+        let (_tmp, paths) = fixture_paths();
+        let config = Config::load(&paths);
+        assert!(config.load_error.is_none());
+        assert_eq!(config.general.refresh_interval_ms, 1000);
+    }
+
+    #[test]
+    fn corrupt_config_surfaces_load_error_and_defaults() {
+        let (_tmp, paths) = fixture_paths();
+        std::fs::write(paths.config_file(), "[invalid @@@").unwrap();
+        let config = Config::load(&paths);
+        let msg = config.load_error.expect("load error should be surfaced");
+        assert!(msg.contains("parse error"), "unexpected message: {msg}");
+        // Defaults still hold.
+        assert_eq!(config.general.refresh_interval_ms, 1000);
+    }
+
+    #[test]
+    fn refresh_interval_is_clamped() {
+        let (_tmp, paths) = fixture_paths();
+        std::fs::write(
+            paths.config_file(),
+            "[general]\nrefresh_interval_ms = 50\n",
+        )
+        .unwrap();
+        let config = Config::load(&paths);
+        assert!(config.load_error.is_none());
+        assert_eq!(config.general.refresh_interval_ms, 100);
+    }
 }

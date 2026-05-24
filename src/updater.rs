@@ -3,6 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::log_warn;
+use crate::paths::Paths;
+
 const CRATES_API: &str = "https://crates.io/api/v1/crates/nerve-tui";
 const CHECK_INTERVAL_SECS: u64 = 24 * 3600;
 
@@ -12,19 +15,14 @@ struct Cache {
     last_known_version: String,
 }
 
-fn cache_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("nerve").join("update_cache.json"))
-}
-
-fn read_cache() -> Cache {
-    cache_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+fn read_cache(path: &PathBuf) -> Cache {
+    std::fs::read_to_string(path)
+        .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-fn write_cache(cache: &Cache) -> Option<()> {
-    let path = cache_path()?;
+fn write_cache(path: &PathBuf, cache: &Cache) -> Option<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
@@ -57,21 +55,24 @@ fn fetch_latest_version() -> Option<String> {
 /// Spawn a background thread that hits crates.io if the cached check is older
 /// than the TTL. Always non-blocking and best-effort — network failures are
 /// silently ignored. Result is persisted for the next launch to read.
-pub fn maybe_check_in_background(enabled: bool) {
+pub fn maybe_check_in_background(paths: &Paths, enabled: bool) {
     if !enabled {
         return;
     }
-    let cache = read_cache();
+    let path = paths.update_cache_file();
+    let cache = read_cache(&path);
     if now_unix().saturating_sub(cache.last_check_unix) < CHECK_INTERVAL_SECS {
         return;
     }
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
         if let Some(latest) = fetch_latest_version() {
             let updated = Cache {
                 last_check_unix: now_unix(),
                 last_known_version: latest,
             };
-            let _ = write_cache(&updated);
+            if write_cache(&path, &updated).is_none() {
+                log_warn!("updater: failed to persist update cache at {}", path.display());
+            }
         }
     });
 }
@@ -79,8 +80,8 @@ pub fn maybe_check_in_background(enabled: bool) {
 /// Read the cached latest version and return it iff strictly newer than the
 /// running binary. None means "no banner" — either no cache yet, network down,
 /// or we're already on the latest.
-pub fn pending_update(current: &str) -> Option<String> {
-    let cache = read_cache();
+pub fn pending_update(paths: &Paths, current: &str) -> Option<String> {
+    let cache = read_cache(&paths.update_cache_file());
     if cache.last_known_version.is_empty() {
         return None;
     }

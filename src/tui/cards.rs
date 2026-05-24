@@ -13,16 +13,20 @@ pub fn render(
     frame: &mut Frame,
     area: Rect,
     registry: &SessionRegistry,
+    sessions: &[&Session],
     selected: usize,
     theme: &Theme,
     status_message: Option<&str>,
     notifications_muted: bool,
     update_banner: Option<&str>,
+    search_query: Option<&str>,
 ) {
-    let sessions = registry.sorted_sessions();
-
     if sessions.is_empty() {
-        render_empty(frame, area, theme);
+        if let Some(q) = search_query.filter(|q| !q.is_empty()) {
+            render_search_empty(frame, area, theme, q);
+        } else {
+            render_empty(frame, area, theme);
+        }
         return;
     }
 
@@ -52,8 +56,17 @@ pub fn render(
         (chunks[0], chunks[1])
     };
 
-    render_cards(frame, card_area, &sessions, selected, theme);
-    render_status_bar(frame, status_area, registry, theme, status_message, notifications_muted);
+    render_cards(frame, card_area, sessions, selected, theme);
+    render_status_bar(
+        frame,
+        status_area,
+        registry,
+        sessions.len(),
+        theme,
+        status_message,
+        notifications_muted,
+        search_query,
+    );
 }
 
 fn render_update_banner(frame: &mut Frame, area: Rect, theme: &Theme, version: &str) {
@@ -179,8 +192,8 @@ fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bo
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Fill inner area with bg — avoids bleeding behind rounded corners
     if is_selected {
+        // Fill inner area with bg — avoids bleeding behind rounded corners
         for y in inner.y..(inner.y + inner.height) {
             for x in inner.x..(inner.x + inner.width) {
                 if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
@@ -188,7 +201,6 @@ fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bo
                 }
             }
         }
-        // Paint left accent stripe over the border
         if area.height >= 3 {
             for y in (area.y + 1)..(area.y + area.height.saturating_sub(1)) {
                 if let Some(cell) = frame.buffer_mut().cell_mut((area.x, y)) {
@@ -236,13 +248,16 @@ fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bo
     frame.render_widget(para, inner);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_status_bar(
     frame: &mut Frame,
     area: Rect,
     registry: &SessionRegistry,
+    filtered_count: usize,
     theme: &Theme,
     status_message: Option<&str>,
     notifications_muted: bool,
+    search_query: Option<&str>,
 ) {
     let line = if let Some(msg) = status_message {
         Line::from(Span::styled(
@@ -250,39 +265,52 @@ fn render_status_bar(
             Style::default().fg(theme.error),
         ))
     } else {
-        let counts = registry.count_by_state();
         let total = registry.len();
-        let sort_label = registry.sort_mode().label();
-        let total_cost: f64 = registry
-            .sorted_sessions()
-            .iter()
-            .map(|s| s.usage.cost_usd)
-            .sum();
+        let total_cost = registry.total_cost_usd();
+        let counts = registry.count_by_state();
+        let searching = search_query.is_some();
+        let sep: &str = if searching { "  " } else { "   " };
 
-        let mut spans = vec![
-            Span::styled(format!(" {total} sessions"), Style::default().fg(theme.text)),
-            Span::raw("   "),
-            Span::styled(format!("{} active", counts.active), Style::default().fg(theme.processing)),
-            Span::raw("   "),
-            Span::styled(format!("{} waiting", counts.waiting), Style::default().fg(theme.waiting)),
-            Span::raw("   "),
-            Span::styled(format!("{} idle", counts.idle), Style::default().fg(theme.idle)),
-        ];
-        if total_cost >= 0.01 {
-            spans.push(Span::raw("   "));
+        let mut spans: Vec<Span> = Vec::new();
+        if let Some(q) = search_query {
             spans.push(Span::styled(
-                format!("${:.2} total", total_cost),
-                Style::default().fg(theme.text),
+                format!(" /{q}  {filtered_count}/{total} "),
+                Style::default().fg(theme.processing).add_modifier(Modifier::BOLD),
             ));
+        } else {
+            spans.push(Span::styled(format!(" {total} sessions"), Style::default().fg(theme.text)));
         }
-        spans.extend([
-            Span::raw("   "),
-            Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.idle)),
-            Span::raw("  "),
-            Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.idle)),
-            Span::raw("  "),
-            Span::styled("[?] help", Style::default().fg(theme.idle)),
-        ]);
+        spans.push(Span::raw(sep));
+        spans.push(Span::styled(format!("{} active", counts.active), Style::default().fg(theme.processing)));
+        spans.push(Span::raw(sep));
+        spans.push(Span::styled(format!("{} waiting", counts.waiting), Style::default().fg(theme.waiting)));
+        spans.push(Span::raw(sep));
+        spans.push(Span::styled(format!("{} idle", counts.idle), Style::default().fg(theme.idle)));
+        if total_cost >= 0.01 {
+            spans.push(Span::raw(sep));
+            let cost = if searching {
+                format!("${total_cost:.2}")
+            } else {
+                format!("${total_cost:.2} total")
+            };
+            spans.push(Span::styled(cost, Style::default().fg(theme.text)));
+        }
+        if searching {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("[Esc] clear", Style::default().fg(theme.error)));
+        } else {
+            let sort_label = registry.sort_mode().label();
+            spans.extend([
+                Span::raw("   "),
+                Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.idle)),
+                Span::raw("  "),
+                Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.idle)),
+                Span::raw("  "),
+                Span::styled("[?] help", Style::default().fg(theme.idle)),
+                Span::raw("  "),
+                Span::styled("[/] search", Style::default().fg(theme.idle)),
+            ]);
+        }
         if notifications_muted {
             spans.push(Span::raw("  "));
             spans.push(Span::styled("[muted]", Style::default().fg(theme.error)));
@@ -312,6 +340,32 @@ fn render_empty(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::raw(""),
         Line::styled(
             "Start a Claude Code session in another tab.",
+            Style::default().fg(theme.idle),
+        ),
+    ])
+    .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(text, inner);
+}
+
+fn render_search_empty(frame: &mut Frame, area: Rect, theme: &Theme, query: &str) {
+    let block = Block::default()
+        .title(Span::styled(" nerve ", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = Paragraph::new(vec![
+        Line::raw(""),
+        Line::styled(
+            format!("No sessions match \"/{query}\"."),
+            Style::default().fg(theme.waiting),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "Press Esc to clear the search.",
             Style::default().fg(theme.idle),
         ),
     ])
