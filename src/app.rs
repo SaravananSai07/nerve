@@ -67,6 +67,9 @@ pub struct App {
     /// drains the latest snapshot per tick via `try_recv`.
     discovery: DiscoveryWorker,
     claude_installed: bool,
+    /// Built-ins + any user themes loaded from ~/.config/nerve/themes/
+    /// at startup (closes A13). Cycle order is deterministic.
+    themes: Vec<Theme>,
     theme: Theme,
     theme_index: usize,
     bridge: Bridge,
@@ -99,12 +102,14 @@ struct PendingNotification {
 impl App {
     pub fn new(paths: Paths, shutdown: ShutdownFlag) -> Self {
         let config = Config::load(&paths);
+        let themes_dir = paths.themes_dir();
+        let themes = Theme::catalog(Some(&themes_dir));
         let theme_name = &config.appearance.theme;
-        let theme_index = crate::tui::theme::THEME_NAMES
+        let theme_index = themes
             .iter()
-            .position(|&n| n == theme_name)
+            .position(|t| t.name == *theme_name)
             .unwrap_or(0);
-        let theme = Theme::by_name(theme_name);
+        let theme = themes[theme_index].clone();
         let bridge = Bridge::auto_detect();
         let terminal_app = match &bridge {
             #[cfg(target_os = "macos")]
@@ -140,6 +145,7 @@ impl App {
             filtered: FilteredView::new(),
             discovery,
             claude_installed,
+            themes,
             theme,
             theme_index,
             bridge,
@@ -634,9 +640,11 @@ impl App {
     }
 
     fn cycle_theme(&mut self) {
-        let names = crate::tui::theme::THEME_NAMES;
-        self.theme_index = (self.theme_index + 1) % names.len();
-        self.theme = Theme::by_name(names[self.theme_index]);
+        if self.themes.is_empty() {
+            return;
+        }
+        self.theme_index = (self.theme_index + 1) % self.themes.len();
+        self.theme = self.themes[self.theme_index].clone();
     }
 
     fn go_to_selected_tab(&mut self) {

@@ -1,9 +1,14 @@
-use ratatui::style::Color;
+use std::path::Path;
 
+use ratatui::style::Color;
+use serde::Deserialize;
+
+use crate::log_warn;
 use crate::state::session::SessionState;
 
+#[derive(Debug, Clone)]
 pub struct Theme {
-    pub name: &'static str,
+    pub name: String,
     pub border: Color,
     pub text: Color,
     pub processing: Color,
@@ -15,7 +20,9 @@ pub struct Theme {
     pub selected_text: Color,
 }
 
-pub const THEME_NAMES: &[&str] = &[
+/// The six built-in themes, in cycle order. User-provided themes from
+/// `~/.config/nerve/themes/*.toml` are appended at runtime (closes A13).
+const BUILTIN_NAMES: &[&str] = &[
     "nightfox",
     "tokyonight",
     "catppuccin",
@@ -25,6 +32,66 @@ pub const THEME_NAMES: &[&str] = &[
 ];
 
 impl Theme {
+    /// Build the cycle list: every built-in theme, followed by any
+    /// user themes loaded from `themes_dir`. The cycle order is
+    /// deterministic (alphabetical by filename within the user
+    /// section) so launching with a particular `theme` config value
+    /// always lands on the same index.
+    pub fn catalog(themes_dir: Option<&Path>) -> Vec<Theme> {
+        let mut catalog: Vec<Theme> = BUILTIN_NAMES.iter().map(|n| Self::by_name(n)).collect();
+        if let Some(dir) = themes_dir {
+            let mut user = Self::load_user_themes(dir);
+            user.sort_by(|a, b| a.name.cmp(&b.name));
+            catalog.extend(user);
+        }
+        catalog
+    }
+
+    fn load_user_themes(dir: &Path) -> Vec<Theme> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                log_warn!("themes: cannot read {}: {e}", dir.display());
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                match Self::from_toml(&path) {
+                    Ok(theme) => out.push(theme),
+                    Err(e) => log_warn!("themes: skipping {}: {e}", path.display()),
+                }
+            }
+        }
+        out
+    }
+
+    fn from_toml(path: &Path) -> Result<Theme, String> {
+        let contents = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let raw: RawTheme = toml::from_str(&contents).map_err(|e| e.to_string())?;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("custom")
+            .to_string();
+        let name = raw.name.unwrap_or(fallback_name);
+        Ok(Theme {
+            name,
+            border: parse_color(&raw.border, "border")?,
+            text: parse_color(&raw.text, "text")?,
+            processing: parse_color(&raw.processing, "processing")?,
+            waiting: parse_color(&raw.waiting, "waiting")?,
+            idle: parse_color(&raw.idle, "idle")?,
+            error: parse_color(&raw.error, "error")?,
+            stale: parse_color(&raw.stale, "stale")?,
+            selected_bg: parse_color(&raw.selected_bg, "selected_bg")?,
+            selected_text: parse_color(&raw.selected_text, "selected_text")?,
+        })
+    }
+
     pub fn by_name(name: &str) -> Self {
         match name {
             "tokyonight" | "tokyo-night" => Self::tokyonight(),
@@ -38,7 +105,7 @@ impl Theme {
 
     pub fn nightfox() -> Self {
         Self {
-            name: "nightfox",
+            name: "nightfox".into(),
             border: Color::Rgb(0x71, 0x83, 0x9b),
             text: Color::Rgb(0xcd, 0xce, 0xcf),
             processing: Color::Rgb(0x81, 0xb2, 0x9a),
@@ -53,7 +120,7 @@ impl Theme {
 
     pub fn tokyonight() -> Self {
         Self {
-            name: "tokyonight",
+            name: "tokyonight".into(),
             border: Color::Rgb(0x56, 0x5f, 0x89),
             text: Color::Rgb(0xc0, 0xca, 0xf5),
             processing: Color::Rgb(0x9e, 0xce, 0x6a),
@@ -69,7 +136,7 @@ impl Theme {
     pub fn catppuccin() -> Self {
         // Mocha variant
         Self {
-            name: "catppuccin",
+            name: "catppuccin".into(),
             border: Color::Rgb(0x6c, 0x70, 0x86),
             text: Color::Rgb(0xcd, 0xd6, 0xf4),
             processing: Color::Rgb(0xa6, 0xe3, 0xa1),
@@ -84,7 +151,7 @@ impl Theme {
 
     pub fn gruvbox() -> Self {
         Self {
-            name: "gruvbox",
+            name: "gruvbox".into(),
             border: Color::Rgb(0x66, 0x5c, 0x54),
             text: Color::Rgb(0xeb, 0xdb, 0xb2),
             processing: Color::Rgb(0xb8, 0xbb, 0x26),
@@ -99,7 +166,7 @@ impl Theme {
 
     pub fn dracula() -> Self {
         Self {
-            name: "dracula",
+            name: "dracula".into(),
             border: Color::Rgb(0x62, 0x72, 0xa4),
             text: Color::Rgb(0xf8, 0xf8, 0xf2),
             processing: Color::Rgb(0x50, 0xfa, 0x7b),
@@ -114,7 +181,7 @@ impl Theme {
 
     pub fn rosepine() -> Self {
         Self {
-            name: "rosepine",
+            name: "rosepine".into(),
             border: Color::Rgb(0x6e, 0x6a, 0x86),
             text: Color::Rgb(0xe0, 0xde, 0xf4),
             processing: Color::Rgb(0x9c, 0xce, 0xd6),
@@ -145,11 +212,149 @@ impl Theme {
             SessionState::WaitingForInput => "○",
             SessionState::Idle => "◌",
             SessionState::Error => "✕",
-            // Distinguishable indicators: Dormant is still "alive but
-            // quiet" (waning dot), Vanished is "process is gone"
-            // (cross-out style).
             SessionState::Dormant => "⠿",
             SessionState::Vanished => "⊘",
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct RawTheme {
+    name: Option<String>,
+    border: String,
+    text: String,
+    processing: String,
+    waiting: String,
+    idle: String,
+    error: String,
+    stale: String,
+    selected_bg: String,
+    selected_text: String,
+}
+
+fn parse_color(s: &str, field: &str) -> Result<Color, String> {
+    let trimmed = s.trim().trim_start_matches('#');
+    if trimmed.len() != 6 {
+        return Err(format!("{field}: expected '#RRGGBB', got {s:?}"));
+    }
+    let r = u8::from_str_radix(&trimmed[0..2], 16)
+        .map_err(|_| format!("{field}: bad red component"))?;
+    let g = u8::from_str_radix(&trimmed[2..4], 16)
+        .map_err(|_| format!("{field}: bad green component"))?;
+    let b = u8::from_str_radix(&trimmed[4..6], 16)
+        .map_err(|_| format!("{field}: bad blue component"))?;
+    Ok(Color::Rgb(r, g, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_color_accepts_hash_prefix() {
+        assert_eq!(
+            parse_color("#11aabb", "test").unwrap(),
+            Color::Rgb(0x11, 0xaa, 0xbb)
+        );
+    }
+
+    #[test]
+    fn parse_color_accepts_no_prefix() {
+        assert_eq!(
+            parse_color("11aabb", "test").unwrap(),
+            Color::Rgb(0x11, 0xaa, 0xbb)
+        );
+    }
+
+    #[test]
+    fn parse_color_rejects_short() {
+        assert!(parse_color("#abc", "test").is_err());
+    }
+
+    #[test]
+    fn parse_color_rejects_non_hex() {
+        assert!(parse_color("#zzzzzz", "test").is_err());
+    }
+
+    #[test]
+    fn from_toml_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("inkpot.toml");
+        std::fs::write(
+            &path,
+            r##"name = "inkpot"
+border = "#445566"
+text = "#aabbcc"
+processing = "#11aa11"
+waiting = "#aaaa11"
+idle = "#666666"
+error = "#aa1111"
+stale = "#333333"
+selected_bg = "#1a1a2a"
+selected_text = "#ffffff"
+"##,
+        )
+        .unwrap();
+        let theme = Theme::from_toml(&path).expect("parse");
+        assert_eq!(theme.name, "inkpot");
+        assert_eq!(theme.border, Color::Rgb(0x44, 0x55, 0x66));
+        assert_eq!(theme.text, Color::Rgb(0xaa, 0xbb, 0xcc));
+    }
+
+    #[test]
+    fn from_toml_uses_file_stem_when_name_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("autoname.toml");
+        std::fs::write(
+            &path,
+            r##"border = "#445566"
+text = "#aabbcc"
+processing = "#11aa11"
+waiting = "#aaaa11"
+idle = "#666666"
+error = "#aa1111"
+stale = "#333333"
+selected_bg = "#1a1a2a"
+selected_text = "#ffffff"
+"##,
+        )
+        .unwrap();
+        let theme = Theme::from_toml(&path).expect("parse");
+        assert_eq!(theme.name, "autoname");
+    }
+
+    #[test]
+    fn catalog_includes_builtins() {
+        let cat = Theme::catalog(None);
+        assert_eq!(cat.len(), BUILTIN_NAMES.len());
+        assert_eq!(cat[0].name, "nightfox");
+    }
+
+    #[test]
+    fn catalog_appends_user_themes_alphabetically() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (file, name) in [("zeta.toml", "zeta"), ("alpha.toml", "alpha")] {
+            std::fs::write(
+                tmp.path().join(file),
+                format!(
+                    r##"name = "{name}"
+border = "#445566"
+text = "#aabbcc"
+processing = "#11aa11"
+waiting = "#aaaa11"
+idle = "#666666"
+error = "#aa1111"
+stale = "#333333"
+selected_bg = "#1a1a2a"
+selected_text = "#ffffff"
+"##
+                ),
+            )
+            .unwrap();
+        }
+        let cat = Theme::catalog(Some(tmp.path()));
+        assert_eq!(cat.len(), BUILTIN_NAMES.len() + 2);
+        assert_eq!(cat[BUILTIN_NAMES.len()].name, "alpha");
+        assert_eq!(cat[BUILTIN_NAMES.len() + 1].name, "zeta");
     }
 }
