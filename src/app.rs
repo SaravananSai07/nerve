@@ -5,7 +5,6 @@ use ratatui::DefaultTerminal;
 
 use crate::config::Config;
 use crate::detect::claude::{self, LogEntry};
-use crate::detect::process::ProcessTable;
 use crate::log_info;
 use crate::notify::Notifier;
 use crate::paths::Paths;
@@ -17,6 +16,7 @@ use crate::state::prefs::Prefs;
 use crate::state::registry::SessionRegistry;
 use crate::tui::{cards, confirm_kill, confirm_preview, help, preview, rename};
 use crate::tui::theme::Theme;
+use crate::workers::discovery::DiscoveryWorker;
 
 /// Lower bound on iteration time. Defends the loop against runaway poll-true
 /// situations (closed stdin returning POLLHUP, etc.) without introducing
@@ -61,7 +61,11 @@ pub struct App {
     config: Config,
     registry: SessionRegistry,
     filtered: FilteredView,
-    proc_table: ProcessTable,
+    /// Background discovery worker. Owns the `ProcessTable` and runs
+    /// `discover_sessions_with` on its own thread so the UI never blocks
+    /// on `ps -eo` forks or slow JSONL reads (closes A20). The UI
+    /// drains the latest snapshot per tick via `try_recv`.
+    discovery: DiscoveryWorker,
     claude_installed: bool,
     theme: Theme,
     theme_index: usize,
@@ -116,13 +120,24 @@ impl App {
 
         let claude_installed = paths.claude_root().exists();
 
+        let refresh_interval =
+            Duration::from_millis(config.general.refresh_interval_ms);
+        let process_scan_interval =
+            Duration::from_millis(config.general.process_scan_interval_ms);
+        let discovery = crate::workers::discovery::spawn(
+            refresh_interval,
+            process_scan_interval,
+            shutdown.clone(),
+        )
+        .expect("discovery worker must start");
+
         Self {
             paths,
             shutdown,
             config,
             registry: SessionRegistry::new(),
             filtered: FilteredView::new(),
-            proc_table: ProcessTable::refreshed(),
+            discovery,
             claude_installed,
             theme,
             theme_index,
@@ -145,7 +160,17 @@ impl App {
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
-        self.refresh_sessions();
+        // Seed the registry from the worker's first snapshot so the
+        // initial paint isn't blank. Generous 500 ms cap — in practice
+        // the worker produces its first snapshot in ~50-100 ms on a
+        // warm laptop. Past this point all reads are non-blocking.
+        if let Some(snap) = self
+            .discovery
+            .next_snapshot_blocking(Duration::from_millis(500))
+        {
+            let pending = self.apply_discovery(snap);
+            self.dispatch_notifications(pending);
+        }
 
         while !self.should_quit && !self.shutdown.requested() && stdin_is_controlling_tty() {
             let loop_start = std::time::Instant::now();
@@ -673,20 +698,26 @@ impl App {
         }
     }
 
-    /// Top-level discovery tick. Three discrete stages (closes A3 / A11):
-    ///   1. Take a (cached if recent) snapshot of the process table.
-    ///   2. Apply the discovered sessions to the registry, collecting
-    ///      pending notifications without dispatching them yet.
+    /// Top-level discovery tick — runs on the UI thread but does *no*
+    /// I/O. The background worker (`DiscoveryWorker`) handles `ps`
+    /// forks and JSONL reads; this drain-and-apply pattern means slow
+    /// disk or hung subprocesses no longer block the UI (closes A20).
+    /// Three discrete stages (A3 / A11):
+    ///   1. Drain the latest discovery snapshot from the worker channel
+    ///      (coalescing any backlog to the freshest one).
+    ///   2. Apply the snapshot to the registry, collecting pending
+    ///      notifications without dispatching them yet.
     ///   3. Dispatch the notification batch. Because (2) finishes before
     ///      (3) starts, a slow `osascript` spawn can no longer freeze a
     ///      mid-refresh registry mutation.
     fn refresh_sessions(&mut self) {
-        let interval = Duration::from_millis(self.config.general.process_scan_interval_ms);
-        self.proc_table.refresh_if_stale(interval);
-        let discovered = claude::discover_sessions_with(&self.proc_table);
-
-        let pending = self.apply_discovery(discovered);
-        self.dispatch_notifications(pending);
+        if let Some(discovered) = self.discovery.latest_snapshot() {
+            let pending = self.apply_discovery(discovered);
+            self.dispatch_notifications(pending);
+        }
+        // No snapshot this tick: keep the previous registry state. The
+        // FilteredView cache is unaffected (no version bump), so the
+        // paint is essentially free.
 
         let count = self.registry.len();
         if count > 0 && self.selected >= count {

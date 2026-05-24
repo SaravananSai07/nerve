@@ -12,6 +12,7 @@ mod terminal_guard;
 mod tui;
 mod updater;
 mod util;
+mod workers;
 
 use std::str::FromStr;
 
