@@ -20,10 +20,13 @@ pub fn render(
     notifications_muted: bool,
     update_banner: Option<&str>,
     search_query: Option<&str>,
+    claude_installed: bool,
 ) {
     if sessions.is_empty() {
         if let Some(q) = search_query.filter(|q| !q.is_empty()) {
             render_search_empty(frame, area, theme, q);
+        } else if !claude_installed {
+            render_setup_hint(frame, area, theme);
         } else {
             render_empty(frame, area, theme);
         }
@@ -340,6 +343,45 @@ fn render_empty(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::raw(""),
         Line::styled(
             "Start a Claude Code session in another tab.",
+            Style::default().fg(theme.idle),
+        ),
+    ])
+    .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(text, inner);
+}
+
+/// Shown when `~/.claude/` doesn't exist yet — first-time setup
+/// path (closes A21). Distinct from `render_empty` so the user
+/// gets a clear "you need to install Claude Code first" message
+/// rather than a confusing "no sessions detected" when the cause
+/// is that the data directory itself is missing.
+fn render_setup_hint(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let block = Block::default()
+        .title(Span::styled(
+            " nerve ",
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.waiting));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = Paragraph::new(vec![
+        Line::raw(""),
+        Line::styled(
+            "Claude Code isn't installed (no ~/.claude directory).",
+            Style::default().fg(theme.waiting),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "Install it from https://docs.claude.com/claude-code",
+            Style::default().fg(theme.text),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "Then start a session in another tab — nerve will pick it up.",
             Style::default().fg(theme.idle),
         ),
     ])

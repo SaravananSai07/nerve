@@ -136,7 +136,8 @@ impl SessionRegistry {
                 SessionState::WaitingForInput => count.waiting += 1,
                 SessionState::Idle => count.idle += 1,
                 SessionState::Error => count.error += 1,
-                SessionState::Stale => count.stale += 1,
+                SessionState::Dormant => count.dormant += 1,
+                SessionState::Vanished => count.vanished += 1,
             }
         }
         count
@@ -144,29 +145,42 @@ impl SessionRegistry {
 
     pub fn mark_stale(&mut self, id: &str) {
         if let Some(session) = self.sessions.get_mut(id) {
-            session.set_state(SessionState::Stale);
+            session.set_state(SessionState::Vanished);
             self.version = self.version.wrapping_add(1);
         }
     }
 
-    pub fn remove_stale(&mut self, max_age_secs: u64) {
+    /// Evict sessions that have passed their state-specific retention
+    /// window. `Vanished` (process gone) ages out after `vanished_grace_secs`
+    /// so the user gets a brief notice that the session ended. `Dormant`
+    /// (idle ≥ 48 h but process alive) is kept indefinitely; the user may
+    /// still come back to it (A22 — replaces the fused 60-s timeout
+    /// that previously treated both cases identically).
+    pub fn remove_stale(&mut self, vanished_grace_secs: u64) {
         let active_cwds: std::collections::HashSet<std::path::PathBuf> = self
             .sessions
             .values()
-            .filter(|s| s.state != SessionState::Stale)
+            .filter(|s| !matches!(s.state, SessionState::Vanished))
             .map(|s| s.cwd.clone())
             .collect();
 
         let before = self.sessions.len();
         self.sessions.retain(|_, s| {
-            if s.state != SessionState::Stale {
-                return true;
+            match s.state {
+                SessionState::Vanished => {
+                    // Evict immediately if a live session has taken over
+                    // the same cwd; otherwise wait out the grace window.
+                    if active_cwds.contains(&s.cwd) {
+                        return false;
+                    }
+                    s.state_duration().as_secs() <= vanished_grace_secs
+                }
+                // Dormant sessions stay around forever — the user might
+                // resume them, and the process is still alive so the
+                // tab/pane info is valid.
+                SessionState::Dormant => true,
+                _ => true,
             }
-            // Evict immediately if an active session covers the same CWD
-            if active_cwds.contains(&s.cwd) {
-                return false;
-            }
-            s.state_duration().as_secs() <= max_age_secs
         });
         if self.sessions.len() != before {
             self.order.retain(|id| self.sessions.contains_key(id));
@@ -266,5 +280,6 @@ pub struct StateCount {
     pub waiting: usize,
     pub idle: usize,
     pub error: usize,
-    pub stale: usize,
+    pub dormant: usize,
+    pub vanished: usize,
 }

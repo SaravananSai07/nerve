@@ -62,6 +62,7 @@ pub struct App {
     registry: SessionRegistry,
     filtered: FilteredView,
     proc_table: ProcessTable,
+    claude_installed: bool,
     theme: Theme,
     theme_index: usize,
     bridge: Bridge,
@@ -113,6 +114,8 @@ impl App {
         let update_banner = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"));
         let status_message = config.load_error.clone();
 
+        let claude_installed = paths.claude_root().exists();
+
         Self {
             paths,
             shutdown,
@@ -120,6 +123,7 @@ impl App {
             registry: SessionRegistry::new(),
             filtered: FilteredView::new(),
             proc_table: ProcessTable::refreshed(),
+            claude_installed,
             theme,
             theme_index,
             bridge,
@@ -174,6 +178,7 @@ impl App {
                     self.prefs.notifications_muted,
                     self.update_banner.as_deref(),
                     self.search_query.as_deref(),
+                    self.claude_installed,
                 );
                 match &self.overlay {
                     Overlay::Help => help::render(frame, &self.theme),
@@ -494,8 +499,8 @@ impl App {
         let Some(session) = self.nth_filtered(self.selected) else {
             return;
         };
-        if session.state == SessionState::Stale {
-            self.status_message = Some("session is already stale".into());
+        if session.state.is_terminal() {
+            self.status_message = Some("session is already gone or dormant".into());
             return;
         }
         let name = session.name.clone();

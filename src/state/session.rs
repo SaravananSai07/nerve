@@ -91,7 +91,16 @@ pub enum SessionState {
     WaitingForInput,
     Idle,
     Error,
-    Stale,
+    /// The per-pid session file has disappeared from discovery — the
+    /// process is almost certainly gone. Evicted from the registry
+    /// after a short grace period (closes A9 — was previously fused
+    /// with `Dormant` under a single `Stale` variant).
+    Vanished,
+    /// Session was `WaitingForInput` long enough (≥ 48 h) that we no
+    /// longer assume the user is coming back to it imminently, but the
+    /// process is alive. Never evicted automatically (A22 — replaces
+    /// the old fixed-60-s timeout with a state-specific policy).
+    Dormant,
 }
 
 impl SessionState {
@@ -102,7 +111,8 @@ impl SessionState {
             Self::WaitingForInput => 2,
             Self::Idle => 3,
             Self::Error => 5,
-            Self::Stale => 6,
+            Self::Dormant => 6,
+            Self::Vanished => 7,
         }
     }
 
@@ -113,8 +123,15 @@ impl SessionState {
             Self::WaitingForInput => "Waiting".into(),
             Self::Idle => "Idle".into(),
             Self::Error => "Error".into(),
-            Self::Stale => "Stale".into(),
+            Self::Dormant => "Dormant".into(),
+            Self::Vanished => "Gone".into(),
         }
+    }
+
+    /// True if this state represents a session that is no longer
+    /// actively producing work and is a candidate for eviction.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Vanished | Self::Dormant)
     }
 }
 

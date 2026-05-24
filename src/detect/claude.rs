@@ -206,7 +206,7 @@ pub fn infer_state_from_jsonl(
             if mtime_age <= 172_800.0 || cpu > 1.0 {
                 return state;
             }
-            return SessionState::Stale;
+            return SessionState::Dormant;
         }
         // Stick with the tail-derived Processing state only when there's
         // independent evidence the session is still doing work: a recent JSONL

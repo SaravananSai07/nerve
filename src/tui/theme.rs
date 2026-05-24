@@ -134,7 +134,7 @@ impl Theme {
             SessionState::WaitingForInput => self.waiting,
             SessionState::Idle => self.idle,
             SessionState::Error => self.error,
-            SessionState::Stale => self.stale,
+            SessionState::Dormant | SessionState::Vanished => self.stale,
         }
     }
 
@@ -145,7 +145,11 @@ impl Theme {
             SessionState::WaitingForInput => "○",
             SessionState::Idle => "◌",
             SessionState::Error => "✕",
-            SessionState::Stale => "⠿",
+            // Distinguishable indicators: Dormant is still "alive but
+            // quiet" (waning dot), Vanished is "process is gone"
+            // (cross-out style).
+            SessionState::Dormant => "⠿",
+            SessionState::Vanished => "⊘",
         }
     }
 }
