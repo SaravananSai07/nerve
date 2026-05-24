@@ -707,12 +707,14 @@ impl App {
             .filter(|id| !active_ids.contains(id.as_str()))
             .cloned()
             .collect();
+        let any_marked_stale = !stale_ids.is_empty();
         for id in stale_ids {
             self.registry.mark_stale(id.as_str());
         }
 
         let mut pending = Vec::new();
         let mut any_transition = false;
+        let mut any_membership_change = any_marked_stale;
 
         for session in discovered {
             let detected_state = session.state.clone();
@@ -789,10 +791,24 @@ impl App {
                     new_session.usage.last_file_offset = offset;
                 }
                 self.registry.upsert(new_session);
+                any_membership_change = true;
             }
         }
 
-        self.registry.re_disambiguate_names();
+        // Only re-disambiguate when membership actually changed
+        // (insertions or stale-marks). Existing-session updates can
+        // only have moved a state forward, never introduced a new name
+        // clash — skipping the O(n²)-ish scan on steady-state idle
+        // ticks (closes A18).
+        if any_membership_change {
+            self.registry.re_disambiguate_names();
+        }
+        // Per-tick activity bucket shift. Mutating side of activity is
+        // split between this call (time-based shifts) and inline
+        // `record_activity` (event-based set). Two paths are kept
+        // deliberate, documented here so future edits don't try to
+        // collapse them into one and accidentally drop one of the two
+        // mechanisms (A19 — documented invariant, not fused).
         self.registry.shift_all_activity();
 
         if any_transition {
