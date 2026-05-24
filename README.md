@@ -27,6 +27,8 @@ TUI dashboard for monitoring and switching between Claude Code sessions across t
 | `t` | Cycle theme |
 | `n` | Rename session |
 | `m` | Toggle notification mute |
+| `/` | Search sessions (fuzzy) |
+| `Esc` | Clear search filter |
 | `1-9` | Jump to session |
 | `?` | Help |
 | `q` | Quit |
@@ -47,9 +49,27 @@ Mute at runtime with `m`. State is persisted across restarts.
 
 ## Themes
 
-nightfox, tokyonight, catppuccin, gruvbox, dracula, rosepine
-
+Six built-ins: nightfox, tokyonight, catppuccin, gruvbox, dracula, rosepine.
 Cycle with `t` or set in config.
+
+### Custom themes
+
+Drop a TOML file at `~/.config/nerve/themes/<name>.toml` and it
+appears in the cycle after the built-ins:
+
+```toml
+# ~/.config/nerve/themes/inkpot.toml
+name = "inkpot"               # optional, defaults to file stem
+border = "#71839b"
+text = "#cdcecf"
+processing = "#81b29a"
+waiting = "#dbc074"
+idle = "#63717f"
+error = "#c94f6d"
+stale = "#50565b"
+selected_bg = "#2a313a"
+selected_text = "#eaebec"
+```
 
 ## Config
 
@@ -57,20 +77,64 @@ Cycle with `t` or set in config.
 # ~/.config/nerve/config.toml
 
 [general]
-refresh_interval_ms = 1000
+refresh_interval_ms = 1000        # UI refresh tick
+process_scan_interval_ms = 5000   # how often the `ps` snapshot refreshes
 
 [appearance]
-theme = "nightfox"
+theme = "nightfox"                # any built-in or user theme name
 
 [notifications]
 on_waiting = true
 on_error = true
 sound = true
 
+[updates]
+check_on_launch = true            # quiet daily check vs crates.io
+
 # Override session display names by CWD
 [session_names]
 "/Users/you/projects/my-app" = "my-app"
 ```
+
+A loud parse error on this file is surfaced as a status-bar
+message; defaults fill in for any missing field. The schema-
+versioned `prefs.toml` (mute state, "don't ask again" flags) is
+migrated automatically across upgrades.
+
+## Files and lifecycle
+
+| Path | Purpose |
+|------|---------|
+| `~/.config/nerve/config.toml` (or `~/Library/Application Support/nerve/` on macOS) | User config |
+| `~/.config/nerve/prefs.toml` | Persistent UI prefs (mute, "don't ask again") |
+| `~/.config/nerve/themes/*.toml` | User-provided themes |
+| `~/.config/nerve/nerve.log` | Rolling warn/error log (~1 MiB max, rotated to `nerve.log.1`) |
+| `~/.config/nerve/nerve.lock` | Exclusive `flock(2)` — a second `nerve` invocation refuses to start |
+| `~/.config/nerve/update_cache.json` | Throttled update-check state |
+| `~/.claude/sessions/`, `~/.claude/projects/` | Read-only — Claude Code's own data |
+
+Override the config directory via the `NERVE_CONFIG_DIR`
+environment variable (intended for tests and unusual layouts).
+
+## Behaviour on signals and terminal close
+
+- `q` / `Ctrl-C` inside the TUI: clean shutdown, terminal restored.
+- `SIGHUP`, `SIGTERM`, `SIGINT`, `SIGQUIT`: handled cooperatively.
+  The main loop checks a shared atomic at the top of every
+  iteration and exits within ≤ 1 s.
+- Host terminal tab closed without `q`: a `tcgetpgrp(stdin)`
+  canary in the main loop detects the lost controlling tty and
+  exits cleanly even when Ghostty fails to deliver `SIGHUP`.
+- Panic: a panic hook restores cooked mode + leaves the alt-screen
+  before printing the panic, so the user's terminal is never left
+  in a frozen state.
+
+## Watched files
+
+`~/.claude/sessions/` is watched via FSEvents (macOS) / inotify
+(Linux). Idle nerve sleeps until either a session file changes
+or the fallback 1 Hz heartbeat fires — CPU usage on a quiet
+machine is near zero.
 
 ## Install
 
