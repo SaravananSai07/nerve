@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
+use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process;
 use crate::state::session::{Session, SessionId, SessionState, TokenUsage};
 use crate::util::sanitize::strip_ansi;
@@ -45,20 +46,25 @@ pub fn discover_sessions() -> Vec<Session> {
     // CLI / one-shot path: take a fresh process snapshot every call.
     // The TUI hot path goes through `discover_sessions_with`.
     let table = process::ProcessTable::refreshed();
-    discover_sessions_with(&table)
+    let mut cache = JsonlCache::new();
+    discover_sessions_with(&table, &mut cache)
 }
 
-/// Discovery against a (possibly cached) process table. The App holds
-/// a `ProcessTable` that it refreshes only every
-/// `process_scan_interval_ms`, so a 1 Hz refresh tick no longer pays
-/// the `ps -eo` fork cost on every iteration (closes A7).
-pub fn discover_sessions_with(table: &process::ProcessTable) -> Vec<Session> {
+/// Discovery against a (possibly cached) process table and a
+/// `JsonlCache` that short-circuits unchanged transcripts (closes
+/// L4 + L5 + L28). A 1 Hz refresh tick on an idle session now does
+/// one `stat(2)` per JSONL instead of seek + 256 KiB read + parse.
+pub fn discover_sessions_with(
+    table: &process::ProcessTable,
+    cache: &mut JsonlCache,
+) -> Vec<Session> {
     let dir = match sessions_dir() {
         Some(d) if d.exists() => d,
         _ => return Vec::new(),
     };
 
     let mut sessions = Vec::new();
+    let mut seen_jsonls: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
@@ -68,11 +74,21 @@ pub fn discover_sessions_with(table: &process::ProcessTable) -> Vec<Session> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json") {
-            if let Some(session) = load_session(&path, table.procs(), table.child_map()) {
+            if let Some(session) =
+                load_session(&path, table.procs(), table.child_map(), cache)
+            {
+                if let Some(ref jp) = session.jsonl_path {
+                    seen_jsonls.insert(jp.clone());
+                }
                 sessions.push(session);
             }
         }
     }
+
+    // Evict cache entries whose JSONLs are no longer referenced —
+    // bounds the cache to the live working set instead of growing
+    // forever across days of uptime.
+    cache.retain_present(|p| seen_jsonls.contains(p));
 
     deduplicate_sessions(sessions)
 }
@@ -81,6 +97,7 @@ fn load_session(
     path: &Path,
     procs: &[process::ProcessInfo],
     child_map: &HashMap<u32, Vec<u32>>,
+    cache: &mut JsonlCache,
 ) -> Option<Session> {
     let sf = read_session_file(path)?;
 
@@ -124,7 +141,7 @@ fn load_session(
 
     let jsonl_path = find_jsonl(&resolved_id, &cwd);
     if let Some(ref jp) = jsonl_path {
-        session.state = infer_state_from_jsonl(jp, sf.pid, procs, child_map);
+        session.state = infer_state_from_jsonl(jp, sf.pid, procs, child_map, cache);
         session.jsonl_path = Some(jp.clone());
         session.jsonl_age_secs = Some(file_age_secs(jp));
     } else {
@@ -194,39 +211,59 @@ pub fn infer_state_from_jsonl(
     pid: u32,
     procs: &[process::ProcessInfo],
     child_map: &HashMap<u32, Vec<u32>>,
+    cache: &mut JsonlCache,
+) -> SessionState {
+    // mtime short-circuit (L4 + L28): the 256 KiB tail-read +
+    // serde_json parse is the per-tick hot spot. Skip it entirely
+    // when the file's mtime/len/inode are unchanged since the last
+    // observation; reuse the cached tail-parse result and re-apply
+    // the runtime refinement (CPU / caffeinate / mtime-age) against
+    // the current process snapshot.
+    let tail_parse = if let Some(cached) = cache.cached_state(path) {
+        cached
+    } else {
+        let fresh = read_tail_state(path).unwrap_or(SessionState::Idle);
+        cache.record_state(path, fresh.clone());
+        fresh
+    };
+    refine_with_runtime(tail_parse, path, pid, procs, child_map)
+}
+
+/// Apply the runtime conditions (CPU%, caffeinate child, mtime age)
+/// to a tail-parse result. Pure: doesn't touch the file system aside
+/// from the cheap `mtime` call.
+fn refine_with_runtime(
+    tail_parse: SessionState,
+    path: &Path,
+    pid: u32,
+    procs: &[process::ProcessInfo],
+    child_map: &HashMap<u32, Vec<u32>>,
 ) -> SessionState {
     let mtime_age = file_age_secs(path);
     let cpu = process::get_cpu_for_pid(procs, pid);
 
-    if let Some(state) = read_tail_state(path) {
-        if matches!(state, SessionState::Idle | SessionState::Error) {
-            return state;
-        }
-        if state == SessionState::WaitingForInput {
-            if mtime_age <= 172_800.0 || cpu > 1.0 {
-                return state;
-            }
-            return SessionState::Dormant;
-        }
-        // Stick with the tail-derived Processing state only when there's
-        // independent evidence the session is still doing work: a recent JSONL
-        // write (Claude writes on every roundtrip / tool result) or a
-        // caffeinate child (long-running task holding the system awake).
-        // CPU is deliberately NOT used here — Claude's TUI burns CPU on
-        // keystroke rendering, which would otherwise flip an idle session to
-        // Processing whenever the user is typing.
-        if mtime_age <= 300.0
-            || process::has_child_named(procs, child_map, pid, "caffeinate")
-        {
-            return state;
-        }
-        return SessionState::Idle;
+    let state = tail_parse;
+    if matches!(state, SessionState::Idle | SessionState::Error) {
+        return state;
     }
-
-    // No state-bearing entry found in the tail. With Claude Code 2.x the JSONL
-    // is padded with metadata types (file-history-snapshot, last-prompt, etc.)
-    // that can crowd out real state at the tail; treating that as Processing
-    // misfires whenever the user is typing and the Claude TUI is burning CPU.
+    if state == SessionState::WaitingForInput {
+        if mtime_age <= 172_800.0 || cpu > 1.0 {
+            return state;
+        }
+        return SessionState::Dormant;
+    }
+    // Stick with the tail-derived Processing state only when there's
+    // independent evidence the session is still doing work: a recent JSONL
+    // write (Claude writes on every roundtrip / tool result) or a
+    // caffeinate child (long-running task holding the system awake).
+    // CPU is deliberately NOT used here — Claude's TUI burns CPU on
+    // keystroke rendering, which would otherwise flip an idle session to
+    // Processing whenever the user is typing.
+    if mtime_age <= 300.0
+        || process::has_child_named(procs, child_map, pid, "caffeinate")
+    {
+        return state;
+    }
     SessionState::Idle
 }
 
@@ -335,7 +372,7 @@ fn cost_per_million(model: &str) -> (f64, f64, f64, f64) {
 }
 
 pub fn parse_token_usage(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
-    let mut usage = TokenUsage::default();
+    let usage = TokenUsage::default();
 
     let file = match open_jsonl(path) {
         Ok(f) => f,
@@ -344,8 +381,23 @@ pub fn parse_token_usage(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
     if file_len < from_offset {
-        return parse_token_usage(path, 0);
+        // File was truncated/rotated under us. Re-parse from offset 0
+        // *iteratively* (recursion previously meant an arbitrary stack
+        // for a 50 MB JSONL); the call below is safe because we know
+        // `file_len >= 0` makes the next `file_len < 0` impossible.
+        return parse_token_usage_inner(path, 0);
     }
+    parse_token_usage_inner(path, from_offset)
+}
+
+fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
+    let mut usage = TokenUsage::default();
+
+    let file = match open_jsonl(path) {
+        Ok(f) => f,
+        Err(_) => return (usage, from_offset),
+    };
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
     let mut reader = std::io::BufReader::new(file);
     if from_offset > 0 {

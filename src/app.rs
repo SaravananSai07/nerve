@@ -34,6 +34,17 @@ fn stdin_is_controlling_tty() -> bool {
     is_controlling_tty(std::io::stdin())
 }
 
+#[cfg(unix)]
+fn inode_of_path(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.ino())
+}
+
+#[cfg(not(unix))]
+fn inode_of_path(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod app_tests {
     use super::*;
@@ -786,14 +797,32 @@ impl App {
                 }
 
                 if let Some(ref jp) = session.jsonl_path {
-                    let offset = existing.usage.last_file_offset;
+                    // Detect inode change (log rotation) and reset
+                    // the offset rather than seeking into a brand-new
+                    // file at the old offset (closes L5).
+                    let current_inode = inode_of_path(jp);
+                    let offset = if existing.jsonl_inode != current_inode {
+                        0
+                    } else {
+                        existing.usage.last_file_offset
+                    };
                     let (delta, new_offset) = claude::parse_token_usage(jp, offset);
-                    existing.usage.input_tokens += delta.input_tokens;
-                    existing.usage.output_tokens += delta.output_tokens;
-                    existing.usage.cache_read_tokens += delta.cache_read_tokens;
-                    existing.usage.cache_creation_tokens += delta.cache_creation_tokens;
-                    existing.usage.cost_usd += delta.cost_usd;
+                    if existing.jsonl_inode != current_inode {
+                        // After rotation, this read fully re-counts
+                        // the (new, presumably smaller) file. Replace
+                        // rather than accumulate so we don't double-
+                        // count tokens that were already in the prior
+                        // inode's accounting.
+                        existing.usage = delta;
+                    } else {
+                        existing.usage.input_tokens += delta.input_tokens;
+                        existing.usage.output_tokens += delta.output_tokens;
+                        existing.usage.cache_read_tokens += delta.cache_read_tokens;
+                        existing.usage.cache_creation_tokens += delta.cache_creation_tokens;
+                        existing.usage.cost_usd += delta.cost_usd;
+                    }
                     existing.usage.last_file_offset = new_offset;
+                    existing.jsonl_inode = current_inode;
                 }
                 if existing.jsonl_path.is_none() {
                     existing.jsonl_path = session.jsonl_path;
@@ -829,6 +858,7 @@ impl App {
                     let (usage, offset) = claude::parse_token_usage(jp, 0);
                     new_session.usage = usage;
                     new_session.usage.last_file_offset = offset;
+                    new_session.jsonl_inode = inode_of_path(jp);
                 }
                 self.registry.upsert(new_session);
                 any_membership_change = true;

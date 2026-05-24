@@ -6,6 +6,7 @@ use std::time::Duration;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::detect::claude::discover_sessions_with;
+use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process::ProcessTable;
 use crate::log_warn;
 use crate::signals::ShutdownFlag;
@@ -60,13 +61,14 @@ pub fn spawn(
         .name("nerve-discovery".into())
         .spawn(move || {
             let mut table = ProcessTable::refreshed();
+            let mut cache = JsonlCache::new();
             loop {
                 if shutdown.requested() {
                     return;
                 }
 
                 table.refresh_if_stale(process_scan_interval);
-                let sessions = discover_sessions_with(&table);
+                let sessions = discover_sessions_with(&table, &mut cache);
                 if tx.send(sessions).is_err() {
                     // UI dropped the receiver — exit quietly.
                     return;

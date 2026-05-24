@@ -152,6 +152,11 @@ pub struct Session {
     pub current_tool: Option<String>,
     pub activity: ActivityHistory,
     pub jsonl_path: Option<PathBuf>,
+    /// Inode of the JSONL the last time we read tokens from it. When
+    /// this changes (file rotated / replaced), `App::apply_discovery`
+    /// resets the token-usage offset to 0 so we don't seek into a
+    /// new file at the old position (closes L5).
+    pub jsonl_inode: Option<u64>,
     pub renamed: bool,
     pub usage: TokenUsage,
     pub pid: Option<u32>,
@@ -178,6 +183,7 @@ impl Session {
             current_tool: None,
             activity: ActivityHistory::new(),
             jsonl_path: None,
+            jsonl_inode: None,
             renamed: false,
             usage: TokenUsage::default(),
             pid: None,
