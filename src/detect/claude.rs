@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use crate::detect::process;
-use crate::state::session::{Session, SessionState, TokenUsage};
+use crate::state::session::{Session, SessionId, SessionState, TokenUsage};
 use crate::util::sanitize::strip_ansi;
 
 /// Cap on the size of a per-pid session JSON file. The format is small
@@ -105,7 +105,8 @@ fn load_session(
         .to_string();
 
     let cwd = PathBuf::from(&sf.cwd);
-    let mut session = Session::new(resolved_id.clone(), cwd.clone());
+    let session_id = SessionId::new(resolved_id.clone());
+    let mut session = Session::new(session_id, cwd.clone());
     session.pid = Some(sf.pid);
 
     session.tty = process::get_tty_for_pid(procs, sf.pid);

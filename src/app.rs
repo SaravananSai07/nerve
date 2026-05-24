@@ -10,10 +10,9 @@ use crate::notify::Notifier;
 use crate::paths::Paths;
 use crate::platform::{Bridge, SessionTarget};
 use crate::signals::ShutdownFlag;
-use crate::state::session::Session;
+use crate::state::session::{Session, SessionId, SessionState};
 use crate::state::prefs::Prefs;
 use crate::state::registry::SessionRegistry;
-use crate::state::session::SessionState;
 use crate::tui::{cards, confirm_kill, confirm_preview, help, preview, rename};
 use crate::tui::theme::Theme;
 
@@ -50,7 +49,7 @@ enum Overlay {
     Search,
     Rename(String),
     Preview,
-    ConfirmKill { name: String, id: String },
+    ConfirmKill { name: String, id: SessionId },
     ConfirmPreview,
 }
 
@@ -61,7 +60,7 @@ pub struct App {
     registry: SessionRegistry,
     theme: Theme,
     theme_index: usize,
-    bridge: Option<Bridge>,
+    bridge: Bridge,
     selected: usize,
     cols: usize,
     overlay: Overlay,
@@ -90,7 +89,7 @@ impl App {
         let bridge = Bridge::auto_detect();
         let terminal_app = match &bridge {
             #[cfg(target_os = "macos")]
-            Some(Bridge::Ghostty(_)) => Some("Ghostty".to_string()),
+            Bridge::Ghostty(_) => Some("Ghostty".to_string()),
             _ => None,
         };
         let notifier = Notifier::new(config.notifications.clone(), terminal_app);
@@ -285,7 +284,7 @@ impl App {
                         if let Overlay::ConfirmKill { name, id } =
                             std::mem::replace(&mut self.overlay, Overlay::None)
                         {
-                            self.execute_kill(&name, &id);
+                            self.execute_kill(&name, id.as_str());
                         }
                     }
                     KeyCode::Char('n') | KeyCode::Esc => self.overlay = Overlay::None,
@@ -389,7 +388,7 @@ impl App {
     }
 
     fn open_preview(&mut self) {
-        if self.bridge.is_none() {
+        if !self.bridge.is_active() {
             self.open_log_preview();
             return;
         }
@@ -437,15 +436,13 @@ impl App {
         };
         let jsonl_path = session.jsonl_path.clone();
 
-        if let Some(ref bridge) = self.bridge {
-            if let Some(text) = bridge.capture_screen(&target) {
-                self.preview_lines = text.lines().map(|l| l.to_string()).collect();
-                self.preview_entries = Vec::new();
-                self.has_terminal_capture = true;
-                self.preview_scroll = usize::MAX;
-                self.overlay = Overlay::Preview;
-                return;
-            }
+        if let Some(text) = self.bridge.capture_screen(&target) {
+            self.preview_lines = text.lines().map(|l| l.to_string()).collect();
+            self.preview_entries = Vec::new();
+            self.has_terminal_capture = true;
+            self.preview_scroll = usize::MAX;
+            self.overlay = Overlay::Preview;
+            return;
         }
 
         self.load_log_entries(&jsonl_path);
@@ -574,11 +571,11 @@ impl App {
             return;
         };
         let id = session.id.clone();
-        if self.registry.name_taken(&new_name, &id) {
+        if self.registry.name_taken(&new_name, id.as_str()) {
             self.status_message = Some(format!("name '{}' is already taken", new_name));
             return;
         }
-        if let Some(session) = self.registry.get_mut(&id) {
+        if let Some(session) = self.registry.get_mut(id.as_str()) {
             session.name = new_name;
             session.renamed = true;
         }
@@ -607,13 +604,9 @@ impl App {
             tty: session.tty.clone(),
         };
 
-        if let Some(ref bridge) = self.bridge {
-            match bridge.go_to_session(&target) {
-                Ok(()) => self.visited_session = Some(target.name),
-                Err(e) => self.status_message = Some(e.to_string()),
-            }
-        } else {
-            self.status_message = Some("no terminal bridge detected (try Ghostty or tmux)".into());
+        match self.bridge.go_to_session(&target) {
+            Ok(()) => self.visited_session = Some(target.name),
+            Err(e) => self.status_message = Some(e.to_string()),
         }
     }
 
@@ -675,7 +668,7 @@ impl App {
         let active_ids: std::collections::HashSet<&str> =
             discovered.iter().map(|s| s.id.as_str()).collect();
 
-        let stale_ids: Vec<String> = self
+        let stale_ids: Vec<SessionId> = self
             .registry
             .ids()
             .iter()
@@ -683,7 +676,7 @@ impl App {
             .cloned()
             .collect();
         for id in stale_ids {
-            self.registry.mark_stale(&id);
+            self.registry.mark_stale(id.as_str());
         }
 
         for session in discovered {
@@ -691,7 +684,7 @@ impl App {
             let id = session.id.clone();
             let cwd_str = session.cwd.to_string_lossy().into_owned();
 
-            if let Some(existing) = self.registry.get_mut(&id) {
+            if let Some(existing) = self.registry.get_mut(id.as_str()) {
                 existing.cpu_percent = session.cpu_percent;
                 existing.tty = session.tty;
                 existing.branch = session.branch;
@@ -747,7 +740,7 @@ impl App {
                             &existing.name,
                             &current,
                             &target,
-                            self.bridge.as_ref(),
+                            &self.bridge,
                             self.prefs.notifications_muted,
                         );
                         existing.last_notified_state = Some(current);

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::session::{Session, SessionState};
+use super::session::{Session, SessionId, SessionState};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SortMode {
@@ -30,8 +30,8 @@ impl SortMode {
 }
 
 pub struct SessionRegistry {
-    sessions: HashMap<String, Session>,
-    order: Vec<String>,
+    sessions: HashMap<SessionId, Session>,
+    order: Vec<SessionId>,
     sort_mode: SortMode,
 }
 
@@ -53,6 +53,7 @@ impl SessionRegistry {
     }
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
+        // SessionId: Borrow<str>, so HashMap lookups with &str work.
         self.sessions.get_mut(id)
     }
 
@@ -155,7 +156,7 @@ impl SessionRegistry {
             .map(|s| s.name.clone())
             .collect();
 
-        let mut base_to_ids: HashMap<String, Vec<String>> = HashMap::new();
+        let mut base_to_ids: HashMap<String, Vec<SessionId>> = HashMap::new();
         for (id, session) in &self.sessions {
             if session.renamed {
                 continue;
@@ -171,7 +172,7 @@ impl SessionRegistry {
                 }
                 continue;
             }
-            ids.sort();
+            ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
             let mut n = 1;
             for id in &ids {
                 let candidate = loop {
@@ -191,10 +192,10 @@ impl SessionRegistry {
     pub fn name_taken(&self, name: &str, exclude_id: &str) -> bool {
         self.sessions
             .iter()
-            .any(|(id, s)| s.name == name && id != exclude_id)
+            .any(|(id, s)| s.name == name && id.as_str() != exclude_id)
     }
 
-    pub fn ids(&self) -> &[String] {
+    pub fn ids(&self) -> &[SessionId] {
         &self.order
     }
 }

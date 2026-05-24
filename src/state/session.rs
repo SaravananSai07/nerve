@@ -3,6 +3,60 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+use crate::state::state_machine::StateMachine;
+
+/// Number of consecutive `propose_state` calls required before the
+/// session's state actually changes. Defends against flicker (CPU
+/// spikes, transient file rewrites) at the detection layer.
+const CONFIRM_TICKS: u8 = 3;
+
+/// Strongly-typed wrapper for the canonical id we use to identify a
+/// Claude session in the registry. Encapsulates the `--resume`-vs-
+/// `sessionId` precedence rule at the constructor so the rest of the
+/// codebase never has to think about it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::borrow::Borrow<str> for SessionId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for SessionId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl From<String> for SessionId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -66,9 +120,13 @@ impl SessionState {
 
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub id: String,
+    pub id: SessionId,
     pub cwd: PathBuf,
     pub name: String,
+    /// Mirror of `state_machine.current()`, kept in sync via
+    /// `propose_state`/`set_state`. Public so callers can match on it
+    /// without going through an accessor — the underlying logic lives
+    /// inside `state_machine`.
     pub state: SessionState,
     pub state_changed_at: Instant,
     pub tty: Option<String>,
@@ -82,14 +140,11 @@ pub struct Session {
     pub pid: Option<u32>,
     pub jsonl_age_secs: Option<f64>,
     pub last_notified_state: Option<SessionState>,
-    pending_state: Option<SessionState>,
-    pending_count: u8,
+    state_machine: StateMachine<SessionState>,
 }
 
-const CONFIRM_TICKS: u8 = 3;
-
 impl Session {
-    pub fn new(id: String, cwd: PathBuf) -> Self {
+    pub fn new(id: SessionId, cwd: PathBuf) -> Self {
         let name = cwd
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -111,40 +166,31 @@ impl Session {
             pid: None,
             jsonl_age_secs: None,
             last_notified_state: None,
-            pending_state: None,
-            pending_count: 0,
+            state_machine: StateMachine::new(SessionState::Processing, CONFIRM_TICKS),
         }
     }
 
+    /// Propose a transition. Returns true when the threshold of
+    /// consecutive identical proposals has been hit and the visible
+    /// `state` field has been updated.
     pub fn propose_state(&mut self, new_state: SessionState) -> bool {
-        if new_state == self.state {
-            self.pending_state = None;
-            self.pending_count = 0;
-            return false;
-        }
-
-        if self.pending_state.as_ref() == Some(&new_state) {
-            self.pending_count += 1;
-            if self.pending_count >= CONFIRM_TICKS {
-                self.state = new_state;
-                self.state_changed_at = Instant::now();
-                self.pending_state = None;
-                self.pending_count = 0;
-                return true;
-            }
+        if self.state_machine.propose(new_state) {
+            self.state = self.state_machine.current().clone();
+            self.state_changed_at = Instant::now();
+            true
         } else {
-            self.pending_state = Some(new_state);
-            self.pending_count = 1;
+            false
         }
-        false
     }
 
+    /// Force-transition without confirmations. Used when authority
+    /// comes from a side channel (e.g. discovery says the session
+    /// vanished → mark Stale immediately).
     pub fn set_state(&mut self, new_state: SessionState) {
         if self.state != new_state {
+            self.state_machine.set(new_state.clone());
             self.state = new_state;
             self.state_changed_at = Instant::now();
-            self.pending_state = None;
-            self.pending_count = 0;
         }
     }
 

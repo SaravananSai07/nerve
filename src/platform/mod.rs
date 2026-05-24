@@ -16,20 +16,26 @@ pub enum Bridge {
     #[cfg(target_os = "macos")]
     Ghostty(ghostty::GhosttyBridge),
     Tmux(tmux::TmuxBridge),
+    /// No terminal integration available — running outside a supported
+    /// terminal multiplexer / host. All operations are no-ops that
+    /// surface a clear error to the user. Eliminates the
+    /// `Option<Bridge>` shape that previously peppered the codebase
+    /// with `if let Some(...)` checks (closes A4).
+    NoOp,
 }
 
 impl Bridge {
-    pub fn auto_detect() -> Option<Self> {
+    pub fn auto_detect() -> Self {
         let term = std::env::var("TERM_PROGRAM").unwrap_or_default();
         match term.as_str() {
             #[cfg(target_os = "macos")]
-            "ghostty" => Some(Self::Ghostty(ghostty::GhosttyBridge::new())),
-            "tmux" => Some(Self::Tmux(tmux::TmuxBridge)),
+            "ghostty" => Self::Ghostty(ghostty::GhosttyBridge::new()),
+            "tmux" => Self::Tmux(tmux::TmuxBridge),
             _ => {
                 if std::env::var("TMUX").is_ok() {
-                    Some(Self::Tmux(tmux::TmuxBridge))
+                    Self::Tmux(tmux::TmuxBridge)
                 } else {
-                    None
+                    Self::NoOp
                 }
             }
         }
@@ -40,6 +46,9 @@ impl Bridge {
             #[cfg(target_os = "macos")]
             Self::Ghostty(g) => g.go_to_session(target),
             Self::Tmux(t) => t.go_to_session(target),
+            Self::NoOp => anyhow::bail!(
+                "no terminal bridge detected (start nerve inside Ghostty or tmux)"
+            ),
         }
     }
 
@@ -48,6 +57,7 @@ impl Bridge {
             #[cfg(target_os = "macos")]
             Self::Ghostty(g) => g.capture_screen(target),
             Self::Tmux(t) => t.capture_screen(target),
+            Self::NoOp => None,
         }
     }
 
@@ -56,7 +66,12 @@ impl Bridge {
             #[cfg(target_os = "macos")]
             Self::Ghostty(g) => g.resolve_terminal_id(target).map(BridgeId::Ghostty),
             Self::Tmux(t) => t.resolve_pane_id(target).map(BridgeId::Tmux),
+            Self::NoOp => None,
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::NoOp)
     }
 }
 

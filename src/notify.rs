@@ -17,7 +17,7 @@ impl Notifier {
         session_name: &str,
         state: &SessionState,
         target: &SessionTarget,
-        bridge: Option<&Bridge>,
+        bridge: &Bridge,
         muted: bool,
     ) {
         if muted {
@@ -38,7 +38,7 @@ impl Notifier {
         self.send("nerve", &body, bridge, target);
     }
 
-    fn send(&self, title: &str, body: &str, bridge: Option<&Bridge>, target: &SessionTarget) {
+    fn send(&self, title: &str, body: &str, bridge: &Bridge, target: &SessionTarget) {
         #[cfg(target_os = "macos")]
         self.send_macos(title, body, bridge, target);
 
@@ -55,7 +55,7 @@ impl Notifier {
     }
 
     #[cfg(target_os = "macos")]
-    fn send_macos(&self, title: &str, body: &str, bridge: Option<&Bridge>, target: &SessionTarget) {
+    fn send_macos(&self, title: &str, body: &str, bridge: &Bridge, target: &SessionTarget) {
         // Prefer terminal-notifier: supports click-to-focus via -execute.
         if self.try_terminal_notifier(title, body, bridge, target) {
             return;
@@ -83,7 +83,7 @@ end run"#;
         &self,
         title: &str,
         body: &str,
-        bridge: Option<&Bridge>,
+        bridge: &Bridge,
         target: &SessionTarget,
     ) -> bool {
         let mut cmd = std::process::Command::new("terminal-notifier");
@@ -124,8 +124,8 @@ end run"#;
 }
 
 #[cfg(target_os = "macos")]
-fn focus_command(bridge: Option<&Bridge>, target: &SessionTarget) -> Option<String> {
-    let id = bridge?.resolve_id(target)?;
+fn focus_command(bridge: &Bridge, target: &SessionTarget) -> Option<String> {
+    let id = bridge.resolve_id(target)?;
     let id_str = id.to_string();
     // Defence in depth: validate the bridge id against a strict charset
     // before it ever reaches terminal-notifier's `-execute`. Even with
