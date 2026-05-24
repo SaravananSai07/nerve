@@ -1,6 +1,7 @@
 use std::process::{Command, Stdio};
 
 use super::SessionTarget;
+use crate::util::applescript;
 
 struct TerminalInfo {
     terminal_id: String,
@@ -29,61 +30,55 @@ impl GhosttyBridge {
 
         let (_tab_idx, term_idx) = find_terminal_position(&found.terminal_id)?;
 
-        let safe_id = escape_applescript(&found.terminal_id);
-
-        let restore_clause = match &self.nerve_terminal_id {
-            Some(id) => {
-                let safe = escape_applescript(id);
-                format!(
-                    "\ntell application \"Ghostty\"\n    activate\n    focus terminal id \"{safe}\"\nend tell"
-                )
-            }
-            None => String::new(),
-        };
-
-        let script = format!(
-            r#"
-set capturedText to ""
-tell application "Ghostty"
-    focus terminal id "{safe_id}"
-end tell
-delay 0.15
-tell application "System Events"
-    tell process "Ghostty"
-        set w to window 1
-        set g to group 1 of w
-        set g2 to group 1 of g
-        set topGroups to every group of g2
-        set allAreas to {{}}
-        repeat with tg in topGroups
-            set midGroups to every group of tg
-            repeat with mg in midGroups
-                try
-                    set ta to text area 1 of scroll area 1 of mg
-                    set end of allAreas to ta
-                end try
-            end repeat
-        end repeat
-        if (count of allAreas) >= {term_idx} then
-            set ta to item {term_idx} of allAreas
-            set buf to value of ta
-            set bufLen to length of buf
-            set grabLen to 5000
-            if bufLen < grabLen then set grabLen to bufLen
-            set capturedText to text (bufLen - grabLen + 1) thru bufLen of buf
-        end if
+        // All user-controlled values pass through argv. The empty string for
+        // arg 3 means "no restore" — checked inside the script.
+        const SCRIPT: &str = r#"on run argv
+    set tid to item 1 of argv
+    set termIdx to (item 2 of argv) as integer
+    set restoreId to item 3 of argv
+    set capturedText to ""
+    tell application "Ghostty"
+        focus terminal id tid
     end tell
-end tell
-{restore_clause}
-return capturedText
-"#
-        );
-
-        let output = Command::new("osascript")
-            .args(["-e", &script])
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
+    delay 0.15
+    tell application "System Events"
+        tell process "Ghostty"
+            set w to window 1
+            set g to group 1 of w
+            set g2 to group 1 of g
+            set topGroups to every group of g2
+            set allAreas to {}
+            repeat with tg in topGroups
+                set midGroups to every group of tg
+                repeat with mg in midGroups
+                    try
+                        set ta to text area 1 of scroll area 1 of mg
+                        set end of allAreas to ta
+                    end try
+                end repeat
+            end repeat
+            if (count of allAreas) >= termIdx then
+                set ta to item termIdx of allAreas
+                set buf to value of ta
+                set bufLen to length of buf
+                set grabLen to 5000
+                if bufLen < grabLen then set grabLen to bufLen
+                set capturedText to text (bufLen - grabLen + 1) thru bufLen of buf
+            end if
+        end tell
+    end tell
+    if restoreId is not equal to "" then
+        tell application "Ghostty"
+            activate
+            focus terminal id restoreId
+        end tell
+    end if
+    return capturedText
+end run"#;
+        let term_idx_str = term_idx.to_string();
+        let restore_id = self.nerve_terminal_id.as_deref().unwrap_or("");
+        let args = [&found.terminal_id[..], &term_idx_str, restore_id];
+        let output = applescript::run(SCRIPT, &args).ok()?;
 
         if !output.status.success() {
             return None;
@@ -233,32 +228,21 @@ fn probe_terminal_by_tty(candidate_ids: &[&str], tty: &str) -> Option<String> {
 
     std::thread::sleep(std::time::Duration::from_millis(80));
 
-    let id_list: Vec<String> = candidate_ids
-        .iter()
-        .map(|id| format!("\"{}\"", escape_applescript(id)))
-        .collect();
-    let script = format!(
-        r#"
-tell application "Ghostty"
+    // Pass every candidate id through argv. The script iterates the
+    // arguments rather than the interpolated list literal.
+    const SCRIPT: &str = r#"on run argv
     set out to ""
-    set candidates to {{{ids}}}
-    repeat with tid in candidates
-        try
-            set tname to name of (terminal id tid)
-            set out to out & tid & "|" & tname & linefeed
-        end try
-    end repeat
+    tell application "Ghostty"
+        repeat with tid in argv
+            try
+                set tname to name of (terminal id tid)
+                set out to out & tid & "|" & tname & linefeed
+            end try
+        end repeat
+    end tell
     return out
-end tell
-"#,
-        ids = id_list.join(", ")
-    );
-
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+end run"#;
+    let output = applescript::run(SCRIPT, candidate_ids).ok()?;
 
     // Reset title
     if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&dev_path) {
@@ -345,15 +329,24 @@ fn find_terminal_for_session<'a>(
         return Some(exact_matches[0]);
     }
 
-    // Longest prefix match for cd'd sessions
+    // Longest prefix match for cd'd sessions. Canonicalize both sides so
+    // a malicious cwd that uses `..` traversal can't false-match an
+    // unrelated terminal (S14). `Path::starts_with` is component-based,
+    // not byte-based, so once both paths are canonical the comparison
+    // can no longer be tricked by traversal segments.
     let mut best: Option<(usize, &TerminalInfo)> = None;
     for t in terminals {
         if is_nerve_terminal(t) {
             continue;
         }
         let t_path = std::path::Path::new(&t.cwd);
-        if session_path.starts_with(t_path) || t_path.starts_with(session_path) {
-            let common = common_prefix_len(session_path, t_path);
+        let t_canonical =
+            std::fs::canonicalize(t_path).unwrap_or_else(|_| t_path.to_path_buf());
+        let session_for_match = &session_canonical;
+        if session_for_match.starts_with(&t_canonical)
+            || t_canonical.starts_with(session_for_match)
+        {
+            let common = common_prefix_len(session_for_match, &t_canonical);
             if best.map_or(true, |(best_len, _)| common > best_len) {
                 best = Some((common, t));
             }
@@ -423,22 +416,15 @@ end tell
     None
 }
 
-fn escape_applescript(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 pub(crate) fn focus_terminal(terminal_id: &str) -> anyhow::Result<()> {
-    let safe_id = escape_applescript(terminal_id);
-    let script = format!(
-        "tell application \"Ghostty\"\n\
-             activate\n\
-             focus terminal id \"{safe_id}\"\n\
-         end tell"
-    );
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .stdin(Stdio::null())
-        .output()?;
+    const SCRIPT: &str = r#"on run argv
+    set tid to item 1 of argv
+    tell application "Ghostty"
+        activate
+        focus terminal id tid
+    end tell
+end run"#;
+    let output = applescript::run(SCRIPT, &[terminal_id])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

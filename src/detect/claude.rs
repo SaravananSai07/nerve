@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -8,6 +9,24 @@ use serde::Deserialize;
 
 use crate::detect::process;
 use crate::state::session::{Session, SessionState, TokenUsage};
+use crate::util::sanitize::strip_ansi;
+
+/// Cap on the size of a per-pid session JSON file. The format is small
+/// (under 1 KiB in practice). Anything bigger is almost certainly garbage
+/// or hostile content planted in `~/.claude/sessions/`.
+const SESSION_JSON_MAX_BYTES: u64 = 64 * 1024;
+
+/// Open a JSONL transcript file with `O_NOFOLLOW`. Defends against an
+/// attacker swapping a final-component symlink between our exists()-check
+/// in `find_jsonl` and the actual open call (S13). Multi-component
+/// directory-level traversal is out of scope — `~/.claude/projects/` is
+/// user-owned, so cross-user attacks already require a prior compromise.
+fn open_jsonl(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+}
 
 #[derive(Deserialize)]
 struct SessionFile {
@@ -54,8 +73,7 @@ fn load_session(
     procs: &[process::ProcessInfo],
     child_map: &HashMap<u32, Vec<u32>>,
 ) -> Option<Session> {
-    let content = fs::read_to_string(path).ok()?;
-    let sf: SessionFile = serde_json::from_str(&content).ok()?;
+    let sf = read_session_file(path)?;
 
     let proc = process::find_process(procs, sf.pid)?;
     let comm = proc.comm.rsplit('/').next().unwrap_or(&proc.comm);
@@ -92,7 +110,7 @@ fn load_session(
 
     session.tty = process::get_tty_for_pid(procs, sf.pid);
     session.cpu_percent = process::get_cpu_for_pid(procs, sf.pid);
-    session.branch = detect_branch(&cwd);
+    session.branch = crate::detect::git::read_branch(&cwd);
 
     let jsonl_path = find_jsonl(&resolved_id, &cwd);
     if let Some(ref jp) = jsonl_path {
@@ -117,22 +135,21 @@ fn load_session(
     Some(session)
 }
 
-fn is_alive(pid: u32) -> bool {
-    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
-}
-
-fn detect_branch(cwd: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["-C", &cwd.to_string_lossy(), "rev-parse", "--abbrev-ref", "HEAD"])
-        .stderr(std::process::Stdio::null())
-        .output()
+fn read_session_file(path: &Path) -> Option<SessionFile> {
+    // O_NOFOLLOW guards the per-pid session JSON the same way we guard
+    // JSONL transcripts (S13).
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
         .ok()?;
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Some(branch)
-    } else {
-        None
-    }
+    let mut buf = String::new();
+    // Cap the read so a planted multi-GB file can't drive the discovery
+    // path into OOM. serde will reject anything truncated.
+    file.take(SESSION_JSON_MAX_BYTES)
+        .read_to_string(&mut buf)
+        .ok()?;
+    serde_json::from_str(&buf).ok()
 }
 
 fn find_jsonl(session_id: &str, cwd: &Path) -> Option<PathBuf> {
@@ -213,7 +230,7 @@ fn file_age_secs(path: &Path) -> f64 {
 }
 
 fn read_tail_state(path: &Path) -> Option<SessionState> {
-    let mut file = fs::File::open(path).ok()?;
+    let mut file = open_jsonl(path).ok()?;
     let len = file.metadata().ok()?.len();
 
     // Claude Code 2.x writes large entries that we skip past:
@@ -310,7 +327,7 @@ fn cost_per_million(model: &str) -> (f64, f64, f64, f64) {
 pub fn parse_token_usage(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
     let mut usage = TokenUsage::default();
 
-    let file = match fs::File::open(path) {
+    let file = match open_jsonl(path) {
         Ok(f) => f,
         Err(_) => return (usage, from_offset),
     };
@@ -429,15 +446,19 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
     let trimmed = first_line.trim();
-    if trimmed.len() > 80 {
+    let truncated = if trimmed.len() > 80 {
         format!("{}…", &trimmed[..80])
     } else {
         trimmed.to_string()
-    }
+    };
+    // Strip ANSI / OSC / C0+C1 controls before the snippet reaches the TUI.
+    // Defends against an untrusted JSONL painting the host terminal via
+    // escape sequences (cursor jumps, OSC 52 clipboard writes, etc.).
+    strip_ansi(&truncated).into_owned()
 }
 
 pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
-    let mut file = match fs::File::open(path) {
+    let mut file = match open_jsonl(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
@@ -486,8 +507,10 @@ pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
                 let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match item_type {
                     "tool_use" => {
-                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string();
-                        let detail = item
+                        let raw_name =
+                            item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                        let name = strip_ansi(raw_name).into_owned();
+                        let raw_detail: String = item
                             .get("input")
                             .and_then(|i| {
                                 i.get("command")
@@ -508,6 +531,7 @@ pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
                             .chars()
                             .take(200)
                             .collect();
+                        let detail = strip_ansi(&raw_detail).into_owned();
                         entries.push(LogEntry::ToolUse { name, detail });
                     }
                     "tool_result" => {
@@ -517,12 +541,12 @@ pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
                         entries.push(LogEntry::ToolResult { status, snippet });
                     }
                     "text" => {
-                        let text = item
-                            .get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if !text.is_empty() {
+                        let raw = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        if !raw.is_empty() {
+                            // Sanitize at the boundary so the TUI never sees
+                            // raw ESC / OSC bytes coming from an untrusted
+                            // JSONL transcript.
+                            let text = strip_ansi(raw).into_owned();
                             if role == "user" {
                                 entries.push(LogEntry::UserText(text));
                             } else if role == "assistant" {
@@ -540,29 +564,48 @@ pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
     entries.into_iter().skip(skip).collect()
 }
 
-pub fn read_session_pid(session_id: &str) -> Option<u32> {
-    let dir = sessions_dir()?;
-    for entry in fs::read_dir(&dir).ok()?.flatten() {
+/// Resolve a session id to its pid AND atomically (within the same function
+/// scope) re-validate that the pid is still a `claude` process before
+/// sending SIGTERM. This closes the pid-reuse TOCTOU (S4 / L19): between
+/// a separate resolve-then-kill, the kernel could have recycled the pid
+/// to an unrelated user process and we'd SIGTERM that instead.
+pub fn kill_by_session_id(session_id: &str) -> Result<u32, String> {
+    let dir = sessions_dir().ok_or_else(|| "no sessions dir".to_string())?;
+    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+
+    for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "json") {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(sf) = serde_json::from_str::<SessionFile>(&content) {
-                    if sf.session_id == session_id && is_alive(sf.pid) {
-                        return Some(sf.pid);
-                    }
-                }
-            }
+        if !path.extension().is_some_and(|e| e == "json") {
+            continue;
         }
+        let sf = match read_session_file(&path) {
+            Some(s) => s,
+            None => continue,
+        };
+        if sf.session_id != session_id {
+            continue;
+        }
+
+        if !is_claude_process(sf.pid) {
+            return Err(format!(
+                "pid {} is no longer a claude process (likely already exited)",
+                sf.pid
+            ));
+        }
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(sf.pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .map_err(|e| format!("kill pid {}: {e}", sf.pid))?;
+        return Ok(sf.pid);
     }
-    None
+    Err("session id not found in ~/.claude/sessions/".to_string())
 }
 
-pub fn kill_session(pid: u32) -> Result<(), String> {
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid as i32),
-        nix::sys::signal::Signal::SIGTERM,
-    )
-    .map_err(|e| format!("failed to kill pid {pid}: {e}"))
+fn is_claude_process(pid: u32) -> bool {
+    process::scan_processes().iter().any(|p| {
+        p.pid == pid && p.comm.rsplit('/').next().unwrap_or(&p.comm) == "claude"
+    })
 }
 
 fn should_replace(existing: &Session, candidate: &Session) -> bool {

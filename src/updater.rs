@@ -38,8 +38,20 @@ fn now_unix() -> u64 {
 }
 
 fn fetch_latest_version() -> Option<String> {
+    // `--max-filesize 65536`: refuse a hostile / corrupted response that
+    // attempts to feed us a multi-MB payload. The real crates.io response
+    // is well under 10 KiB.
     let output = std::process::Command::new("curl")
-        .args(["-s", "--max-time", "5", "-A", "nerve-update-check", CRATES_API])
+        .args([
+            "-s",
+            "--max-time",
+            "5",
+            "--max-filesize",
+            "65536",
+            "-A",
+            "nerve-update-check",
+            CRATES_API,
+        ])
         .output()
         .ok()?;
     if !output.status.success() {

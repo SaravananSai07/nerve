@@ -61,25 +61,21 @@ impl Notifier {
             return;
         }
 
-        let escaped_title = title.replace('\\', "\\\\").replace('"', "\\\"");
-        let escaped_body = body.replace('\\', "\\\\").replace('"', "\\\"");
-
-        let sound_clause = if self.config.sound {
-            " sound name \"Funk\""
+        // Everything user-controlled flows through `argv`. Nothing is
+        // interpolated into the script body — eliminates AppleScript
+        // injection via session names or cwds.
+        const SCRIPT_SOUND: &str = r#"on run argv
+    display notification (item 2 of argv) with title (item 1 of argv) sound name "Funk"
+end run"#;
+        const SCRIPT_SILENT: &str = r#"on run argv
+    display notification (item 2 of argv) with title (item 1 of argv)
+end run"#;
+        let script = if self.config.sound {
+            SCRIPT_SOUND
         } else {
-            ""
+            SCRIPT_SILENT
         };
-
-        let script = format!(
-            "display notification \"{escaped_body}\" with title \"{escaped_title}\"{sound_clause}"
-        );
-
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let _ = crate::util::applescript::spawn(script, &[title, body]);
     }
 
     #[cfg(target_os = "macos")]
@@ -130,9 +126,35 @@ impl Notifier {
 #[cfg(target_os = "macos")]
 fn focus_command(bridge: Option<&Bridge>, target: &SessionTarget) -> Option<String> {
     let id = bridge?.resolve_id(target)?;
+    let id_str = id.to_string();
+    // Defence in depth: validate the bridge id against a strict charset
+    // before it ever reaches terminal-notifier's `-execute`. Even with
+    // shell-quoting, single quotes inside `id` would let the value end the
+    // quoted region — better to refuse outright. The bridge ids we issue
+    // are colon-delimited UUIDs / tmux pane ids; nothing legitimate
+    // contains shell metacharacters.
+    if !is_safe_bridge_id(&id_str) {
+        crate::log_warn!("notify: refusing -execute payload with unsafe id: {id_str:?}");
+        return None;
+    }
     let exe = std::env::current_exe().ok()?;
     let exe_str = exe.to_str()?;
-    Some(format!("{} --focus {}", shell_quote(exe_str), id))
+    Some(format!(
+        "{} --focus {}",
+        shell_quote(exe_str),
+        shell_quote(&id_str)
+    ))
+}
+
+/// Bridge ids carry no user content — they're opaque handles assigned by
+/// Ghostty / tmux. Anything outside the allowed charset means upstream is
+/// misbehaving, and we refuse rather than risk a `-execute` injection.
+#[cfg(target_os = "macos")]
+fn is_safe_bridge_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-' | b'%' | b'.' | b'$'))
 }
 
 #[cfg(target_os = "macos")]

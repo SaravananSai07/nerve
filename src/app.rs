@@ -490,16 +490,15 @@ impl App {
     }
 
     fn execute_kill(&mut self, name: &str, id: &str) {
-        let pid = match claude::read_session_pid(id) {
-            Some(p) => p,
-            None => {
-                self.status_message = Some(format!("'{name}': pid not found or already dead"));
-                return;
+        // `kill_by_session_id` resolves + validates + signals as one
+        // operation so a recycled pid can't slip through (S4 / L19).
+        match claude::kill_by_session_id(id) {
+            Ok(pid) => {
+                self.status_message = Some(format!("sent SIGTERM to '{name}' (pid {pid})"));
             }
-        };
-        match claude::kill_session(pid) {
-            Ok(()) => self.status_message = Some(format!("sent SIGTERM to '{name}' (pid {pid})")),
-            Err(e) => self.status_message = Some(e),
+            Err(e) => {
+                self.status_message = Some(format!("'{name}': {e}"));
+            }
         }
     }
 

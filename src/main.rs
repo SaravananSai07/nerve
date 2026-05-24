@@ -11,6 +11,7 @@ mod state;
 mod terminal_guard;
 mod tui;
 mod updater;
+mod util;
 
 use std::str::FromStr;
 
@@ -34,13 +35,32 @@ fn parse_focus_arg() -> Option<String> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--focus" {
-            return args.next();
+            return args.next().and_then(accept_focus_arg);
         }
         if let Some(val) = a.strip_prefix("--focus=") {
-            return Some(val.to_string());
+            return accept_focus_arg(val.to_string());
         }
     }
     None
+}
+
+fn accept_focus_arg(s: String) -> Option<String> {
+    use util::focus_arg::{validate, FocusValidation};
+    match validate(s) {
+        FocusValidation::Ok(v) => Some(v),
+        FocusValidation::Empty => {
+            eprintln!("nerve: --focus argument is empty");
+            None
+        }
+        FocusValidation::TooLong(n) => {
+            eprintln!("nerve: --focus argument is too long ({n} bytes)");
+            None
+        }
+        FocusValidation::ForbiddenChar(_) => {
+            eprintln!("nerve: --focus argument contains forbidden characters");
+            None
+        }
+    }
 }
 
 fn handle_focus(s: &str) {
@@ -131,6 +151,9 @@ fn main() -> std::io::Result<()> {
     }
 
     let shutdown = signals::ShutdownFlag::install()?;
+    if let Err(e) = signals::spawn_child_reaper() {
+        log_warn!("signals: child reaper failed to start: {e}");
+    }
 
     let _lock = match lockfile::LockFile::acquire(&paths) {
         Ok(l) => l,
