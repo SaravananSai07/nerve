@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use super::SessionTarget;
@@ -6,6 +7,11 @@ use crate::util::applescript;
 struct TerminalInfo {
     terminal_id: String,
     cwd: String,
+    /// `cwd` canonicalized once at query time so the matching loop
+    /// in `find_terminal_for_session` doesn't `realpath(3)` every
+    /// candidate per lookup (closes L24). Falls back to the raw
+    /// `cwd` if canonicalize fails.
+    cwd_canonical: PathBuf,
     name: String,
 }
 
@@ -201,9 +207,13 @@ end tell
         if parts.len() < 3 {
             continue;
         }
+        let cwd = parts[1].trim().to_string();
+        let cwd_canonical =
+            std::fs::canonicalize(&cwd).unwrap_or_else(|_| PathBuf::from(&cwd));
         terminals.push(TerminalInfo {
             terminal_id: parts[0].trim().to_string(),
-            cwd: parts[1].trim().to_string(),
+            cwd,
+            cwd_canonical,
             name: parts[2].trim().to_string(),
         });
     }
@@ -290,11 +300,10 @@ fn find_terminal_for_session<'a>(
         if is_nerve_terminal(t) {
             continue;
         }
-        let t_path = std::path::Path::new(&t.cwd);
-        let is_match = t_path == session_path
-            || std::fs::canonicalize(t_path)
-                .map(|c| c == session_canonical)
-                .unwrap_or(false);
+        // Pre-canonicalized at query time (closes L24) — no
+        // per-lookup `realpath(3)` syscall here anymore.
+        let is_match = t.cwd_canonical == session_canonical
+            || std::path::Path::new(&t.cwd) == session_path;
         if is_match {
             exact_matches.push(t);
         }
@@ -339,14 +348,13 @@ fn find_terminal_for_session<'a>(
         if is_nerve_terminal(t) {
             continue;
         }
-        let t_path = std::path::Path::new(&t.cwd);
-        let t_canonical =
-            std::fs::canonicalize(t_path).unwrap_or_else(|_| t_path.to_path_buf());
+        // Pre-canonicalized terminal cwd (L24) — no syscall here.
+        let t_canonical = &t.cwd_canonical;
         let session_for_match = &session_canonical;
-        if session_for_match.starts_with(&t_canonical)
+        if session_for_match.starts_with(t_canonical)
             || t_canonical.starts_with(session_for_match)
         {
-            let common = common_prefix_len(session_for_match, &t_canonical);
+            let common = common_prefix_len(session_for_match, t_canonical);
             if best.map_or(true, |(best_len, _)| common > best_len) {
                 best = Some((common, t));
             }

@@ -334,6 +334,14 @@ impl App {
                         if let Some(name) = self.visited_session.take() {
                             self.status_message = Some(format!("returned from '{name}'"));
                         }
+                        // Bridge re-detect (L25): if we started with
+                        // NoOp (env wasn't recognised at launch) but
+                        // the user has since moved nerve into a
+                        // supported terminal, pick it up on the next
+                        // focus-gain instead of needing a relaunch.
+                        if !self.bridge.is_active() {
+                            self.bridge = Bridge::auto_detect();
+                        }
                     }
                     Event::FocusLost => {
                         self.focused = false;
