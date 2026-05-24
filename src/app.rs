@@ -5,6 +5,7 @@ use ratatui::DefaultTerminal;
 
 use crate::config::Config;
 use crate::detect::claude::{self, LogEntry};
+use crate::detect::process::ProcessTable;
 use crate::log_info;
 use crate::notify::Notifier;
 use crate::paths::Paths;
@@ -60,6 +61,7 @@ pub struct App {
     config: Config,
     registry: SessionRegistry,
     filtered: FilteredView,
+    proc_table: ProcessTable,
     theme: Theme,
     theme_index: usize,
     bridge: Bridge,
@@ -77,6 +79,16 @@ pub struct App {
     has_terminal_capture: bool,
     visited_session: Option<String>,
     update_banner: Option<String>,
+}
+
+/// Notification waiting to be fired at the end of a refresh. The
+/// detector phase mutates the registry to completion before any
+/// notifier I/O runs (closes A11 — registry mutations no longer
+/// interleave with `spawn()` calls that could block).
+struct PendingNotification {
+    name: String,
+    state: SessionState,
+    target: SessionTarget,
 }
 
 impl App {
@@ -107,6 +119,7 @@ impl App {
             config,
             registry: SessionRegistry::new(),
             filtered: FilteredView::new(),
+            proc_table: ProcessTable::refreshed(),
             theme,
             theme_index,
             bridge,
@@ -655,8 +668,30 @@ impl App {
         }
     }
 
+    /// Top-level discovery tick. Three discrete stages (closes A3 / A11):
+    ///   1. Take a (cached if recent) snapshot of the process table.
+    ///   2. Apply the discovered sessions to the registry, collecting
+    ///      pending notifications without dispatching them yet.
+    ///   3. Dispatch the notification batch. Because (2) finishes before
+    ///      (3) starts, a slow `osascript` spawn can no longer freeze a
+    ///      mid-refresh registry mutation.
     fn refresh_sessions(&mut self) {
-        let discovered = claude::discover_sessions();
+        let interval = Duration::from_millis(self.config.general.process_scan_interval_ms);
+        self.proc_table.refresh_if_stale(interval);
+        let discovered = claude::discover_sessions_with(&self.proc_table);
+
+        let pending = self.apply_discovery(discovered);
+        self.dispatch_notifications(pending);
+
+        let count = self.registry.len();
+        if count > 0 && self.selected >= count {
+            self.selected = count - 1;
+        }
+    }
+
+    /// Stage 2 — pure registry mutation. Returns the batch of
+    /// notifications that should fire once the mutation is complete.
+    fn apply_discovery(&mut self, discovered: Vec<Session>) -> Vec<PendingNotification> {
         let active_ids: std::collections::HashSet<&str> =
             discovered.iter().map(|s| s.id.as_str()).collect();
 
@@ -671,6 +706,7 @@ impl App {
             self.registry.mark_stale(id.as_str());
         }
 
+        let mut pending = Vec::new();
         let mut any_transition = false;
 
         for session in discovered {
@@ -716,28 +752,24 @@ impl App {
                     existing.jsonl_path = session.jsonl_path;
                 }
 
-                let transitioned = existing.propose_state(detected_state);
-                if transitioned {
+                if existing.propose_state(detected_state) {
                     any_transition = true;
                     let current = existing.state.clone();
                     if existing.last_notified_state.as_ref() != Some(&current) {
-                        let target = SessionTarget {
-                            cwd: existing.cwd.to_string_lossy().into_owned(),
+                        pending.push(PendingNotification {
                             name: existing.name.clone(),
-                            dir_name: existing
-                                .cwd
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                            tty: existing.tty.clone(),
-                        };
-                        self.notifier.maybe_notify(
-                            &existing.name,
-                            &current,
-                            &target,
-                            &self.bridge,
-                            self.prefs.notifications_muted,
-                        );
+                            state: current.clone(),
+                            target: SessionTarget {
+                                cwd: existing.cwd.to_string_lossy().into_owned(),
+                                name: existing.name.clone(),
+                                dir_name: existing
+                                    .cwd
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                                tty: existing.tty.clone(),
+                            },
+                        });
                         existing.last_notified_state = Some(current);
                     }
                 }
@@ -758,17 +790,25 @@ impl App {
         self.registry.re_disambiguate_names();
         self.registry.shift_all_activity();
 
-        // Any confirmed state transition has to invalidate the cached
-        // FilteredView so the next refresh sees the new sort order /
-        // membership. upsert / mark_stale / cycle_sort already bump
-        // automatically.
         if any_transition {
             self.registry.bump_version();
         }
 
-        let count = self.registry.len();
-        if count > 0 && self.selected >= count {
-            self.selected = count - 1;
+        pending
+    }
+
+    /// Stage 3 — fire each pending notification. Registry is fully
+    /// settled before any of these run, so a slow `osascript` spawn
+    /// can no longer freeze a mid-refresh mutation.
+    fn dispatch_notifications(&self, batch: Vec<PendingNotification>) {
+        for note in batch {
+            self.notifier.maybe_notify(
+                &note.name,
+                &note.state,
+                &note.target,
+                &self.bridge,
+                self.prefs.notifications_muted,
+            );
         }
     }
 }

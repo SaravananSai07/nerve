@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -8,6 +9,43 @@ pub struct ProcessInfo {
     pub comm: String,
     pub cpu: f32,
     pub args: String,
+}
+
+/// Cached snapshot of the system's process table plus its parent→child
+/// index. Refreshed lazily on a TTL configured by `process_scan_interval_ms`
+/// (closes A7 — the setting was previously dead config). Each refresh is
+/// one `ps -eo` fork; with the default 5 s TTL that's roughly 80%
+/// fewer forks than the previous per-tick scan.
+pub struct ProcessTable {
+    procs: Vec<ProcessInfo>,
+    child_map: HashMap<u32, Vec<u32>>,
+    snapshot_at: Instant,
+}
+
+impl ProcessTable {
+    pub fn refreshed() -> Self {
+        let procs = scan_processes();
+        let child_map = build_child_map(&procs);
+        Self {
+            procs,
+            child_map,
+            snapshot_at: Instant::now(),
+        }
+    }
+
+    pub fn refresh_if_stale(&mut self, max_age: Duration) {
+        if self.snapshot_at.elapsed() >= max_age {
+            *self = Self::refreshed();
+        }
+    }
+
+    pub fn procs(&self) -> &[ProcessInfo] {
+        &self.procs
+    }
+
+    pub fn child_map(&self) -> &HashMap<u32, Vec<u32>> {
+        &self.child_map
+    }
 }
 
 pub fn scan_processes() -> Vec<ProcessInfo> {
@@ -67,7 +105,7 @@ pub fn resume_session_id(args: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::resume_session_id;
+    use super::*;
 
     #[test]
     fn resume_session_id_handles_all_forms() {
@@ -77,6 +115,19 @@ mod tests {
         assert_eq!(resume_session_id("claude --foo"), None);
         assert_eq!(resume_session_id("claude --resume"), None);
         assert_eq!(resume_session_id("claude --resume="), None);
+    }
+
+    #[test]
+    fn process_table_refreshes_once_per_ttl_window() {
+        let mut table = ProcessTable::refreshed();
+        let first_snapshot_at = table.snapshot_at;
+        // Within the TTL window the snapshot stamp stays put.
+        table.refresh_if_stale(Duration::from_secs(60));
+        assert_eq!(table.snapshot_at, first_snapshot_at);
+        // A zero-TTL forces an immediate refresh; the stamp advances.
+        std::thread::sleep(Duration::from_millis(2));
+        table.refresh_if_stale(Duration::from_millis(0));
+        assert!(table.snapshot_at > first_snapshot_at);
     }
 }
 

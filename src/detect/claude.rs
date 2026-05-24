@@ -42,13 +42,22 @@ fn sessions_dir() -> Option<PathBuf> {
 }
 
 pub fn discover_sessions() -> Vec<Session> {
+    // CLI / one-shot path: take a fresh process snapshot every call.
+    // The TUI hot path goes through `discover_sessions_with`.
+    let table = process::ProcessTable::refreshed();
+    discover_sessions_with(&table)
+}
+
+/// Discovery against a (possibly cached) process table. The App holds
+/// a `ProcessTable` that it refreshes only every
+/// `process_scan_interval_ms`, so a 1 Hz refresh tick no longer pays
+/// the `ps -eo` fork cost on every iteration (closes A7).
+pub fn discover_sessions_with(table: &process::ProcessTable) -> Vec<Session> {
     let dir = match sessions_dir() {
         Some(d) if d.exists() => d,
         _ => return Vec::new(),
     };
 
-    let procs = process::scan_processes();
-    let child_map = process::build_child_map(&procs);
     let mut sessions = Vec::new();
 
     let entries = match fs::read_dir(&dir) {
@@ -59,7 +68,7 @@ pub fn discover_sessions() -> Vec<Session> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json") {
-            if let Some(session) = load_session(&path, &procs, &child_map) {
+            if let Some(session) = load_session(&path, table.procs(), table.child_map()) {
                 sessions.push(session);
             }
         }
