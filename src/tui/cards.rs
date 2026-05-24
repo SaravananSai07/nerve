@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -59,7 +61,10 @@ pub fn render(
         (chunks[0], chunks[1])
     };
 
-    render_cards(frame, card_area, sessions, selected, theme);
+    // Sample `now` once per frame so every card's duration display
+    // and any age-based sort consult the same `Instant` (L13 / L30).
+    let now = Instant::now();
+    render_cards(frame, card_area, sessions, selected, theme, now);
     render_status_bar(
         frame,
         status_area,
@@ -94,7 +99,14 @@ fn render_update_banner(frame: &mut Frame, area: Rect, theme: &Theme, version: &
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: usize, theme: &Theme) {
+fn render_cards(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[&Session],
+    selected: usize,
+    theme: &Theme,
+    now: Instant,
+) {
     let width = area.width as usize;
     let cols = if width >= 80 { 2 } else { 1 };
     let total_rows = sessions.len().div_ceil(cols);
@@ -139,13 +151,20 @@ fn render_cards(frame: &mut Frame, area: Rect, sessions: &[&Session], selected: 
                 .split(row_chunks[visible_row]);
 
             if col < col_chunks.len() {
-                render_card(frame, col_chunks[col], sessions[i], i == selected, theme);
+                render_card(frame, col_chunks[col], sessions[i], i == selected, theme, now);
             }
         }
     }
 }
 
-fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bool, theme: &Theme) {
+fn render_card(
+    frame: &mut Frame,
+    area: Rect,
+    session: &Session,
+    is_selected: bool,
+    theme: &Theme,
+    now: Instant,
+) {
     let state_color = theme.state_color(&session.state);
     let indicator = theme.state_indicator(&session.state);
 
@@ -177,7 +196,7 @@ fn render_card(frame: &mut Frame, area: Rect, session: &Session, is_selected: bo
     );
 
     let title_right = Span::styled(
-        format!(" {} ", session.format_duration()),
+        format!(" {} ", session.format_duration_at(now)),
         if is_selected {
             Style::default().fg(state_color).add_modifier(Modifier::BOLD)
         } else {

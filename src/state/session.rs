@@ -217,12 +217,27 @@ impl Session {
         }
     }
 
+    /// Convenience wrapper that samples `Instant::now()` itself —
+    /// used by CLI paths (`--list`/`--dump`) and tests where the
+    /// per-frame consistency win doesn't apply.
     pub fn state_duration(&self) -> std::time::Duration {
-        self.state_changed_at.elapsed()
+        self.state_duration_at(Instant::now())
+    }
+
+    /// Duration since the last state change, computed against a
+    /// caller-supplied `now`. Hot path (rendering, sorting) passes a
+    /// single `Instant::now()` sampled at frame top so every card in
+    /// the same frame agrees on the timestamp (closes L13 + L30).
+    pub fn state_duration_at(&self, now: Instant) -> std::time::Duration {
+        now.saturating_duration_since(self.state_changed_at)
     }
 
     pub fn format_duration(&self) -> String {
-        let secs = self.state_duration().as_secs();
+        self.format_duration_at(Instant::now())
+    }
+
+    pub fn format_duration_at(&self, now: Instant) -> String {
+        let secs = self.state_duration_at(now).as_secs();
         if secs < 60 {
             format!("{secs}s")
         } else if secs < 3600 {

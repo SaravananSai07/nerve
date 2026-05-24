@@ -71,12 +71,22 @@ pub fn discover_sessions_with(
         Err(_) => return Vec::new(),
     };
 
+    // List ~/.claude/projects/ subdirectories ONCE per scan rather
+    // than per session. Without this every session whose cwd didn't
+    // match the exact-encoded path triggered its own read_dir
+    // (closes L6).
+    let project_dirs = list_project_dirs();
+
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json") {
-            if let Some(session) =
-                load_session(&path, table.procs(), table.child_map(), cache)
-            {
+            if let Some(session) = load_session(
+                &path,
+                table.procs(),
+                table.child_map(),
+                cache,
+                &project_dirs,
+            ) {
                 if let Some(ref jp) = session.jsonl_path {
                     seen_jsonls.insert(jp.clone());
                 }
@@ -93,11 +103,28 @@ pub fn discover_sessions_with(
     deduplicate_sessions(sessions)
 }
 
+fn list_project_dirs() -> Vec<PathBuf> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    let projects_dir = home.join(".claude").join("projects");
+    match fs::read_dir(&projects_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.path())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 fn load_session(
     path: &Path,
     procs: &[process::ProcessInfo],
     child_map: &HashMap<u32, Vec<u32>>,
     cache: &mut JsonlCache,
+    project_dirs: &[PathBuf],
 ) -> Option<Session> {
     let sf = read_session_file(path)?;
 
@@ -139,7 +166,7 @@ fn load_session(
     session.cpu_percent = process::get_cpu_for_pid(procs, sf.pid);
     session.branch = crate::detect::git::read_branch(&cwd);
 
-    let jsonl_path = find_jsonl(&resolved_id, &cwd);
+    let jsonl_path = find_jsonl(&resolved_id, &cwd, project_dirs);
     if let Some(ref jp) = jsonl_path {
         session.state = infer_state_from_jsonl(jp, sf.pid, procs, child_map, cache);
         session.jsonl_path = Some(jp.clone());
@@ -179,7 +206,7 @@ fn read_session_file(path: &Path) -> Option<SessionFile> {
     serde_json::from_str(&buf).ok()
 }
 
-fn find_jsonl(session_id: &str, cwd: &Path) -> Option<PathBuf> {
+fn find_jsonl(session_id: &str, cwd: &Path, project_dirs: &[PathBuf]) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let projects_dir = home.join(".claude").join("projects");
     if !projects_dir.exists() {
@@ -189,17 +216,19 @@ fn find_jsonl(session_id: &str, cwd: &Path) -> Option<PathBuf> {
     let expected_dir = cwd.to_string_lossy().replace('/', "-");
     let jsonl_name = format!("{session_id}.jsonl");
 
+    // Exact match: try the path Claude Code would naturally write to
+    // before walking the fallback list.
     let exact = projects_dir.join(&expected_dir).join(&jsonl_name);
     if exact.exists() {
         return Some(exact);
     }
 
-    for entry in fs::read_dir(&projects_dir).ok()?.flatten() {
-        if entry.file_type().ok()?.is_dir() {
-            let jsonl = entry.path().join(&jsonl_name);
-            if jsonl.exists() {
-                return Some(jsonl);
-            }
+    // Fallback: caller has already listed the project subdirs (once
+    // per scan, not once per session) — just stat each candidate.
+    for dir in project_dirs {
+        let candidate = dir.join(&jsonl_name);
+        if candidate.exists() {
+            return Some(candidate);
         }
     }
 

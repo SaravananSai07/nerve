@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::time::Instant;
+
 use super::session::{Session, SessionId, SessionState};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -104,7 +106,12 @@ impl SessionRegistry {
                 sessions.sort_by(|a, b| a.name.cmp(&b.name));
             }
             SortMode::Age => {
-                sessions.sort_by_key(|s| std::cmp::Reverse(s.state_duration()));
+                // Hoist one Instant::now() outside the sort comparator so
+                // every comparison sees the same `now` snapshot (closes
+                // part of L13/L30). Without this each cmp call sampled
+                // an independently-drifting `Instant`.
+                let now = Instant::now();
+                sessions.sort_by_key(|s| std::cmp::Reverse(s.state_duration_at(now)));
             }
         }
 
