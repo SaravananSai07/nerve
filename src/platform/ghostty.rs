@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, OnceLock};
 
 use super::SessionTarget;
 use crate::util::applescript;
@@ -16,13 +17,41 @@ struct TerminalInfo {
 }
 
 pub struct GhosttyBridge {
-    nerve_terminal_id: Option<String>,
+    /// Resolved lazily on a background thread (closes L20). Reads
+    /// see `None` until detection finishes; this only affects the
+    /// "preview restores focus to nerve" courtesy step — preview
+    /// + go-to-session still work, they just don't bounce back.
+    nerve_terminal_id: Arc<OnceLock<Option<String>>>,
 }
 
 impl GhosttyBridge {
     pub fn new() -> Self {
-        let nerve_terminal_id = detect_own_terminal();
-        Self { nerve_terminal_id }
+        // Detection involves an osascript round-trip + a 100 ms
+        // sleep to let Ghostty propagate the title change. Used to
+        // happen synchronously during `App::new`; now it's deferred
+        // to a background thread so launch isn't gated on it.
+        let slot: Arc<OnceLock<Option<String>>> = Arc::new(OnceLock::new());
+        let writer = Arc::clone(&slot);
+        std::thread::Builder::new()
+            .name("nerve-ghostty-probe".into())
+            .spawn(move || {
+                let id = detect_own_terminal();
+                let _ = writer.set(id);
+            })
+            .ok();
+        Self {
+            nerve_terminal_id: slot,
+        }
+    }
+
+    fn own_id(&self) -> Option<&str> {
+        // Returns None until the background probe completes. After
+        // that, the cached Option<String> is read directly without
+        // any locking — OnceLock guarantees the write happens
+        // exactly once.
+        self.nerve_terminal_id
+            .get()
+            .and_then(|o| o.as_deref())
     }
 
     pub fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
@@ -30,7 +59,7 @@ impl GhosttyBridge {
 
         let found = find_terminal_for_session(
             &terminals, &target.cwd, &target.name, &target.dir_name,
-            self.nerve_terminal_id.as_deref(),
+            self.own_id(),
             target.tty.as_deref(),
         )?;
 
@@ -82,7 +111,7 @@ impl GhosttyBridge {
     return capturedText
 end run"#;
         let term_idx_str = term_idx.to_string();
-        let restore_id = self.nerve_terminal_id.as_deref().unwrap_or("");
+        let restore_id = self.own_id().unwrap_or("");
         let args = [&found.terminal_id[..], &term_idx_str, restore_id];
         let output = applescript::run(SCRIPT, &args).ok()?;
 
@@ -102,7 +131,7 @@ end run"#;
 
         let found = find_terminal_for_session(
             &terminals, &target.cwd, &target.name, &target.dir_name,
-            self.nerve_terminal_id.as_deref(),
+            self.own_id(),
             target.tty.as_deref(),
         )
         .ok_or_else(|| anyhow::anyhow!("session not in a visible tab"))?;
@@ -117,7 +146,7 @@ end run"#;
             &target.cwd,
             &target.name,
             &target.dir_name,
-            self.nerve_terminal_id.as_deref(),
+            self.own_id(),
             target.tty.as_deref(),
         )
         .map(|t| t.terminal_id.clone())
