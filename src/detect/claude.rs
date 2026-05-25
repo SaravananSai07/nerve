@@ -172,24 +172,25 @@ fn load_session(
     session.branch = crate::detect::git::read_branch(&cwd);
 
     let jsonl_path = find_jsonl(&resolved_id, &cwd, project_dirs);
-    if let Some(ref jp) = jsonl_path {
-        session.state = infer_state_from_jsonl(jp, sf.pid, table, cache);
+    let detected = if let Some(ref jp) = jsonl_path {
         session.jsonl_path = Some(jp.clone());
         session.jsonl_age_secs = Some(file_age_secs(jp));
+        infer_state_from_jsonl(jp, sf.pid, table, cache)
     } else {
         // No transcript to read. Trust Claude's own status field if it set one;
         // otherwise default to Idle. CPU is deliberately not used — Claude's
         // TUI burns CPU on keystroke rendering, which would otherwise flip an
         // idle session to Processing whenever the user is typing.
-        session.state = match sf.status.as_deref() {
+        match sf.status.as_deref() {
             Some("busy") => SessionState::Processing,
             _ => SessionState::Idle,
-        };
-    }
+        }
+    };
 
-    if let SessionState::ToolRunning(ref tool) = session.state {
+    if let SessionState::ToolRunning(ref tool) = detected {
         session.current_tool = Some(tool.clone());
     }
+    session.set_state(detected);
 
     Some(session)
 }
@@ -780,8 +781,8 @@ fn is_claude_process(pid: u32) -> bool {
 }
 
 fn should_replace(existing: &Session, candidate: &Session) -> bool {
-    candidate.state.sort_priority() < existing.state.sort_priority()
-        || (candidate.state.sort_priority() == existing.state.sort_priority()
+    candidate.state().sort_priority() < existing.state().sort_priority()
+        || (candidate.state().sort_priority() == existing.state().sort_priority()
             && candidate.pid > existing.pid)
 }
 

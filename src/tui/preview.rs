@@ -42,12 +42,12 @@ pub fn render(
 
     frame.render_widget(Clear, area);
 
-    let indicator = theme.state_indicator(&session.state);
+    let indicator = theme.state_indicator(session.state());
     let title = format!(
         " {} {} {} | {} | {} ",
         session.name,
         indicator,
-        session.state.label(),
+        session.state().label(),
         session.format_duration(),
         source.label(),
     );
@@ -59,7 +59,7 @@ pub fn render(
         ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.state_color(&session.state)));
+        .border_style(Style::default().fg(theme.state_color(session.state())));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

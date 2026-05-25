@@ -140,10 +140,6 @@ pub struct Session {
     pub id: SessionId,
     pub cwd: PathBuf,
     pub name: String,
-    /// Mirror of `state_machine.current()`, kept in sync by
-    /// `propose_state` / `set_state`. Public so callers can pattern-
-    /// match directly; the logic lives in `state_machine`.
-    pub state: SessionState,
     pub state_changed_at: Instant,
     pub tty: Option<String>,
     pub branch: Option<String>,
@@ -177,7 +173,6 @@ impl Session {
             id,
             cwd,
             name,
-            state: SessionState::Processing,
             state_changed_at: Instant::now(),
             tty: None,
             branch: None,
@@ -195,11 +190,14 @@ impl Session {
         }
     }
 
+    pub fn state(&self) -> &SessionState {
+        self.state_machine.current()
+    }
+
     /// Propose a transition. Returns true once the proposal has
     /// been confirmed `CONFIRM_TICKS` times in a row.
     pub fn propose_state(&mut self, new_state: SessionState) -> bool {
         if self.state_machine.propose(new_state) {
-            self.state = self.state_machine.current().clone();
             self.state_changed_at = Instant::now();
             true
         } else {
@@ -211,9 +209,8 @@ impl Session {
     /// comes from a side channel — e.g. discovery says the session's
     /// file vanished, so we mark it `Vanished` right away.
     pub fn set_state(&mut self, new_state: SessionState) {
-        if self.state != new_state {
-            self.state_machine.set(new_state.clone());
-            self.state = new_state;
+        if self.state_machine.current() != &new_state {
+            self.state_machine.set(new_state);
             self.state_changed_at = Instant::now();
         }
     }
@@ -285,7 +282,7 @@ impl Serialize for Session {
         s.serialize_field("id", &self.id)?;
         s.serialize_field("cwd", &self.cwd)?;
         s.serialize_field("name", &self.name)?;
-        s.serialize_field("state", &self.state)?;
+        s.serialize_field("state", self.state())?;
         s.serialize_field("tty", &self.tty)?;
         s.serialize_field("branch", &self.branch)?;
         s.serialize_field("cpu_percent", &self.cpu_percent)?;

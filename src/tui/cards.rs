@@ -165,8 +165,8 @@ fn render_card(
     theme: &Theme,
     now: Instant,
 ) {
-    let state_color = theme.state_color(&session.state);
-    let indicator = theme.state_indicator(&session.state);
+    let state_color = theme.state_color(session.state());
+    let indicator = theme.state_indicator(session.state());
 
     let (card_bg, border_color, border_style, text_fg, secondary_fg) = if is_selected {
         (
@@ -187,7 +187,7 @@ fn render_card(
     };
 
     let title_left = Span::styled(
-        format!(" {} {} {} ", session.name, indicator, session.state.label()),
+        format!(" {} {} {} ", session.name, indicator, session.state().label()),
         if is_selected {
             Style::default().fg(text_fg).bg(card_bg).add_modifier(Modifier::BOLD)
         } else {

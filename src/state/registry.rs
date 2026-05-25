@@ -94,9 +94,9 @@ impl SessionRegistry {
             SortMode::Stable => {}
             SortMode::State => {
                 sessions.sort_by(|a, b| {
-                    a.state
+                    a.state()
                         .sort_priority()
-                        .cmp(&b.state.sort_priority())
+                        .cmp(&b.state().sort_priority())
                         .then(a.name.cmp(&b.name))
                 });
             }
@@ -136,7 +136,7 @@ impl SessionRegistry {
     pub fn count_by_state(&self) -> StateCount {
         let mut count = StateCount::default();
         for session in self.sessions.values() {
-            match session.state {
+            match session.state() {
                 SessionState::Processing | SessionState::ToolRunning(_) => count.active += 1,
                 SessionState::WaitingForInput => count.waiting += 1,
                 SessionState::Idle => count.idle += 1,
@@ -164,13 +164,13 @@ impl SessionRegistry {
         let active_cwds: std::collections::HashSet<std::path::PathBuf> = self
             .sessions
             .values()
-            .filter(|s| !matches!(s.state, SessionState::Vanished))
+            .filter(|s| !matches!(s.state(), SessionState::Vanished))
             .map(|s| s.cwd.clone())
             .collect();
 
         let before = self.sessions.len();
         self.sessions.retain(|_, s| {
-            match s.state {
+            match s.state() {
                 SessionState::Vanished => {
                     // Evict early when a live session has reclaimed
                     // the cwd; otherwise wait out the grace window.

@@ -172,7 +172,7 @@ fn main() -> std::io::Result<()> {
             println!(
                 "{} | {} | {} | {} | {} | {}{}",
                 s.name,
-                s.state.label(),
+                s.state().label(),
                 s.tty.as_deref().unwrap_or("?"),
                 s.branch.as_deref().unwrap_or("—"),
                 s.format_duration(),

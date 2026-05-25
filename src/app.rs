@@ -600,7 +600,7 @@ impl App {
         let Some(session) = self.nth_filtered(self.selected) else {
             return;
         };
-        if session.state.is_terminal() {
+        if session.state().is_terminal() {
             self.status_message = Some("session is already gone or dormant".into());
             return;
         }
@@ -831,7 +831,7 @@ impl App {
         let mut any_membership_change = any_marked_stale;
 
         for session in discovered {
-            let detected_state = session.state.clone();
+            let detected_state = session.state().clone();
             let id = session.id.clone();
             let cwd_str = session.cwd.to_string_lossy().into_owned();
 
@@ -893,7 +893,7 @@ impl App {
 
                 if existing.propose_state(detected_state) {
                     any_transition = true;
-                    let current = existing.state.clone();
+                    let current = existing.state().clone();
                     if existing.last_notified_state.as_ref() != Some(&current) {
                         pending.push(PendingNotification {
                             name: existing.name.clone(),
