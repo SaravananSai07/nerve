@@ -482,14 +482,14 @@ impl ActivityHistory {
     }
 
     pub fn sparkline(&self) -> String {
-        // U+2588 FULL BLOCK + middle dot reads as a binary timeline on
-        // every monospace font. The prior ▓░ pair rendered with
-        // unevenly-spaced cells on Apple Terminal (the shaded blocks
-        // sit narrower than U+2588), and the gap made an active
-        // sparkline look porous.
+        // U+2588 FULL BLOCK + U+2581 LOWER ONE-EIGHTH BLOCK reads as
+        // a binary timeline on every monospace font. The prior ▓░
+        // pair rendered with unevenly-spaced cells on Apple Terminal;
+        // the middle-dot interim sat mid-line and broke the timeline's
+        // baseline. `▁` sits flush at the baseline at the same width.
         self.buckets
             .iter()
-            .map(|&active| if active { '█' } else { '·' })
+            .map(|&active| if active { '█' } else { '▁' })
             .collect()
     }
 }

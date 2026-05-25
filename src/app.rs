@@ -285,15 +285,17 @@ impl App {
                 cards::render(
                     frame,
                     area,
-                    &self.registry,
-                    &visible,
-                    self.selected,
-                    &self.theme,
-                    self.status_message.as_ref(),
-                    self.prefs.notifications_muted,
-                    self.update_banner.as_deref(),
-                    self.search_query.as_deref(),
-                    self.claude_installed,
+                    cards::RenderContext {
+                        registry: &self.registry,
+                        sessions: &visible,
+                        selected: self.selected,
+                        theme: &self.theme,
+                        status_message: self.status_message.as_ref(),
+                        notifications_muted: self.prefs.notifications_muted,
+                        update_banner: self.update_banner.as_deref(),
+                        search_query: self.search_query.as_deref(),
+                        claude_installed: self.claude_installed,
+                    },
                 );
                 match &self.overlay {
                     Overlay::Help => help::render(frame, &self.theme),
@@ -546,10 +548,14 @@ impl App {
             KeyCode::Char('u') => {
                 // Dismiss the update banner for *this version only*.
                 // The next upstream release flips `pending_update`'s
-                // value and the banner returns.
+                // value and the banner returns. When there's no
+                // banner to dismiss, acknowledge the keypress so the
+                // binding doesn't feel broken.
                 if let Some(version) = self.update_banner.take() {
                     self.prefs.dismissed_update_version = Some(version);
                     self.prefs.save(&self.paths);
+                } else {
+                    self.set_status_info("no update banner to dismiss");
                 }
             }
             KeyCode::Char('m') => {

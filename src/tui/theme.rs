@@ -90,9 +90,19 @@ impl Theme {
         // muted falls back to idle so existing user themes don't
         // suddenly fail to load — the chrome stays at its prior
         // (slightly-dim) color until the user adopts the new field.
+        // Log once per load so a theme author editing the TOML can
+        // see why the chrome looks under-contrast without grepping
+        // the CHANGELOG.
         let muted = match raw.muted.as_deref() {
             Some(s) => parse_color(s, "muted")?,
-            None => idle,
+            None => {
+                log_warn!(
+                    "themes: {} has no `muted` colour — falling back to `idle`. \
+                     Add a `muted = \"#RRGGBB\"` line for distinct chrome text.",
+                    name
+                );
+                idle
+            }
         };
         Ok(Theme {
             name,

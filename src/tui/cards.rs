@@ -11,40 +11,46 @@ use crate::state::session::Session;
 use crate::tui::status::{StatusKind, StatusMessage};
 use crate::tui::theme::Theme;
 
-#[allow(clippy::too_many_arguments)]
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    registry: &SessionRegistry,
-    sessions: &[&Session],
-    selected: usize,
-    theme: &Theme,
-    status_message: Option<&StatusMessage>,
-    notifications_muted: bool,
-    update_banner: Option<&str>,
-    search_query: Option<&str>,
-    claude_installed: bool,
-) {
-    if sessions.is_empty() {
-        if let Some(q) = search_query.filter(|q| !q.is_empty()) {
-            render_search_empty(frame, area, theme, q);
-        } else if !claude_installed {
-            render_setup_hint(frame, area, theme);
+/// Bundle of everything the render path reads from `App`. Threading
+/// each field through `render`/`render_status_bar` separately tripped
+/// `clippy::too_many_arguments` and made adding a new field a search-
+/// and-replace across two signatures. One struct, one threading.
+pub struct RenderContext<'a> {
+    pub registry: &'a SessionRegistry,
+    pub sessions: &'a [&'a Session],
+    pub selected: usize,
+    pub theme: &'a Theme,
+    pub status_message: Option<&'a StatusMessage>,
+    pub notifications_muted: bool,
+    pub update_banner: Option<&'a str>,
+    pub search_query: Option<&'a str>,
+    pub claude_installed: bool,
+}
+
+pub fn render(frame: &mut Frame, area: Rect, ctx: RenderContext<'_>) {
+    if ctx.sessions.is_empty() {
+        if let Some(q) = ctx.search_query.filter(|q| !q.is_empty()) {
+            render_search_empty(frame, area, ctx.theme, q);
+        } else if !ctx.claude_installed {
+            render_setup_hint(frame, area, ctx.theme);
         } else {
-            render_empty(frame, area, theme);
+            render_empty(frame, area, ctx.theme);
         }
         return;
     }
 
     let outer = Block::default()
-        .title(Span::styled(" nerve ", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " nerve ",
+            Style::default().fg(ctx.theme.text).add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
+        .border_style(Style::default().fg(ctx.theme.border));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
     let mut constraints: Vec<Constraint> = Vec::with_capacity(3);
-    if update_banner.is_some() {
+    if ctx.update_banner.is_some() {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(3));
@@ -55,8 +61,8 @@ pub fn render(
         .constraints(constraints)
         .split(inner);
 
-    let (card_area, status_area) = if let Some(version) = update_banner {
-        render_update_banner(frame, chunks[0], theme, version);
+    let (card_area, status_area) = if let Some(version) = ctx.update_banner {
+        render_update_banner(frame, chunks[0], ctx.theme, version);
         (chunks[1], chunks[2])
     } else {
         (chunks[0], chunks[1])
@@ -65,17 +71,8 @@ pub fn render(
     // One `Instant::now()` per frame so every card's duration
     // display agrees on a single timestamp.
     let now = Instant::now();
-    render_cards(frame, card_area, sessions, selected, theme, now);
-    render_status_bar(
-        frame,
-        status_area,
-        registry,
-        sessions.len(),
-        theme,
-        status_message,
-        notifications_muted,
-        search_query,
-    );
+    render_cards(frame, card_area, ctx.sessions, ctx.selected, ctx.theme, now);
+    render_status_bar(frame, status_area, &ctx);
 }
 
 fn render_update_banner(frame: &mut Frame, area: Rect, theme: &Theme, version: &str) {
@@ -278,23 +275,19 @@ fn render_card(
     frame.render_widget(para, inner);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_status_bar(
-    frame: &mut Frame,
-    area: Rect,
-    registry: &SessionRegistry,
-    filtered_count: usize,
-    theme: &Theme,
-    status_message: Option<&StatusMessage>,
-    notifications_muted: bool,
-    search_query: Option<&str>,
-) {
+fn render_status_bar(frame: &mut Frame, area: Rect, ctx: &RenderContext<'_>) {
+    let theme = ctx.theme;
+    let registry = ctx.registry;
+    let search_query = ctx.search_query;
+    let filtered_count = ctx.sessions.len();
+    let notifications_muted = ctx.notifications_muted;
+
     // Action / search messages take the whole row. Colour by kind so
     // a successful kill reads green, a failed kill reads red, and a
     // navigational note reads in the neutral text colour. The prior
     // design rendered every message in `theme.error`, which made
     // "returned from 'foo'" look like a failure.
-    if let Some(msg) = status_message {
+    if let Some(msg) = ctx.status_message {
         let color = match msg.kind {
             StatusKind::Info => theme.text,
             StatusKind::Success => theme.processing,
@@ -341,26 +334,35 @@ fn render_status_bar(
     }
 
     // Right half — chrome hints + [muted]. Right-aligned so the
-    // muted indicator survives a narrow terminal (the prior all-in-
-    // one-line layout dropped the right-most spans without warning
-    // at 80 cols).
+    // muted indicator survives a narrow terminal. On a tmux-split
+    // 30–80 col terminal we drop chrome hints entirely (they'd
+    // silently truncate anyway) and only show the muted indicator
+    // when it applies; on a mid-width terminal we drop the less
+    // critical hints ([t]heme, [/] search) to keep the row honest.
+    let width = area.width as usize;
     let mut right: Vec<Span> = Vec::new();
     if searching {
         right.push(Span::styled("[Esc] clear", Style::default().fg(theme.error)));
-    } else {
+    } else if width >= 60 {
         let sort_label = registry.sort_mode().label();
         right.extend([
             Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.muted)),
             Span::raw("  "),
-            Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.muted)),
-            Span::raw("  "),
             Span::styled("[?] help", Style::default().fg(theme.muted)),
-            Span::raw("  "),
-            Span::styled("[/] search", Style::default().fg(theme.muted)),
         ]);
+        if width >= 100 {
+            right.extend([
+                Span::raw("  "),
+                Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.muted)),
+                Span::raw("  "),
+                Span::styled("[/] search", Style::default().fg(theme.muted)),
+            ]);
+        }
     }
     if notifications_muted {
-        right.push(Span::raw("  "));
+        if !right.is_empty() {
+            right.push(Span::raw("  "));
+        }
         right.push(Span::styled("[muted] ", Style::default().fg(theme.error)));
     }
 
