@@ -2,3 +2,4 @@
 pub mod applescript;
 pub mod focus_arg;
 pub mod sanitize;
+pub mod text;

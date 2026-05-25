@@ -5,38 +5,45 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 
-/// Two-column layout: header rows have an empty `key` to act as
-/// section dividers. The list is in display order — what the user
-/// will actually try first goes near the top.
-const BINDINGS: &[(&str, &str)] = &[
-    ("", "─ navigate ─"),
-    ("j/k  ↑/↓", "Row"),
-    ("h/l  ←/→", "Column"),
-    ("1-9", "Jump to nth session"),
-    ("", "─ actions ─"),
-    ("Enter", "Switch to session's terminal tab"),
-    ("p", "Preview session log"),
-    ("Shift+P", "Preview live terminal capture"),
-    ("n", "Rename session"),
-    ("x", "Kill session"),
-    ("", "─ view ─"),
-    ("s", "Cycle sort: stable → state → name → age"),
-    ("t", "Cycle theme"),
-    ("/", "Search (fuzzy, case-insensitive)"),
-    ("Esc", "Clear search filter"),
-    ("m", "Toggle notification mute"),
-    ("u", "Dismiss update banner (until next version)"),
-    ("", "─ preview overlay ─"),
-    ("j/k  ↑/↓", "Scroll line"),
-    ("PgUp/PgDn", "Scroll page"),
-    ("g / G", "Top / bottom"),
-    ("p / Esc / q", "Close preview"),
-    ("", "─ app ─"),
-    ("?", "Toggle this help"),
-    ("q", "Close current overlay (or quit from main view)"),
-    ("Ctrl+C", "Quit nerve"),
-    ("", "─ preferences ─"),
-    ("", "~/.config/nerve/prefs.toml  (mute, dismissed banner, etc.)"),
+/// One entry in the help table. Explicit variants beat the prior
+/// sentinel-string convention (an empty key meaning "section
+/// header") — adding a new key with no description would have
+/// silently rendered as a divider.
+enum HelpLine {
+    Header(&'static str),
+    Entry { key: &'static str, desc: &'static str },
+    Note(&'static str),
+}
+
+const BINDINGS: &[HelpLine] = &[
+    HelpLine::Header("navigate"),
+    HelpLine::Entry { key: "j/k  ↑/↓", desc: "Row" },
+    HelpLine::Entry { key: "h/l  ←/→", desc: "Column" },
+    HelpLine::Entry { key: "1-9", desc: "Jump to nth session" },
+    HelpLine::Header("actions"),
+    HelpLine::Entry { key: "Enter", desc: "Switch to session's terminal tab" },
+    HelpLine::Entry { key: "p", desc: "Preview session log" },
+    HelpLine::Entry { key: "Shift+P", desc: "Preview live terminal capture" },
+    HelpLine::Entry { key: "n", desc: "Rename session" },
+    HelpLine::Entry { key: "x", desc: "Kill session" },
+    HelpLine::Header("view"),
+    HelpLine::Entry { key: "s", desc: "Cycle sort: stable → state → name → age" },
+    HelpLine::Entry { key: "t", desc: "Cycle theme" },
+    HelpLine::Entry { key: "/", desc: "Search (fuzzy, case-insensitive)" },
+    HelpLine::Entry { key: "Esc", desc: "Clear search filter" },
+    HelpLine::Entry { key: "m", desc: "Toggle notification mute" },
+    HelpLine::Entry { key: "u", desc: "Dismiss update banner (until next version)" },
+    HelpLine::Header("preview overlay"),
+    HelpLine::Entry { key: "j/k  ↑/↓", desc: "Scroll line" },
+    HelpLine::Entry { key: "PgUp/PgDn", desc: "Scroll page" },
+    HelpLine::Entry { key: "g / G", desc: "Top / bottom" },
+    HelpLine::Entry { key: "p / Esc / q", desc: "Close preview" },
+    HelpLine::Header("app"),
+    HelpLine::Entry { key: "?", desc: "Toggle this help" },
+    HelpLine::Entry { key: "q", desc: "Close current overlay (or quit from main view)" },
+    HelpLine::Entry { key: "Ctrl+C", desc: "Quit nerve" },
+    HelpLine::Header("preferences"),
+    HelpLine::Note("~/.config/nerve/prefs.toml  (mute, dismissed banner, etc.)"),
 ];
 
 pub fn render(frame: &mut Frame, theme: &Theme) {
@@ -65,30 +72,38 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Leading dashes in the key column anchor the section header so
+    // it reads as a divider on themes where `muted` sits close to
+    // `processing` in luminance.
     let lines: Vec<Line> = BINDINGS
         .iter()
-        .map(|(key, desc)| {
-            if key.is_empty() {
-                // Section header — dim, no leading column, full-width.
-                Line::from(Span::styled(
-                    format!(" {desc}"),
+        .map(|line| match line {
+            HelpLine::Header(label) => Line::from(vec![
+                Span::styled(
+                    "  ──────  ",
                     Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
-                ))
-            } else {
-                Line::from(vec![
-                    Span::styled(
-                        format!("  {:<14}", key),
-                        Style::default()
-                            .fg(theme.processing)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(*desc, Style::default().fg(theme.text)),
-                ])
-            }
+                ),
+                Span::styled(
+                    *label,
+                    Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
+                ),
+            ]),
+            HelpLine::Entry { key, desc } => Line::from(vec![
+                Span::styled(
+                    format!("  {:<14}", key),
+                    Style::default()
+                        .fg(theme.processing)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(*desc, Style::default().fg(theme.text)),
+            ]),
+            HelpLine::Note(text) => Line::from(Span::styled(
+                format!("  {text}"),
+                Style::default().fg(theme.muted),
+            )),
         })
         .collect();
 
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
 }
-

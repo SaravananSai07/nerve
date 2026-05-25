@@ -6,6 +6,7 @@ pub mod confirm_preview;
 pub mod help;
 pub mod preview;
 pub mod rename;
+pub mod status;
 pub mod theme;
 
 pub fn centered(area: Rect, width: u16, height: u16) -> Rect {

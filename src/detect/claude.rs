@@ -629,18 +629,7 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
     let trimmed = first_line.trim();
-    // Truncate by grapheme cluster so a multi-codepoint emoji or a
-    // decomposed accent doesn't render half-broken. Byte slicing
-    // (the prior implementation) panicked on multi-byte codepoints
-    // straddling the cap; codepoint slicing kept the panic safe but
-    // could still leave orphan combining marks. Grapheme is the
-    // correct level here for human-facing snippets.
-    use unicode_segmentation::UnicodeSegmentation;
-    let clusters: Vec<&str> = trimmed.graphemes(true).collect();
-    let mut truncated: String = clusters.iter().take(80).copied().collect();
-    if clusters.len() > 80 {
-        truncated.push('…');
-    }
+    let truncated = crate::util::text::truncate_chars(trimmed, 80);
     // Strip ANSI / OSC / C0+C1 controls before the snippet reaches the TUI.
     // Defends against an untrusted JSONL painting the host terminal via
     // escape sequences (cursor jumps, OSC 52 clipboard writes, etc.).
@@ -878,18 +867,19 @@ mod tests {
 
     #[test]
     fn snippet_truncation_does_not_panic_on_utf8_boundary() {
-        // 79 ASCII chars + a 4-byte emoji = 83 bytes; byte-slicing at
-        // 80 would split the codepoint and panic. With char-based
-        // truncation this is well-defined.
+        // 79 ASCII chars + a 4-byte emoji + tail = 89 graphemes total.
+        // Byte-slicing at 80 would split the emoji codepoint and panic;
+        // grapheme-based truncation is well-defined and produces a
+        // valid UTF-8 string with the ellipsis sentinel.
         let text = format!("{}🎉 trailing", "x".repeat(79));
         let item = serde_json::json!({
             "type": "tool_result",
             "content": text,
         });
         let snippet = extract_tool_result_snippet(&item);
-        assert!(snippet.starts_with(&"x".repeat(79)));
-        assert!(snippet.contains('🎉'));
-        // Char count cap is 80, plus the ellipsis when truncated.
-        assert!(snippet.chars().count() <= 81);
+        assert!(snippet.starts_with(&"x".repeat(78)));
+        assert!(snippet.ends_with('…'));
+        // Total grapheme count includes the ellipsis sentinel.
+        assert!(snippet.chars().count() <= 80);
     }
 }

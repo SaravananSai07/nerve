@@ -46,21 +46,7 @@ fn load_log_entries(
     }
 }
 
-/// Coloring intent for the status bar's message slot. The prior
-/// design coloured every message as `theme.error`, which made
-/// successful kills, search counts, and mute toggles all look like
-/// failures.
-#[derive(Clone, Copy)]
-pub enum StatusKind {
-    Info,
-    Success,
-    Error,
-}
-
-pub struct StatusMessage {
-    pub kind: StatusKind,
-    pub text: String,
-}
+use crate::tui::status::StatusMessage;
 
 enum Overlay {
     None,
@@ -159,10 +145,7 @@ impl App {
                 Some(dismissed) => crate::updater::is_newer(v, dismissed),
                 None => true,
             });
-        let status_message = config
-            .load_error
-            .clone()
-            .map(|text| StatusMessage { kind: StatusKind::Error, text });
+        let status_message = config.load_error.clone().map(StatusMessage::error);
 
         let claude_installed = paths.claude_root().exists();
 
@@ -207,15 +190,15 @@ impl App {
     }
 
     fn set_status_info(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage { kind: StatusKind::Info, text: text.into() });
+        self.status_message = Some(StatusMessage::info(text));
     }
 
     fn set_status_success(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage { kind: StatusKind::Success, text: text.into() });
+        self.status_message = Some(StatusMessage::success(text));
     }
 
     fn set_status_error(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage { kind: StatusKind::Error, text: text.into() });
+        self.status_message = Some(StatusMessage::error(text));
     }
 
     /// Floor each loop iteration to `MIN_LOOP_INTERVAL` so a runaway

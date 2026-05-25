@@ -6,9 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::app::StatusMessage;
 use crate::state::registry::SessionRegistry;
 use crate::state::session::Session;
+use crate::tui::status::{StatusKind, StatusMessage};
 use crate::tui::theme::Theme;
 
 #[allow(clippy::too_many_arguments)]
@@ -296,9 +296,9 @@ fn render_status_bar(
     // "returned from 'foo'" look like a failure.
     if let Some(msg) = status_message {
         let color = match msg.kind {
-            crate::app::StatusKind::Info => theme.text,
-            crate::app::StatusKind::Success => theme.processing,
-            crate::app::StatusKind::Error => theme.error,
+            StatusKind::Info => theme.text,
+            StatusKind::Success => theme.processing,
+            StatusKind::Error => theme.error,
         };
         let line = Line::from(Span::styled(
             format!(" {}", msg.text),
