@@ -58,6 +58,12 @@ fn fetch_latest_version() -> Option<String> {
     if !output.status.success() {
         return None;
     }
+    // Defence in depth: curl's `--max-filesize` should already bound this,
+    // but a misconfigured or replaced curl could feed serde an unbounded
+    // body. The real response is well under 10 KiB.
+    if output.stdout.len() > 65536 {
+        return None;
+    }
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let raw = json.get("crate")?.get("max_version")?.as_str()?;
     // Sanitise at the network boundary. A hostile crates.io response

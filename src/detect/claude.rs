@@ -19,6 +19,14 @@ use crate::util::sanitize::strip_ansi;
 /// or hostile content planted in `~/.claude/sessions/`.
 const SESSION_JSON_MAX_BYTES: u64 = 64 * 1024;
 
+/// Caps on `read_dir` enumeration of `~/.claude/{sessions,projects}/`.
+/// Real users have at most a few hundred entries; tens of thousands is
+/// a runaway-state signal (claude-code bug, accidental script, junk in
+/// the directory). Hitting the cap is logged so the source can be
+/// investigated.
+const MAX_SESSION_ENTRIES: usize = 10_000;
+const MAX_PROJECT_ENTRIES: usize = 10_000;
+
 /// Open a JSONL transcript file with `O_NOFOLLOW`. Defends against
 /// an attacker swapping a final-component symlink between our
 /// `exists()` check in `find_jsonl` and the actual open. Multi-
@@ -85,7 +93,13 @@ pub(crate) fn discover_sessions_with(
     // encoded path used to trigger its own read_dir.
     let project_dirs = list_project_dirs();
 
-    for entry in entries {
+    for (i, entry) in entries.enumerate() {
+        if i >= MAX_SESSION_ENTRIES {
+            crate::log_warn!(
+                "discovery: sessions dir exceeded {MAX_SESSION_ENTRIES} entries; stopping enumeration"
+            );
+            break;
+        }
         // Log per-entry IO errors but don't bail the scan — one
         // corrupt per-pid JSON shouldn't blank the dashboard.
         let entry = match entry {
@@ -123,14 +137,23 @@ fn list_project_dirs() -> Vec<PathBuf> {
         None => return Vec::new(),
     };
     let projects_dir = home.join(".claude").join("projects");
-    match fs::read_dir(&projects_dir) {
-        Ok(entries) => entries
-            .flatten()
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .map(|e| e.path())
-            .collect(),
-        Err(_) => Vec::new(),
+    let entries = match fs::read_dir(&projects_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut result: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .take(MAX_PROJECT_ENTRIES + 1)
+        .collect();
+    if result.len() > MAX_PROJECT_ENTRIES {
+        crate::log_warn!(
+            "discovery: projects dir exceeded {MAX_PROJECT_ENTRIES} entries; truncating"
+        );
+        result.truncate(MAX_PROJECT_ENTRIES);
     }
+    result
 }
 
 fn load_session(
