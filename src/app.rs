@@ -139,7 +139,18 @@ impl App {
                 Some(dismissed) => crate::updater::is_newer(v, dismissed),
                 None => true,
             });
-        let status_message = config.load_error.clone().map(StatusMessage::error);
+        // Merge config + prefs load errors so neither gets clobbered if
+        // both files are malformed. Joined with " | " — the status bar
+        // is one line, so two short messages on one line beats losing one.
+        let load_errors: Vec<&str> = [&config.load_error, &prefs.load_error]
+            .into_iter()
+            .filter_map(|o| o.as_deref())
+            .collect();
+        let status_message = if load_errors.is_empty() {
+            None
+        } else {
+            Some(StatusMessage::error(load_errors.join(" | ")))
+        };
 
         let claude_installed = paths.claude_root().exists();
 

@@ -23,6 +23,12 @@ pub(crate) struct Prefs {
     /// newer release upstream surfaces the banner again automatically.
     #[serde(default)]
     pub(crate) dismissed_update_version: Option<String>,
+    /// Set when load() fell back to defaults because the file was
+    /// unreadable or malformed. Not persisted. App reads it once at
+    /// startup and surfaces the message to the status bar — the same
+    /// pattern Config uses.
+    #[serde(skip)]
+    pub(crate) load_error: Option<String>,
 }
 
 impl Default for Prefs {
@@ -32,6 +38,7 @@ impl Default for Prefs {
             preview_flicker_accepted: false,
             notifications_muted: false,
             dismissed_update_version: None,
+            load_error: None,
         }
     }
 }
@@ -43,8 +50,12 @@ impl Prefs {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(e) => {
-                log_warn!("prefs: unable to read {}: {e}", path.display());
-                return Self::default();
+                let msg = format!("prefs: unable to read {}: {e}", path.display());
+                log_warn!("{msg}");
+                return Self {
+                    load_error: Some(msg),
+                    ..Default::default()
+                };
             }
         };
         match toml::from_str::<Self>(&contents) {
@@ -67,11 +78,15 @@ impl Prefs {
                 prefs
             }
             Err(e) => {
-                log_warn!(
+                let msg = format!(
                     "prefs: parse failed at {} ({e}) — using defaults",
                     path.display()
                 );
-                Self::default()
+                log_warn!("{msg}");
+                Self {
+                    load_error: Some(msg),
+                    ..Default::default()
+                }
             }
         }
     }
@@ -158,6 +173,7 @@ mod tests {
             preview_flicker_accepted: true,
             notifications_muted: true,
             dismissed_update_version: Some("9.9.9".into()),
+            load_error: None,
         };
         prefs.save(&paths);
         let loaded = Prefs::load(&paths);
