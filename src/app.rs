@@ -272,7 +272,7 @@ impl App {
                     Overlay::Rename(buf) => rename::render(frame, &self.theme, buf),
                     Overlay::Search => {
                         let query = self.search_query.as_deref().unwrap_or("");
-                        let search_area = crate::tui::centered(frame.area(), 60, 3);
+                        let search_area = crate::tui::centered(frame.area(), 60, 4);
                         frame.render_widget(ratatui::widgets::Clear, search_area);
                         let block = ratatui::widgets::Block::default()
                             .title(ratatui::text::Span::styled(
@@ -291,13 +291,28 @@ impl App {
                         } else {
                             query
                         };
-                        let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
-                            ratatui::text::Span::styled(
+                        // Make the match semantics visible — users wondered
+                        // whether the match was substring vs fuzzy and whether
+                        // case mattered. Now they can see.
+                        let lines = vec![
+                            ratatui::text::Line::from(ratatui::text::Span::styled(
                                 format!("/{display}"),
                                 ratatui::style::Style::default().fg(self.theme.text),
-                            ),
-                        ));
-                        frame.render_widget(para, inner);
+                            )),
+                            ratatui::text::Line::from(vec![
+                                ratatui::text::Span::styled(
+                                    " fuzzy · case-insensitive  ",
+                                    ratatui::style::Style::default()
+                                        .fg(self.theme.idle)
+                                        .add_modifier(ratatui::style::Modifier::DIM),
+                                ),
+                                ratatui::text::Span::styled(
+                                    "[Enter] keep  [Esc] clear",
+                                    ratatui::style::Style::default().fg(self.theme.idle),
+                                ),
+                            ]),
+                        ];
+                        frame.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
                     }
                     Overlay::Preview { source, .. } => {
                         if let Some(session) = visible.get(self.selected) {
@@ -690,8 +705,13 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
+                // Cap by char count, not byte length — a CJK glyph is
+                // 3 UTF-8 bytes, so the previous `buf.len() < 48` cut
+                // CJK names off at roughly 16 characters. The cap
+                // matches the rename overlay's drawn width.
+                const MAX_CHARS: usize = 48;
                 if let Overlay::Rename(ref mut buf) = self.overlay {
-                    if buf.len() < 48 {
+                    if buf.chars().count() < MAX_CHARS {
                         buf.push(c);
                     }
                 }
