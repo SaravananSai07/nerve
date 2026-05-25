@@ -46,17 +46,6 @@ fn load_log_entries(
     }
 }
 
-#[cfg(unix)]
-fn inode_of_path(path: &std::path::Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| m.ino())
-}
-
-#[cfg(not(unix))]
-fn inode_of_path(_path: &std::path::Path) -> Option<u64> {
-    None
-}
-
 enum Overlay {
     None,
     Help,
@@ -859,34 +848,12 @@ impl App {
                     existing.current_tool = Some(tool.clone());
                 }
 
-                if let Some(ref jp) = session.jsonl_path {
-                    // If the inode changed, the file was rotated /
-                    // replaced — reset the offset so we don't seek
-                    // into a brand-new file at a stale position.
-                    let current_inode = inode_of_path(jp);
-                    let offset = if existing.jsonl_inode != current_inode {
-                        0
-                    } else {
-                        existing.usage.last_file_offset
-                    };
-                    let (delta, new_offset) = claude::parse_token_usage(jp, offset);
-                    if existing.jsonl_inode != current_inode {
-                        // After rotation, this read fully re-counts
-                        // the (new, presumably smaller) file. Replace
-                        // rather than accumulate so we don't double-
-                        // count tokens that were already in the prior
-                        // inode's accounting.
-                        existing.usage = delta;
-                    } else {
-                        existing.usage.input_tokens += delta.input_tokens;
-                        existing.usage.output_tokens += delta.output_tokens;
-                        existing.usage.cache_read_tokens += delta.cache_read_tokens;
-                        existing.usage.cache_creation_tokens += delta.cache_creation_tokens;
-                        existing.usage.cost_usd += delta.cost_usd;
-                    }
-                    existing.usage.last_file_offset = new_offset;
-                    existing.jsonl_inode = current_inode;
-                }
+                // The discovery worker owns the JSONL cache: cumulative
+                // usage and rotation detection already happened inside
+                // `load_session` against `JsonlCache`. The snapshot's
+                // `usage` is the authoritative total for the file's
+                // current length, so just copy it.
+                existing.usage = session.usage;
                 if existing.jsonl_path.is_none() {
                     existing.jsonl_path = session.jsonl_path;
                 }
@@ -917,12 +884,8 @@ impl App {
                 if let Some(override_name) = self.config.session_name_for(&cwd_str) {
                     new_session.name = override_name.clone();
                 }
-                if let Some(ref jp) = new_session.jsonl_path {
-                    let (usage, offset) = claude::parse_token_usage(jp, 0);
-                    new_session.usage = usage;
-                    new_session.usage.last_file_offset = offset;
-                    new_session.jsonl_inode = inode_of_path(jp);
-                }
+                // Worker has already populated `usage` from JsonlCache;
+                // nothing else to do for first-sighting accounting.
                 self.registry.upsert(new_session);
                 any_membership_change = true;
             }

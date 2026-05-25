@@ -175,7 +175,13 @@ fn load_session(
     let detected = if let Some(ref jp) = jsonl_path {
         session.jsonl_path = Some(jp.clone());
         session.jsonl_age_secs = Some(file_age_secs(jp));
-        infer_state_from_jsonl(jp, sf.pid, table, cache)
+        let (tail_state, usage) = cache.read_or_refresh(
+            jp,
+            |p| read_tail_state(p).unwrap_or(SessionState::Idle),
+            parse_token_usage,
+        );
+        session.usage = usage;
+        refine_with_runtime(tail_state, jp, sf.pid, table)
     } else {
         // No transcript to read. Trust Claude's own status field if it set one;
         // otherwise default to Idle. CPU is deliberately not used — Claude's
@@ -238,27 +244,6 @@ fn find_jsonl(session_id: &str, cwd: &Path, project_dirs: &[PathBuf]) -> Option<
     }
 
     None
-}
-
-pub fn infer_state_from_jsonl(
-    path: &Path,
-    pid: u32,
-    table: &process::ProcessTable,
-    cache: &mut JsonlCache,
-) -> SessionState {
-    // The 256 KiB tail read + serde_json parse is the per-tick
-    // hot spot. Skip it whenever the file's mtime/len/inode are
-    // unchanged; reuse the cached tail-parse result and re-apply
-    // the runtime refinement (CPU / caffeinate / mtime-age)
-    // against the current process snapshot.
-    let tail_parse = if let Some(cached) = cache.cached_state(path) {
-        cached
-    } else {
-        let fresh = read_tail_state(path).unwrap_or(SessionState::Idle);
-        cache.record_state(path, fresh.clone());
-        fresh
-    };
-    refine_with_runtime(tail_parse, path, pid, table)
 }
 
 /// Apply the runtime conditions (CPU%, caffeinate child, mtime age)
@@ -475,7 +460,7 @@ impl ModelClass {
     }
 }
 
-pub fn parse_token_usage(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
+fn parse_token_usage(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
     let usage = TokenUsage::default();
 
     let file = match open_jsonl(path) {

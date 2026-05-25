@@ -65,8 +65,6 @@ pub struct TokenUsage {
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cost_usd: f64,
-    #[serde(skip)]
-    pub last_file_offset: u64,
 }
 
 impl TokenUsage {
@@ -147,11 +145,6 @@ pub struct Session {
     pub current_tool: Option<String>,
     pub activity: ActivityHistory,
     pub jsonl_path: Option<PathBuf>,
-    /// Inode at the time we last parsed tokens. A change here means
-    /// the file was rotated or replaced under us, so `apply_discovery`
-    /// resets the read offset rather than seeking into a fresh file
-    /// at a stale position.
-    pub jsonl_inode: Option<u64>,
     pub renamed: bool,
     pub usage: TokenUsage,
     pub pid: Option<u32>,
@@ -180,7 +173,6 @@ impl Session {
             current_tool: None,
             activity: ActivityHistory::new(),
             jsonl_path: None,
-            jsonl_inode: None,
             renamed: false,
             usage: TokenUsage::default(),
             pid: None,

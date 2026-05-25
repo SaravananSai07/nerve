@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::state::session::SessionState;
+use crate::state::session::{SessionState, TokenUsage};
 
-/// Per-JSONL tail-parse cache. Stores the previous `read_tail_state`
-/// result keyed by `(mtime, len, inode)`. On a subsequent tick with
-/// identical stats the worker reuses the cached state instead of
-/// re-reading the tail and re-parsing — that read + parse was the
-/// dominant per-tick cost on idle sessions. The inode component also
-/// catches log rotation / truncation at the same path.
+/// Per-JSONL hot-path cache. Stores the tail-parse state result and the
+/// cumulative `TokenUsage` keyed by `(mtime, len, inode)`. On a tick
+/// where the file has not changed the worker reuses both without opening
+/// the file — that read + parse was the dominant per-tick cost on idle
+/// sessions. The inode component also catches log rotation / truncation
+/// at the same path so usage isn't double-counted across rotations.
 #[derive(Default)]
 pub struct JsonlCache {
     entries: HashMap<PathBuf, JsonlEntry>,
@@ -20,6 +20,10 @@ struct JsonlEntry {
     len: u64,
     inode: u64,
     cached_state: SessionState,
+    cumulative_usage: TokenUsage,
+    /// Byte offset reached on the last `parse_token_usage` walk. The
+    /// next walk picks up from here when the inode is unchanged.
+    last_offset: u64,
 }
 
 impl JsonlCache {
@@ -27,35 +31,70 @@ impl JsonlCache {
         Self::default()
     }
 
-    /// Returns a cached `SessionState` if the file's mtime + len + inode
-    /// have not changed since the last read. None means "you need to
-    /// re-read the tail and call `record_state` with the result".
-    pub fn cached_state(&self, path: &Path) -> Option<SessionState> {
-        let entry = self.entries.get(path)?;
-        let (mtime, len, inode) = stat(path)?;
-        if entry.inode == inode && entry.mtime == mtime && entry.len == len {
-            Some(entry.cached_state.clone())
-        } else {
-            None
-        }
-    }
-
-    /// Record the result of a fresh state read along with the file
-    /// stats that produced it. Subsequent ticks with identical stats
-    /// will short-circuit via `cached_state`.
-    pub fn record_state(&mut self, path: &Path, state: SessionState) {
+    /// Returns the cached `(state, usage)` for `path`, falling back to
+    /// a fresh read + parse on a stat mismatch and updating the cache
+    /// in place. State is the tail-parse result — `refine_with_runtime`
+    /// still applies on top. Usage is the cumulative total to the
+    /// file's current length.
+    ///
+    /// `parse_state` and `parse_usage_from` are passed in so the cache
+    /// can live in the `detect` layer without depending on the JSONL
+    /// parser concretely; the only call site is `load_session`, which
+    /// supplies the real functions.
+    pub fn read_or_refresh<S, U>(
+        &mut self,
+        path: &Path,
+        parse_state: S,
+        parse_usage_from: U,
+    ) -> (SessionState, TokenUsage)
+    where
+        S: FnOnce(&Path) -> SessionState,
+        U: FnOnce(&Path, u64) -> (TokenUsage, u64),
+    {
         let Some((mtime, len, inode)) = stat(path) else {
-            return;
+            return (SessionState::Idle, TokenUsage::default());
         };
+
+        if let Some(entry) = self.entries.get(path) {
+            if entry.inode == inode && entry.mtime == mtime && entry.len == len {
+                return (entry.cached_state.clone(), entry.cumulative_usage.clone());
+            }
+        }
+
+        let new_state = parse_state(path);
+        let (cumulative_usage, new_offset) = match self.entries.get(path) {
+            Some(prior) if prior.inode == inode => {
+                // File grew under the same inode: parse the new tail
+                // from where we left off and merge into the cumulative
+                // total so we never re-count earlier rows.
+                let (delta, off) = parse_usage_from(path, prior.last_offset);
+                let mut merged = prior.cumulative_usage.clone();
+                merged.input_tokens = merged.input_tokens.saturating_add(delta.input_tokens);
+                merged.output_tokens = merged.output_tokens.saturating_add(delta.output_tokens);
+                merged.cache_read_tokens = merged
+                    .cache_read_tokens
+                    .saturating_add(delta.cache_read_tokens);
+                merged.cache_creation_tokens = merged
+                    .cache_creation_tokens
+                    .saturating_add(delta.cache_creation_tokens);
+                merged.cost_usd += delta.cost_usd;
+                (merged, off)
+            }
+            _ => parse_usage_from(path, 0),
+        };
+
         self.entries.insert(
             path.to_path_buf(),
             JsonlEntry {
                 mtime,
                 len,
                 inode,
-                cached_state: state,
+                cached_state: new_state.clone(),
+                cumulative_usage: cumulative_usage.clone(),
+                last_offset: new_offset,
             },
         );
+        (new_state, cumulative_usage)
     }
 
     /// Drop cache entries whose JSONL files no longer reference an
@@ -88,6 +127,7 @@ fn inode_of(_meta: &std::fs::Metadata) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::io::Write;
 
     fn write_file(path: &Path, contents: &str) {
@@ -96,50 +136,102 @@ mod tests {
     }
 
     #[test]
-    fn cached_state_returns_none_for_unseen_path() {
-        let cache = JsonlCache::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("a.jsonl");
-        write_file(&path, "hi");
-        assert!(cache.cached_state(&path).is_none());
-    }
-
-    #[test]
-    fn cached_state_returns_value_when_unchanged() {
+    fn first_read_invokes_parsers_and_subsequent_short_circuits() {
         let mut cache = JsonlCache::new();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("a.jsonl");
         write_file(&path, "hi");
-        cache.record_state(&path, SessionState::Idle);
-        assert_eq!(cache.cached_state(&path), Some(SessionState::Idle));
+
+        let state_calls = Cell::new(0);
+        let usage_calls = Cell::new(0);
+        let parse_state = |_: &Path| {
+            state_calls.set(state_calls.get() + 1);
+            SessionState::Idle
+        };
+        let parse_usage = |_: &Path, _: u64| {
+            usage_calls.set(usage_calls.get() + 1);
+            (TokenUsage::default(), 0)
+        };
+
+        let (s, _u) = cache.read_or_refresh(&path, parse_state, parse_usage);
+        assert_eq!(s, SessionState::Idle);
+        assert_eq!(state_calls.get(), 1);
+        assert_eq!(usage_calls.get(), 1);
+
+        cache.read_or_refresh(&path, parse_state, parse_usage);
+        assert_eq!(state_calls.get(), 1);
+        assert_eq!(usage_calls.get(), 1);
     }
 
     #[test]
-    fn cached_state_invalidated_on_mtime_change() {
+    fn mtime_change_invalidates_cache() {
         let mut cache = JsonlCache::new();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("a.jsonl");
         write_file(&path, "hi");
-        cache.record_state(&path, SessionState::Idle);
-        // Touch the file with a different content / mtime.
+
+        let state_calls = Cell::new(0);
+        let usage_calls = Cell::new(0);
+        let parse_state = |_: &Path| {
+            state_calls.set(state_calls.get() + 1);
+            SessionState::Idle
+        };
+        let parse_usage = |_: &Path, _: u64| {
+            usage_calls.set(usage_calls.get() + 1);
+            (TokenUsage::default(), 0)
+        };
+
+        cache.read_or_refresh(&path, parse_state, parse_usage);
         std::thread::sleep(std::time::Duration::from_millis(15));
         write_file(&path, "different");
-        assert_eq!(cache.cached_state(&path), None);
+        cache.read_or_refresh(&path, parse_state, parse_usage);
+
+        assert_eq!(state_calls.get(), 2);
+        assert_eq!(usage_calls.get(), 2);
     }
 
     #[test]
-    fn cached_state_invalidated_on_inode_change() {
+    fn inode_change_resets_offset_to_zero() {
+        // After a rotation the cumulative usage must reflect the new
+        // file from byte 0, not continue from the prior offset which
+        // would silently double-count or miss tokens.
         let mut cache = JsonlCache::new();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("a.jsonl");
-        write_file(&path, "hi");
-        cache.record_state(&path, SessionState::Idle);
-        assert_eq!(cache.cached_state(&path), Some(SessionState::Idle));
+        write_file(&path, "first");
 
-        // Remove + recreate at same path: new inode invalidates.
+        let (_s, u1) = cache.read_or_refresh(
+            &path,
+            |_| SessionState::Idle,
+            |_, _| {
+                (
+                    TokenUsage {
+                        input_tokens: 100,
+                        ..Default::default()
+                    },
+                    0,
+                )
+            },
+        );
+        assert_eq!(u1.input_tokens, 100);
+
         std::fs::remove_file(&path).unwrap();
-        write_file(&path, "rotated");
-        assert_eq!(cache.cached_state(&path), None);
+        write_file(&path, "second");
+
+        let (_s, u2) = cache.read_or_refresh(
+            &path,
+            |_| SessionState::Idle,
+            |_, _| {
+                (
+                    TokenUsage {
+                        input_tokens: 7,
+                        ..Default::default()
+                    },
+                    0,
+                )
+            },
+        );
+        assert_eq!(u2.input_tokens, 7); // replaced, not 107
     }
 
     #[test]
@@ -148,11 +240,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("a.jsonl");
         write_file(&path, "hi");
-        cache.record_state(&path, SessionState::Idle);
-        assert!(cache.cached_state(&path).is_some());
 
-        // Pretend no sessions reference this path anymore.
+        cache.read_or_refresh(
+            &path,
+            |_| SessionState::Idle,
+            |_, _| (TokenUsage::default(), 0),
+        );
+        assert!(cache.entries.contains_key(&path));
+
         cache.retain_present(|_| false);
-        assert!(cache.cached_state(&path).is_none());
+        assert!(!cache.entries.contains_key(&path));
     }
 }

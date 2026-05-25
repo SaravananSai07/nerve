@@ -21,15 +21,9 @@ use paths::Paths;
 use platform::BridgeId;
 
 fn discover_with_usage() -> Vec<state::session::Session> {
-    let mut sessions = detect::claude::discover_sessions();
-    for s in &mut sessions {
-        if let Some(ref jp) = s.jsonl_path {
-            let (usage, offset) = detect::claude::parse_token_usage(jp, 0);
-            s.usage = usage;
-            s.usage.last_file_offset = offset;
-        }
-    }
-    sessions
+    // `discover_sessions` runs the same JsonlCache the worker uses, so
+    // each session arrives with its cumulative `usage` already populated.
+    detect::claude::discover_sessions()
 }
 
 /// Raise `RLIMIT_NOFILE` soft limit up to `min(hard, 4096)`.
