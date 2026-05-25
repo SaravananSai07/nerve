@@ -402,25 +402,7 @@ impl App {
                 return;
             }
             Overlay::Preview { .. } => {
-                match code {
-                    KeyCode::Char('p')
-                    | KeyCode::Char('P')
-                    | KeyCode::Char('q')
-                    | KeyCode::Esc => {
-                        self.overlay = Overlay::None;
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if let Overlay::Preview { scroll, .. } = &mut self.overlay {
-                            *scroll = scroll.saturating_add(1);
-                        }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        if let Overlay::Preview { scroll, .. } = &mut self.overlay {
-                            *scroll = scroll.saturating_sub(1);
-                        }
-                    }
-                    _ => {}
-                }
+                self.handle_preview_key(code);
                 return;
             }
             Overlay::ConfirmKill { .. } => {
@@ -550,6 +532,42 @@ impl App {
             return;
         }
         self.overlay = Overlay::ConfirmPreview;
+    }
+
+    fn handle_preview_key(&mut self, code: KeyCode) {
+        let Overlay::Preview { scroll, source } = &mut self.overlay else {
+            return;
+        };
+        // Clamp the cursor at the handler so holding `j` past the
+        // bottom can't grow `scroll` to absurd values that take an
+        // equal number of `k` presses to recover.
+        let max = source.line_count().saturating_sub(1);
+        // Half-screen-ish for PageUp/PageDown — matches the reading
+        // distance most TUI viewers use.
+        const PAGE: usize = 10;
+        match code {
+            KeyCode::Char('p')
+            | KeyCode::Char('P')
+            | KeyCode::Char('q')
+            | KeyCode::Esc => {
+                self.overlay = Overlay::None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                *scroll = scroll.saturating_add(1).min(max);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                *scroll = scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                *scroll = scroll.saturating_add(PAGE).min(max);
+            }
+            KeyCode::PageUp => {
+                *scroll = scroll.saturating_sub(PAGE);
+            }
+            KeyCode::Char('g') => *scroll = 0,
+            KeyCode::Char('G') => *scroll = max,
+            _ => {}
+        }
     }
 
     fn handle_confirm_preview_key(&mut self, code: KeyCode) {

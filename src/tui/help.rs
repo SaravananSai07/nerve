@@ -5,25 +5,46 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 
+/// Two-column layout: header rows have an empty `key` to act as
+/// section dividers. The list is in display order — what the user
+/// will actually try first goes near the top.
 const BINDINGS: &[(&str, &str)] = &[
-    ("j/k  ↑/↓", "Navigate rows"),
-    ("h/l  ←/→", "Navigate columns"),
-    ("Enter / g", "Go to session tab"),
+    ("", "─ navigate ─"),
+    ("j/k  ↑/↓", "Row"),
+    ("h/l  ←/→", "Column"),
+    ("1-9", "Jump to nth session"),
+    ("", "─ actions ─"),
+    ("Enter", "Switch to session's terminal tab"),
     ("p", "Preview session log"),
+    ("Shift+P", "Preview live terminal capture"),
+    ("n", "Rename session"),
     ("x", "Kill session"),
+    ("", "─ view ─"),
     ("s", "Cycle sort: stable → state → name → age"),
     ("t", "Cycle theme"),
-    ("n", "Rename session"),
-    ("m", "Toggle notification mute"),
-    ("/", "Search sessions (fuzzy)"),
+    ("/", "Search (fuzzy, case-insensitive)"),
     ("Esc", "Clear search filter"),
-    ("1-9", "Jump to session"),
+    ("m", "Toggle notification mute"),
+    ("", "─ preview overlay ─"),
+    ("j/k  ↑/↓", "Scroll line"),
+    ("PgUp/PgDn", "Scroll page"),
+    ("g / G", "Top / bottom"),
+    ("p / Esc / q", "Close preview"),
+    ("", "─ app ─"),
     ("?", "Toggle this help"),
-    ("q", "Quit"),
+    ("q", "Close current overlay (or quit from main view)"),
+    ("Ctrl+C", "Quit nerve"),
 ];
 
 pub fn render(frame: &mut Frame, theme: &Theme) {
-    let area = super::centered(frame.area(), 52, (BINDINGS.len() as u16) + 4);
+    let frame_area = frame.area();
+    // Cap height to the available frame so the overlay clips
+    // gracefully on small terminals rather than drawing partially
+    // off-screen.
+    let want_height = (BINDINGS.len() as u16) + 2;
+    let height = want_height.min(frame_area.height.saturating_sub(2));
+    let width = 56u16.min(frame_area.width.saturating_sub(2));
+    let area = super::centered(frame_area, width, height);
 
     frame.render_widget(Clear, area);
 
@@ -44,15 +65,23 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
     let lines: Vec<Line> = BINDINGS
         .iter()
         .map(|(key, desc)| {
-            Line::from(vec![
-                Span::styled(
-                    format!("  {:<14}", key),
-                    Style::default()
-                        .fg(theme.processing)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(*desc, Style::default().fg(theme.text)),
-            ])
+            if key.is_empty() {
+                // Section header — dim, no leading column, full-width.
+                Line::from(Span::styled(
+                    format!(" {desc}"),
+                    Style::default().fg(theme.idle).add_modifier(Modifier::DIM),
+                ))
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {:<14}", key),
+                        Style::default()
+                            .fg(theme.processing)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(*desc, Style::default().fg(theme.text)),
+                ])
+            }
         })
         .collect();
 

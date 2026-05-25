@@ -26,6 +26,16 @@ impl PreviewSource {
             Self::LogEntries(_) => "LOG",
         }
     }
+
+    /// Total scrollable lines. Used to clamp the scroll cursor at the
+    /// handler so holding `j` past the bottom doesn't require an equal
+    /// number of `k` presses to recover.
+    pub fn line_count(&self) -> usize {
+        match self {
+            Self::TerminalCapture(lines) => lines.len(),
+            Self::LogEntries(entries) => entries.len(),
+        }
+    }
 }
 
 pub fn render(
@@ -153,10 +163,14 @@ fn render_log_entries(
 
 fn hint_bar<'a>(theme: &Theme) -> Line<'a> {
     Line::from(vec![
-        Span::styled(" [p]", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
+        Span::styled(" [p/q/Esc]", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
         Span::styled(" close  ", Style::default().fg(theme.idle)),
         Span::styled("[j/k]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-        Span::styled(" scroll", Style::default().fg(theme.idle)),
+        Span::styled(" line  ", Style::default().fg(theme.idle)),
+        Span::styled("[PgUp/PgDn]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
+        Span::styled(" page  ", Style::default().fg(theme.idle)),
+        Span::styled("[g/G]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
+        Span::styled(" top/bottom", Style::default().fg(theme.idle)),
     ])
 }
 
