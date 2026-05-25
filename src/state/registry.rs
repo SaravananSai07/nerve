@@ -148,11 +148,20 @@ impl SessionRegistry {
         count
     }
 
-    pub(crate) fn mark_stale(&mut self, id: &str) {
-        if let Some(session) = self.sessions.get_mut(id) {
-            session.set_state(SessionState::Vanished);
-            self.bump_version();
+    /// Returns true iff the session existed and was not already `Vanished`.
+    /// Callers use the return value to gate `FilteredView` invalidation
+    /// and re-disambiguation work — a session lingering in the grace
+    /// window shouldn't churn that work every tick.
+    pub(crate) fn mark_stale(&mut self, id: &str) -> bool {
+        let Some(session) = self.sessions.get_mut(id) else {
+            return false;
+        };
+        if matches!(session.state(), SessionState::Vanished) {
+            return false;
         }
+        session.set_state(SessionState::Vanished);
+        self.bump_version();
+        true
     }
 
     /// State-specific retention. `Vanished` (process gone) ages out

@@ -100,7 +100,13 @@ fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
     let mut iter = line.split_whitespace();
     let pid = iter.next()?.parse().ok()?;
     let ppid = iter.next()?.parse().ok()?;
-    let tty = iter.next()?.to_string();
+    // `ps -eo tty` is locally trusted but cheap to harden: a binary
+    // shadowing `ps` on $PATH could emit escape sequences here that
+    // the `--list` CLI prints verbatim to the calling terminal.
+    let tty = crate::util::sanitize::strip_ansi(iter.next()?)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     let comm = iter.next()?.to_string();
     let cpu = iter.next()?.parse().unwrap_or(0.0);
     let args = iter.collect::<Vec<_>>().join(" ");

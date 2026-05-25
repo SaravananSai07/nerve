@@ -97,9 +97,11 @@ impl App {
             .filter(|id| !active_ids.contains(id.as_str()))
             .cloned()
             .collect();
-        let any_marked_stale = !stale_ids.is_empty();
+        let mut any_marked_stale = false;
         for id in stale_ids {
-            self.registry.mark_stale(id.as_str());
+            if self.registry.mark_stale(id.as_str()) {
+                any_marked_stale = true;
+            }
         }
 
         let mut pending = Vec::new();
