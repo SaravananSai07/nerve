@@ -42,8 +42,41 @@
 **Inputs**
 
 - Rename caps by char count, not byte length — CJK names work to
-  the full 48-character limit.
+  the full 48-character limit. The rename overlay also sanitises
+  pasted control bytes at the boundary.
 - Search overlay shows `fuzzy · case-insensitive` plus the keybinds.
+- A search query that matches zero sessions now shows a dedicated
+  empty-state card (`No sessions match "/query"`) with the Esc-to-
+  clear hint, rather than an empty grid.
+
+**Safety**
+
+- Confirm-kill modal binds Enter / Esc / n / q to cancel; `y` is the
+  only key that fires SIGTERM. Long session names truncate by
+  grapheme cluster (no orphan combining marks).
+- `g` removed as a Enter alias for tab-switching to defuse vim
+  muscle memory.
+- `q` inside any overlay closes the overlay; Ctrl+C is the
+  unconditional quit.
+
+**Robustness**
+
+- Tool-result snippet truncation in the log preview now operates on
+  grapheme clusters via unicode-segmentation.
+- Update banner version string is sanitised at the network boundary
+  (crates.io response can't smuggle ANSI through the banner).
+- Update banner suppression is semver-aware: a yanked release that
+  reverts to an older version doesn't re-open the banner.
+- Preview overlay scroll cursor resets to 0 on empty buffers so the
+  initial usize::MAX seed doesn't survive into a later read.
+- 3-col grid descent (`j` / `Down`) snaps to the last session on a
+  partial trailing row instead of pinning the cursor.
+
+**Theme schema**
+
+- Themes grow a `muted` colour for chrome text. User themes without
+  it fall back to `idle` and log a warning at load — see the
+  README's *Color keys* table for the full schema.
 
 **Status messages**
 

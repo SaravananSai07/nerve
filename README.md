@@ -15,23 +15,36 @@ TUI dashboard for monitoring and switching between Claude Code sessions across t
 
 ## Keybindings
 
+Press `?` inside nerve for the live, in-app version.
+
 | Key | Action |
 |-----|--------|
-| `j/k` `Up/Down` | Navigate rows |
-| `h/l` `Left/Right` | Navigate columns |
-| `Enter` / `g` | Go to session tab |
+| `j/k` `↑/↓` | Navigate rows |
+| `h/l` `←/→` | Navigate columns |
+| `1-9` | Jump to nth session |
+| `Enter` | Switch to session's terminal tab |
 | `p` | Preview session log |
-| `P` | Preview with terminal capture (Ghostty) |
-| `x` | Kill session |
-| `s` | Cycle sort: stable / state / name / age |
-| `t` | Cycle theme |
+| `Shift+P` | Preview live terminal capture (Ghostty) |
 | `n` | Rename session |
-| `m` | Toggle notification mute |
-| `/` | Search sessions (fuzzy) |
+| `x` | Kill session (Enter / Esc cancel; `y` confirms) |
+| `s` | Cycle sort: stable → state → name → age |
+| `t` | Cycle theme |
+| `/` | Search (fuzzy, case-insensitive) |
 | `Esc` | Clear search filter |
-| `1-9` | Jump to session |
-| `?` | Help |
-| `q` | Quit |
+| `m` | Toggle notification mute |
+| `u` | Dismiss update banner (until next version) |
+| `?` | Toggle help |
+| `q` | Close current overlay (or quit from main view) |
+| `Ctrl+C` | Quit nerve unconditionally |
+
+### Preview overlay scroll keys
+
+| Key | Action |
+|-----|--------|
+| `j/k` `↑/↓` | Scroll one line |
+| `PgUp/PgDn` | Scroll one page |
+| `g` / `G` | Top / bottom |
+| `p` / `Esc` / `q` | Close preview |
 
 ## Notifications
 
@@ -65,11 +78,27 @@ text = "#cdcecf"
 processing = "#81b29a"
 waiting = "#dbc074"
 idle = "#63717f"
+muted = "#9098a4"             # chrome text (status hints, log nums)
 error = "#c94f6d"
 stale = "#50565b"
 selected_bg = "#2a313a"
 selected_text = "#eaebec"
 ```
+
+#### Color keys
+
+| Key | Used for |
+|-----|----------|
+| `border` | Card borders, dividers |
+| `text` | Primary text (card titles, message bodies) |
+| `processing` | Active session colour; success status messages |
+| `waiting` | Waiting-for-input session colour; section accents |
+| `idle` | Idle session state colour. **Reserved** — don't use for chrome text |
+| `muted` | Chrome text: status hints, log line numbers, secondary card text, modal hints. *Optional; falls back to `idle` with a warning* |
+| `error` | Error session state colour; destructive-action hints |
+| `stale` | Dormant / vanished sessions |
+| `selected_bg` | Background of the currently-selected card |
+| `selected_text` | Foreground text on the selected card |
 
 ## Config
 
