@@ -135,7 +135,7 @@ pub fn resume_session_id(args: &str) -> Option<&str> {
     None
 }
 
-fn valid_session_id(raw: &str) -> Option<&str> {
+pub fn valid_session_id(raw: &str) -> Option<&str> {
     if raw.is_empty() || raw.contains("..") {
         return None;
     }

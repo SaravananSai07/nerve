@@ -166,8 +166,13 @@ fn load_session(
     // the command line as the source of truth — both for finding the JSONL and
     // as nerve's canonical session id, so the registry isn't churned every
     // time Claude rewrites sf.session_id mid-run.
+    //
+    // Both inputs are validated through the same charset/traversal gate.
+    // An attacker who can plant a session JSON file with `"sessionId":
+    // "../../etc/passwd"` would otherwise drive `find_jsonl` into a
+    // traversal probe; drop the session instead.
     let resolved_id = process::resume_session_id(&proc.args)
-        .unwrap_or(sf.session_id.as_str())
+        .or_else(|| process::valid_session_id(sf.session_id.as_str()))?
         .to_string();
 
     let cwd = PathBuf::from(&sf.cwd);
@@ -612,11 +617,14 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
     let trimmed = first_line.trim();
-    let truncated = if trimmed.len() > 80 {
-        format!("{}…", &trimmed[..80])
-    } else {
-        trimmed.to_string()
-    };
+    // Truncate by chars, not bytes — slicing at byte 80 would panic on
+    // any codepoint straddling the boundary (e.g. a CJK glyph or emoji
+    // in a tool result), which a hostile JSONL row could trigger
+    // deterministically.
+    let mut truncated: String = trimmed.chars().take(80).collect();
+    if trimmed.chars().count() > 80 {
+        truncated.push('…');
+    }
     // Strip ANSI / OSC / C0+C1 controls before the snippet reaches the TUI.
     // Defends against an untrusted JSONL painting the host terminal via
     // escape sequences (cursor jumps, OSC 52 clipboard writes, etc.).
@@ -850,5 +858,22 @@ mod tests {
             parse_jsonl_state(line),
             Some(SessionState::WaitingForInput)
         ));
+    }
+
+    #[test]
+    fn snippet_truncation_does_not_panic_on_utf8_boundary() {
+        // 79 ASCII chars + a 4-byte emoji = 83 bytes; byte-slicing at
+        // 80 would split the codepoint and panic. With char-based
+        // truncation this is well-defined.
+        let text = format!("{}🎉 trailing", "x".repeat(79));
+        let item = serde_json::json!({
+            "type": "tool_result",
+            "content": text,
+        });
+        let snippet = extract_tool_result_snippet(&item);
+        assert!(snippet.starts_with(&"x".repeat(79)));
+        assert!(snippet.contains('🎉'));
+        // Char count cap is 80, plus the ellipsis when truncated.
+        assert!(snippet.chars().count() <= 81);
     }
 }

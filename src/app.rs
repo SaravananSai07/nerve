@@ -563,7 +563,13 @@ impl App {
 
         let source = match self.bridge.capture_screen(&target) {
             Some(text) => PreviewSource::TerminalCapture(
-                text.lines().map(|l| l.to_string()).collect(),
+                // Symmetric with the LogEntries path: every line of capture
+                // crossing into the host terminal gets sanitised. Bridge
+                // text is usually pre-rendered, but tmux/ghostty don't
+                // guarantee the absence of every C0/C1 byte.
+                text.lines()
+                    .map(|l| crate::util::sanitize::strip_ansi(l).into_owned())
+                    .collect(),
             ),
             None => PreviewSource::LogEntries(load_log_entries(&jsonl_path)),
         };
