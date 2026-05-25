@@ -548,12 +548,16 @@ impl App {
             KeyCode::Char('u') => {
                 // Dismiss the update banner for *this version only*.
                 // The next upstream release flips `pending_update`'s
-                // value and the banner returns. When there's no
-                // banner to dismiss, acknowledge the keypress so the
-                // binding doesn't feel broken.
+                // value and the banner returns. The empty-banner
+                // feedback distinguishes "nothing pending" from
+                // "already dismissed earlier this version" — the
+                // second case used to say "nothing to dismiss",
+                // which felt like the dismissal hadn't taken.
                 if let Some(version) = self.update_banner.take() {
                     self.prefs.dismissed_update_version = Some(version);
                     self.prefs.save(&self.paths);
+                } else if let Some(v) = self.prefs.dismissed_update_version.as_deref() {
+                    self.set_status_info(format!("update banner dismissed for v{v}"));
                 } else {
                     self.set_status_info("no update banner to dismiss");
                 }

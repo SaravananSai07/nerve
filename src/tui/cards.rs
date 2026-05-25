@@ -342,7 +342,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, ctx: &RenderContext<'_>) {
     let width = area.width as usize;
     let mut right: Vec<Span> = Vec::new();
     if searching {
-        right.push(Span::styled("[Esc] clear", Style::default().fg(theme.error)));
+        // Esc-to-clear-search is routine navigation, not a failure.
+        // Render in `muted` to match the search overlay's own hint
+        // and avoid training the user that red means nothing.
+        right.push(Span::styled("[Esc] clear", Style::default().fg(theme.muted)));
     } else if width >= 60 {
         let sort_label = registry.sort_mode().label();
         right.extend([

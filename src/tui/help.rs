@@ -72,15 +72,31 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Leading dashes in the key column anchor the section header so
-    // it reads as a divider on themes where `muted` sits close to
-    // `processing` in luminance.
-    let lines: Vec<Line> = BINDINGS
+    // Section-header dash run scales with the inner width — on a
+    // narrow help box the fixed-width ruler used to consume the
+    // entire visual budget; on a wide box six dashes looked stingy.
+    // Quarter of inner width capped at 12 hits both ends.
+    let dash_run = ((inner.width / 4) as usize).clamp(3, 12);
+    let header_rule: String = "─".repeat(dash_run);
+
+    // If the bindings list doesn't fit, leave one row free for an
+    // overflow indicator so the user knows there's more behind the
+    // clip. Without this the bottom rows just vanish — including
+    // `Ctrl+C` quit — and the help looks complete when it isn't.
+    let visible_rows = inner.height as usize;
+    let (slice_len, overflow) = if BINDINGS.len() > visible_rows {
+        (visible_rows.saturating_sub(1), Some(BINDINGS.len() - (visible_rows - 1)))
+    } else {
+        (BINDINGS.len(), None)
+    };
+
+    let mut lines: Vec<Line> = BINDINGS
         .iter()
+        .take(slice_len)
         .map(|line| match line {
             HelpLine::Header(label) => Line::from(vec![
                 Span::styled(
-                    "  ──────  ",
+                    format!("  {}  ", header_rule),
                     Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
                 ),
                 Span::styled(
@@ -103,6 +119,13 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
             )),
         })
         .collect();
+
+    if let Some(remaining) = overflow {
+        lines.push(Line::from(Span::styled(
+            format!("  … +{remaining} more (resize for the full list)"),
+            Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
+        )));
+    }
 
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
