@@ -136,10 +136,10 @@ impl App {
         let prefs = Prefs::load(&paths);
 
         crate::updater::maybe_check_in_background(&paths, config.updates.check_on_launch);
-        // Banner suppression is semver-aware: a yanked release that
-        // reverts `pending_update` to a version older than the one
-        // the user dismissed shouldn't reopen the banner. Only
-        // genuinely newer-than-dismissed pendings come through.
+        // Banner suppression uses `is_newer`'s dot-separated u32
+        // compare (not strict semver): a yanked release that reverts
+        // `pending_update` to a version older than the one the user
+        // dismissed shouldn't re-open the banner.
         let update_banner = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"))
             .filter(|v| match prefs.dismissed_update_version.as_deref() {
                 Some(dismissed) => crate::updater::is_newer(v, dismissed),

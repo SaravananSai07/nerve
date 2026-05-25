@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::state::registry::SessionRegistry;
 use crate::state::session::Session;
-use crate::tui::status::{StatusKind, StatusMessage};
+use crate::tui::status::StatusMessage;
 use crate::tui::theme::Theme;
 
 /// Bundle of everything the render path reads from `App`. Threading
@@ -288,14 +288,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, ctx: &RenderContext<'_>) {
     // design rendered every message in `theme.error`, which made
     // "returned from 'foo'" look like a failure.
     if let Some(msg) = ctx.status_message {
-        let color = match msg.kind {
-            StatusKind::Info => theme.text,
-            StatusKind::Success => theme.processing,
-            StatusKind::Error => theme.error,
-        };
         let line = Line::from(Span::styled(
             format!(" {}", msg.text),
-            Style::default().fg(color),
+            Style::default().fg(msg.color(theme)),
         ));
         frame.render_widget(Paragraph::new(line), area);
         return;

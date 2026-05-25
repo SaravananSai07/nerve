@@ -130,3 +130,44 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_binding_is_a_header() {
+        // Sections start the list so the layout reads as
+        // "Header → entries → Header → entries"; a regression that
+        // demoted the first header to an Entry would render the
+        // first group orphaned.
+        assert!(matches!(BINDINGS.first(), Some(HelpLine::Header(_))));
+    }
+
+    #[test]
+    fn every_section_has_at_least_one_entry() {
+        // No empty sections — a `Header` immediately followed by
+        // another `Header` is a layout bug.
+        for pair in BINDINGS.windows(2) {
+            if let (HelpLine::Header(a), HelpLine::Header(b)) = (&pair[0], &pair[1]) {
+                panic!("empty section: {a} immediately followed by {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn covers_the_quit_and_help_bindings() {
+        // These two are the most-used escape keys; their loss in a
+        // refactor would strand users inside the TUI.
+        let keys: Vec<&str> = BINDINGS
+            .iter()
+            .filter_map(|line| match line {
+                HelpLine::Entry { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert!(keys.iter().any(|k| k.contains("Ctrl+C")));
+        assert!(keys.contains(&"?"));
+        assert!(keys.contains(&"q"));
+    }
+}

@@ -25,9 +25,9 @@
 
 **Rendering**
 
-- Sparkline switches from `▓░` to `█·` for consistent cell width on
+- Sparkline switches from `▓░` to `█▁` for a flush baseline on
   every monospace font (Apple Terminal rendered the shaded blocks
-  unevenly).
+  unevenly; an intermediate middle-dot interim sat off-baseline).
 - Theme grows a `muted` colour for chrome text (status hints, log
   numbers, modal hints) distinct from `idle` (state colour). User
   themes without `muted` fall back to `idle` so existing TOML files

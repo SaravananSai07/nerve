@@ -636,7 +636,7 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
     // Strip first means truncate sees only printable text; the
     // grapheme cap is honoured deterministically.
     let cleaned = strip_ansi(trimmed);
-    crate::util::text::truncate_chars(&cleaned, 80)
+    crate::util::text::truncate_graphemes(&cleaned, 80)
 }
 
 pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {

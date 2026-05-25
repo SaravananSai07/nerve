@@ -130,6 +130,12 @@ pub fn pending_update(paths: &Paths, current: &str) -> Option<String> {
 }
 
 /// True if `latest` parses as a strictly greater version than `current`.
+/// Compares dot-separated `u32` components, dropping any segment that
+/// fails to parse — this is *not* full semver (a pre-release suffix
+/// like `0.4.0-rc1` collapses to `[0, 4]`, sorting less than `0.4.0`
+/// and unequal to `0.4.0-rc2`). Nerve doesn't publish pre-releases
+/// today; if that changes, swap in a real `semver::Version` parse.
+///
 /// Used by the banner-suppression path to ignore yanked-release
 /// downgrades — if `pending_update` reverts to a version older than
 /// the one a user explicitly dismissed, we don't bother them again.

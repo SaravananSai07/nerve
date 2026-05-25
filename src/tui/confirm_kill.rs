@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, theme: &Theme, name: &str) {
 
     // Truncate long names so the prompt fits the modal's inner width
     // (48 cols minus border + leading "Kill '" + trailing "'?").
-    let display_name = crate::util::text::truncate_chars(name, 35);
+    let display_name = crate::util::text::truncate_graphemes(name, 35);
     let lines = vec![
         Line::from(Span::styled(
             format!(" Kill '{display_name}'?"),
