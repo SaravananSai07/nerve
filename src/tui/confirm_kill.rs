@@ -38,12 +38,12 @@ pub fn render(frame: &mut Frame, theme: &Theme, name: &str) {
         // a "punch-through-with-Enter" reflex resolves to no-op.
         Line::from(vec![
             Span::styled(" [y]", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
-            Span::styled(" kill  ", Style::default().fg(theme.idle)),
+            Span::styled(" kill  ", Style::default().fg(theme.muted)),
             Span::styled(
                 "[Enter/Esc/n]",
                 Style::default().fg(theme.processing).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" cancel (default)", Style::default().fg(theme.idle)),
+            Span::styled(" cancel (default)", Style::default().fg(theme.muted)),
         ]),
     ];
 

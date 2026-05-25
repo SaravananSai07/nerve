@@ -32,9 +32,9 @@ pub fn render(frame: &mut Frame, theme: &Theme, input: &str) {
         Line::raw(""),
         Line::from(vec![
             Span::styled(" Enter", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
-            Span::styled(" confirm  ", Style::default().fg(theme.idle)),
+            Span::styled(" confirm  ", Style::default().fg(theme.muted)),
             Span::styled("Esc", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-            Span::styled(" cancel", Style::default().fg(theme.idle)),
+            Span::styled(" cancel", Style::default().fg(theme.muted)),
         ]),
     ];
 

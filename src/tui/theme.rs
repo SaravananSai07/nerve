@@ -13,7 +13,15 @@ pub struct Theme {
     pub text: Color,
     pub processing: Color,
     pub waiting: Color,
+    /// Idle-session state color. Deliberately dim so an idle card
+    /// fades into the background. Don't use this for chrome text —
+    /// `muted` exists for that.
     pub idle: Color,
+    /// Chrome text (status-bar hints, secondary card text, help
+    /// section dividers). Distinct from `idle` so a session-state
+    /// color choice doesn't drag UI affordances below WCAG-AA
+    /// contrast on dark backgrounds.
+    pub muted: Color,
     pub error: Color,
     pub stale: Color,
     pub selected_bg: Color,
@@ -78,13 +86,22 @@ impl Theme {
             .unwrap_or("custom")
             .to_string();
         let name = raw.name.unwrap_or(fallback_name);
+        let idle = parse_color(&raw.idle, "idle")?;
+        // muted falls back to idle so existing user themes don't
+        // suddenly fail to load — the chrome stays at its prior
+        // (slightly-dim) color until the user adopts the new field.
+        let muted = match raw.muted.as_deref() {
+            Some(s) => parse_color(s, "muted")?,
+            None => idle,
+        };
         Ok(Theme {
             name,
             border: parse_color(&raw.border, "border")?,
             text: parse_color(&raw.text, "text")?,
             processing: parse_color(&raw.processing, "processing")?,
             waiting: parse_color(&raw.waiting, "waiting")?,
-            idle: parse_color(&raw.idle, "idle")?,
+            idle,
+            muted,
             error: parse_color(&raw.error, "error")?,
             stale: parse_color(&raw.stale, "stale")?,
             selected_bg: parse_color(&raw.selected_bg, "selected_bg")?,
@@ -111,6 +128,7 @@ impl Theme {
             processing: Color::Rgb(0x81, 0xb2, 0x9a),
             waiting: Color::Rgb(0xdb, 0xc0, 0x74),
             idle: Color::Rgb(0x63, 0x71, 0x7f),
+            muted: Color::Rgb(0x90, 0x98, 0xa4),
             error: Color::Rgb(0xc9, 0x4f, 0x6d),
             stale: Color::Rgb(0x50, 0x56, 0x5b),
             selected_bg: Color::Rgb(0x2a, 0x31, 0x3a),
@@ -126,6 +144,7 @@ impl Theme {
             processing: Color::Rgb(0x9e, 0xce, 0x6a),
             waiting: Color::Rgb(0xe0, 0xaf, 0x68),
             idle: Color::Rgb(0x54, 0x5c, 0x7e),
+            muted: Color::Rgb(0x82, 0x8b, 0xb8),
             error: Color::Rgb(0xf7, 0x76, 0x8e),
             stale: Color::Rgb(0x41, 0x48, 0x68),
             selected_bg: Color::Rgb(0x29, 0x2e, 0x42),
@@ -142,6 +161,7 @@ impl Theme {
             processing: Color::Rgb(0xa6, 0xe3, 0xa1),
             waiting: Color::Rgb(0xf9, 0xe2, 0xaf),
             idle: Color::Rgb(0x58, 0x5b, 0x70),
+            muted: Color::Rgb(0x8a, 0x8f, 0xa8),
             error: Color::Rgb(0xf3, 0x8b, 0xa8),
             stale: Color::Rgb(0x45, 0x47, 0x5a),
             selected_bg: Color::Rgb(0x31, 0x32, 0x44),
@@ -157,6 +177,7 @@ impl Theme {
             processing: Color::Rgb(0xb8, 0xbb, 0x26),
             waiting: Color::Rgb(0xfa, 0xbd, 0x2f),
             idle: Color::Rgb(0x7c, 0x6f, 0x64),
+            muted: Color::Rgb(0xa8, 0x99, 0x84),
             error: Color::Rgb(0xfb, 0x49, 0x34),
             stale: Color::Rgb(0x50, 0x49, 0x45),
             selected_bg: Color::Rgb(0x3c, 0x38, 0x36),
@@ -172,6 +193,7 @@ impl Theme {
             processing: Color::Rgb(0x50, 0xfa, 0x7b),
             waiting: Color::Rgb(0xf1, 0xfa, 0x8c),
             idle: Color::Rgb(0x62, 0x72, 0xa4),
+            muted: Color::Rgb(0x9b, 0xa5, 0xc8),
             error: Color::Rgb(0xff, 0x55, 0x55),
             stale: Color::Rgb(0x44, 0x47, 0x5a),
             selected_bg: Color::Rgb(0x34, 0x35, 0x46),
@@ -187,6 +209,7 @@ impl Theme {
             processing: Color::Rgb(0x9c, 0xce, 0xd6),
             waiting: Color::Rgb(0xf6, 0xc1, 0x77),
             idle: Color::Rgb(0x52, 0x4f, 0x67),
+            muted: Color::Rgb(0x90, 0x8c, 0xae),
             error: Color::Rgb(0xeb, 0x6f, 0x92),
             stale: Color::Rgb(0x3e, 0x3c, 0x54),
             selected_bg: Color::Rgb(0x26, 0x23, 0x3a),
@@ -226,6 +249,10 @@ struct RawTheme {
     processing: String,
     waiting: String,
     idle: String,
+    /// Optional — older user themes without this key fall back to
+    /// `idle`. Documented in CHANGELOG.
+    #[serde(default)]
+    muted: Option<String>,
     error: String,
     stale: String,
     selected_bg: String,

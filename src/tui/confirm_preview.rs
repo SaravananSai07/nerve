@@ -36,11 +36,11 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
         Line::raw(""),
         Line::from(vec![
             Span::styled(" [y]", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
-            Span::styled(" continue  ", Style::default().fg(theme.idle)),
+            Span::styled(" continue  ", Style::default().fg(theme.muted)),
             Span::styled("[d]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-            Span::styled(" don't ask again  ", Style::default().fg(theme.idle)),
+            Span::styled(" don't ask again  ", Style::default().fg(theme.muted)),
             Span::styled("[n/Esc]", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
-            Span::styled(" cancel", Style::default().fg(theme.idle)),
+            Span::styled(" cancel", Style::default().fg(theme.muted)),
         ]),
     ];
 

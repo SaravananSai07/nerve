@@ -69,7 +69,7 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
                 // Section header — dim, no leading column, full-width.
                 Line::from(Span::styled(
                     format!(" {desc}"),
-                    Style::default().fg(theme.idle).add_modifier(Modifier::DIM),
+                    Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
                 ))
             } else {
                 Line::from(vec![

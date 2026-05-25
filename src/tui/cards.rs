@@ -108,7 +108,14 @@ fn render_cards(
     now: Instant,
 ) {
     let width = area.width as usize;
-    let cols = if width >= 80 { 2 } else { 1 };
+    // 1-col below 80 (single-card mobile-ish), 2-col 80–159 (default
+    // laptop terminal), 3-col 160+ (ultra-wide). Smoother than the
+    // prior 1↔2 cliff and uses the screen on big displays.
+    let cols = match width {
+        0..80 => 1,
+        80..160 => 2,
+        _ => 3,
+    };
     let total_rows = sessions.len().div_ceil(cols);
 
     const CARD_HEIGHT: u16 = 5;
@@ -182,7 +189,7 @@ fn render_card(
             theme.border,
             Style::default().fg(theme.border),
             theme.text,
-            theme.idle,
+            theme.muted,
         )
     };
 
@@ -200,7 +207,7 @@ fn render_card(
         if is_selected {
             Style::default().fg(state_color).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.idle)
+            Style::default().fg(theme.muted)
         },
     );
 
@@ -281,67 +288,81 @@ fn render_status_bar(
     notifications_muted: bool,
     search_query: Option<&str>,
 ) {
-    let line = if let Some(msg) = status_message {
-        Line::from(Span::styled(
+    // Action / search messages take the whole row.
+    if let Some(msg) = status_message {
+        let line = Line::from(Span::styled(
             format!(" {msg}"),
             Style::default().fg(theme.error),
-        ))
+        ));
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    let total = registry.len();
+    let total_cost = registry.total_cost_usd();
+    let counts = registry.count_by_state();
+    let searching = search_query.is_some();
+    let sep: &str = if searching { "  " } else { "   " };
+
+    // Left half — session summary. Always present.
+    let mut left: Vec<Span> = Vec::new();
+    if let Some(q) = search_query {
+        left.push(Span::styled(
+            format!(" /{q}  {filtered_count}/{total} "),
+            Style::default().fg(theme.processing).add_modifier(Modifier::BOLD),
+        ));
     } else {
-        let total = registry.len();
-        let total_cost = registry.total_cost_usd();
-        let counts = registry.count_by_state();
-        let searching = search_query.is_some();
-        let sep: &str = if searching { "  " } else { "   " };
-
-        let mut spans: Vec<Span> = Vec::new();
-        if let Some(q) = search_query {
-            spans.push(Span::styled(
-                format!(" /{q}  {filtered_count}/{total} "),
-                Style::default().fg(theme.processing).add_modifier(Modifier::BOLD),
-            ));
+        left.push(Span::styled(format!(" {total} sessions"), Style::default().fg(theme.text)));
+    }
+    left.push(Span::raw(sep));
+    left.push(Span::styled(format!("{} active", counts.active), Style::default().fg(theme.processing)));
+    left.push(Span::raw(sep));
+    left.push(Span::styled(format!("{} waiting", counts.waiting), Style::default().fg(theme.waiting)));
+    left.push(Span::raw(sep));
+    left.push(Span::styled(format!("{} idle", counts.idle), Style::default().fg(theme.idle)));
+    if total_cost >= 0.01 {
+        left.push(Span::raw(sep));
+        let cost = if searching {
+            format!("${total_cost:.2}")
         } else {
-            spans.push(Span::styled(format!(" {total} sessions"), Style::default().fg(theme.text)));
-        }
-        spans.push(Span::raw(sep));
-        spans.push(Span::styled(format!("{} active", counts.active), Style::default().fg(theme.processing)));
-        spans.push(Span::raw(sep));
-        spans.push(Span::styled(format!("{} waiting", counts.waiting), Style::default().fg(theme.waiting)));
-        spans.push(Span::raw(sep));
-        spans.push(Span::styled(format!("{} idle", counts.idle), Style::default().fg(theme.idle)));
-        if total_cost >= 0.01 {
-            spans.push(Span::raw(sep));
-            let cost = if searching {
-                format!("${total_cost:.2}")
-            } else {
-                format!("${total_cost:.2} total")
-            };
-            spans.push(Span::styled(cost, Style::default().fg(theme.text)));
-        }
-        if searching {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled("[Esc] clear", Style::default().fg(theme.error)));
-        } else {
-            let sort_label = registry.sort_mode().label();
-            spans.extend([
-                Span::raw("   "),
-                Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.idle)),
-                Span::raw("  "),
-                Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.idle)),
-                Span::raw("  "),
-                Span::styled("[?] help", Style::default().fg(theme.idle)),
-                Span::raw("  "),
-                Span::styled("[/] search", Style::default().fg(theme.idle)),
-            ]);
-        }
-        if notifications_muted {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled("[muted]", Style::default().fg(theme.error)));
-        }
-        Line::from(spans)
-    };
+            format!("${total_cost:.2} total")
+        };
+        left.push(Span::styled(cost, Style::default().fg(theme.text)));
+    }
 
-    let para = Paragraph::new(line);
-    frame.render_widget(para, area);
+    // Right half — chrome hints + [muted]. Right-aligned so the
+    // muted indicator survives a narrow terminal (the prior all-in-
+    // one-line layout dropped the right-most spans without warning
+    // at 80 cols).
+    let mut right: Vec<Span> = Vec::new();
+    if searching {
+        right.push(Span::styled("[Esc] clear", Style::default().fg(theme.error)));
+    } else {
+        let sort_label = registry.sort_mode().label();
+        right.extend([
+            Span::styled(format!("[s]ort: {sort_label}"), Style::default().fg(theme.muted)),
+            Span::raw("  "),
+            Span::styled(format!("[t]heme: {}", theme.name), Style::default().fg(theme.muted)),
+            Span::raw("  "),
+            Span::styled("[?] help", Style::default().fg(theme.muted)),
+            Span::raw("  "),
+            Span::styled("[/] search", Style::default().fg(theme.muted)),
+        ]);
+    }
+    if notifications_muted {
+        right.push(Span::raw("  "));
+        right.push(Span::styled("[muted] ", Style::default().fg(theme.error)));
+    }
+
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(20), Constraint::Min(0)])
+        .split(area);
+    frame.render_widget(Paragraph::new(Line::from(left)), halves[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(right).right_aligned()),
+        halves[1],
+    );
 }
 
 fn render_empty(frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -362,7 +383,7 @@ fn render_empty(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::raw(""),
         Line::styled(
             "Start a Claude Code session in another tab.",
-            Style::default().fg(theme.idle),
+            Style::default().fg(theme.muted),
         ),
     ])
     .alignment(ratatui::layout::Alignment::Center);
@@ -401,7 +422,7 @@ fn render_setup_hint(frame: &mut Frame, area: Rect, theme: &Theme) {
         Line::raw(""),
         Line::styled(
             "Then start a session in another tab — nerve will pick it up.",
-            Style::default().fg(theme.idle),
+            Style::default().fg(theme.muted),
         ),
     ])
     .alignment(ratatui::layout::Alignment::Center);
@@ -427,7 +448,7 @@ fn render_search_empty(frame: &mut Frame, area: Rect, theme: &Theme, query: &str
         Line::raw(""),
         Line::styled(
             "Press Esc to clear the search.",
-            Style::default().fg(theme.idle),
+            Style::default().fg(theme.muted),
         ),
     ])
     .alignment(ratatui::layout::Alignment::Center);

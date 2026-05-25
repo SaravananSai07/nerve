@@ -250,7 +250,13 @@ impl App {
 
             terminal.draw(|frame| {
                 let area = frame.area();
-                self.cols = if area.width >= 80 { 2 } else { 1 };
+                // Mirror cards::render_cards thresholds so h/l
+                // navigation matches the rendered layout.
+                self.cols = match area.width {
+                    0..80 => 1,
+                    80..160 => 2,
+                    _ => 3,
+                };
 
                 let visible: Vec<&Session> = self.filtered.iter(&self.registry).collect();
 
@@ -303,12 +309,12 @@ impl App {
                                 ratatui::text::Span::styled(
                                     " fuzzy · case-insensitive  ",
                                     ratatui::style::Style::default()
-                                        .fg(self.theme.idle)
+                                        .fg(self.theme.muted)
                                         .add_modifier(ratatui::style::Modifier::DIM),
                                 ),
                                 ratatui::text::Span::styled(
                                     "[Enter] keep  [Esc] clear",
-                                    ratatui::style::Style::default().fg(self.theme.idle),
+                                    ratatui::style::Style::default().fg(self.theme.muted),
                                 ),
                             ]),
                         ];

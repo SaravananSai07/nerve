@@ -94,7 +94,7 @@ fn render_terminal_buffer(
     if terminal_lines.is_empty() {
         let msg = Paragraph::new(Line::styled(
             "  No terminal content captured.",
-            Style::default().fg(theme.idle),
+            Style::default().fg(theme.muted),
         ));
         frame.render_widget(msg, inner);
         return;
@@ -130,7 +130,7 @@ fn render_log_entries(
     if entries.is_empty() {
         let msg = Paragraph::new(Line::styled(
             "  No log entries found.",
-            Style::default().fg(theme.idle),
+            Style::default().fg(theme.muted),
         ));
         frame.render_widget(msg, inner);
         return;
@@ -164,13 +164,13 @@ fn render_log_entries(
 fn hint_bar<'a>(theme: &Theme) -> Line<'a> {
     Line::from(vec![
         Span::styled(" [p/q/Esc]", Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
-        Span::styled(" close  ", Style::default().fg(theme.idle)),
+        Span::styled(" close  ", Style::default().fg(theme.muted)),
         Span::styled("[j/k]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-        Span::styled(" line  ", Style::default().fg(theme.idle)),
+        Span::styled(" line  ", Style::default().fg(theme.muted)),
         Span::styled("[PgUp/PgDn]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-        Span::styled(" page  ", Style::default().fg(theme.idle)),
+        Span::styled(" page  ", Style::default().fg(theme.muted)),
         Span::styled("[g/G]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-        Span::styled(" top/bottom", Style::default().fg(theme.idle)),
+        Span::styled(" top/bottom", Style::default().fg(theme.muted)),
     ])
 }
 
@@ -178,23 +178,23 @@ fn format_entry<'a>(idx: usize, entry: &LogEntry, theme: &Theme) -> Line<'a> {
     let num = format!("{:>3} ", idx + 1);
     match entry {
         LogEntry::UserText(text) => Line::from(vec![
-            Span::styled(num, Style::default().fg(theme.idle)),
+            Span::styled(num, Style::default().fg(theme.muted)),
             Span::styled("▸ ", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
             Span::styled(text.clone(), Style::default().fg(theme.waiting)),
         ]),
         LogEntry::AssistantText(text) => Line::from(vec![
-            Span::styled(num, Style::default().fg(theme.idle)),
+            Span::styled(num, Style::default().fg(theme.muted)),
             Span::styled("  ", Style::default().fg(theme.text)),
             Span::styled(text.clone(), Style::default().fg(theme.text)),
         ]),
         LogEntry::ToolUse { name, detail } => {
             let mut spans = vec![
-                Span::styled(num, Style::default().fg(theme.idle)),
+                Span::styled(num, Style::default().fg(theme.muted)),
                 Span::styled("◉ ", Style::default().fg(theme.processing)),
                 Span::styled(name.clone(), Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
             ];
             if !detail.is_empty() {
-                spans.push(Span::styled(format!(" {detail}"), Style::default().fg(theme.idle)));
+                spans.push(Span::styled(format!(" {detail}"), Style::default().fg(theme.muted)));
             }
             Line::from(spans)
         }
@@ -205,13 +205,13 @@ fn format_entry<'a>(idx: usize, entry: &LogEntry, theme: &Theme) -> Line<'a> {
                 ("✓ ", theme.processing)
             };
             let mut spans = vec![
-                Span::styled(num, Style::default().fg(theme.idle)),
+                Span::styled(num, Style::default().fg(theme.muted)),
                 Span::styled(icon, Style::default().fg(color)),
             ];
             if snippet.is_empty() {
                 spans.push(Span::styled(status.clone(), Style::default().fg(color)));
             } else {
-                spans.push(Span::styled(snippet.clone(), Style::default().fg(theme.idle)));
+                spans.push(Span::styled(snippet.clone(), Style::default().fg(theme.muted)));
             }
             Line::from(spans)
         }
@@ -222,7 +222,7 @@ fn format_entry<'a>(idx: usize, entry: &LogEntry, theme: &Theme) -> Line<'a> {
                 ("● ", "result", theme.waiting)
             };
             Line::from(vec![
-                Span::styled(num, Style::default().fg(theme.idle)),
+                Span::styled(num, Style::default().fg(theme.muted)),
                 Span::styled(icon, Style::default().fg(color)),
                 Span::styled(label, Style::default().fg(color)),
             ])
