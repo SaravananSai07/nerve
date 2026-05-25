@@ -166,9 +166,14 @@ pub struct Session {
     pub branch: Option<String>,
     pub cpu_percent: f32,
     pub current_tool: Option<String>,
-    pub activity: ActivityHistory,
+    activity: ActivityHistory,
     pub jsonl_path: Option<PathBuf>,
-    pub renamed: bool,
+    /// User-supplied custom name via the rename overlay. Privately
+    /// owned because the legal write path is `rename_to`, which
+    /// updates `name` in lockstep — letting external code flip this
+    /// without setting the name (or vice versa) breaks the
+    /// disambiguation logic in `registry::re_disambiguate_names`.
+    renamed: bool,
     pub usage: TokenUsage,
     pub pid: Option<u32>,
     pub jsonl_age_secs: Option<f64>,
@@ -274,16 +279,80 @@ impl Session {
         }
     }
 
-    /// Notification dedup: returns true if `state` differs from the
-    /// last state we surfaced a notification for, and records it. The
-    /// only legitimate writer of `last_notified_state` lives here.
-    pub fn try_take_notification(&mut self, state: &SessionState) -> bool {
-        if self.last_notified_state.as_ref() != Some(state) {
-            self.last_notified_state = Some(state.clone());
-            true
-        } else {
-            false
+    /// Returns the current state as a fresh notification target if it
+    /// differs from the last state we notified for, otherwise None.
+    /// Callers no longer need to clone the current state speculatively
+    /// before checking — they pay one clone only on the positive path.
+    pub fn take_pending_notification(&mut self) -> Option<SessionState> {
+        let current = self.state_machine.current();
+        if self.last_notified_state.as_ref() == Some(current) {
+            return None;
         }
+        self.last_notified_state = Some(current.clone());
+        self.last_notified_state.clone()
+    }
+
+    /// Apply a fresh observation from the discovery worker. The state
+    /// machine, event-history, and notification-dedup fields are not
+    /// touched — they belong to the registry, not the snapshot. The
+    /// caller passes in any config-supplied name override; the
+    /// renamed-by-user case wins over both.
+    pub fn merge_snapshot(&mut self, snap: DiscoverySnapshot, name_override: Option<&str>) {
+        self.cpu_percent = snap.cpu_percent;
+        self.tty = snap.tty;
+        self.branch = snap.branch;
+        self.pid = snap.pid;
+        self.usage = snap.usage;
+        if !self.renamed {
+            self.name = name_override
+                .map(str::to_string)
+                .unwrap_or(snap.name);
+        }
+        if let Some(tool) = snap.current_tool {
+            // current_tool sticks past the ToolRunning state so users
+            // can see what the session was last doing when it goes
+            // idle. Only updated when the snapshot has one to give.
+            self.current_tool = Some(tool);
+        }
+        if self.jsonl_path.is_none() {
+            self.jsonl_path = snap.jsonl_path;
+        }
+        if let Some(age) = snap.jsonl_age_secs {
+            self.jsonl_age_secs = Some(age);
+        }
+    }
+
+    /// Record an event-driven activity tick if the session is doing
+    /// work. The "record only when busy" invariant lives here so
+    /// callers can't accidentally light up the sparkline during idle
+    /// transitions.
+    pub fn record_activity_if_busy(&mut self, state: &SessionState) {
+        if matches!(state, SessionState::Processing | SessionState::ToolRunning(_)) {
+            self.activity.record_activity();
+        }
+    }
+
+    /// Time-driven shift of the activity ring. Called once per scan
+    /// by the registry so the sparkline keeps decaying when no events
+    /// arrive.
+    pub fn shift_activity(&mut self) {
+        self.activity.shift_if_needed();
+    }
+
+    pub fn activity_sparkline(&self) -> String {
+        self.activity.sparkline()
+    }
+
+    /// User-driven rename. Sets the custom name and flags the session
+    /// so future discovery snapshots don't overwrite it from the cwd
+    /// basename / config override.
+    pub fn rename_to(&mut self, new_name: String) {
+        self.name = new_name;
+        self.renamed = true;
+    }
+
+    pub fn is_renamed(&self) -> bool {
+        self.renamed
     }
 
     /// One-shot wrapper used by CLI paths and tests; samples its
@@ -534,12 +603,46 @@ mod tests {
     }
 
     #[test]
-    fn try_take_notification_dedups() {
+    fn take_pending_notification_dedups() {
         let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
-        assert!(s.try_take_notification(&SessionState::Idle));
-        // Same state again: no fresh notification.
-        assert!(!s.try_take_notification(&SessionState::Idle));
+        s.set_state(SessionState::Idle);
+        assert_eq!(s.take_pending_notification(), Some(SessionState::Idle));
+        // Same state: no fresh notification on the next call.
+        assert_eq!(s.take_pending_notification(), None);
         // Different state: fresh again.
-        assert!(s.try_take_notification(&SessionState::Error));
+        s.set_state(SessionState::Error);
+        assert_eq!(s.take_pending_notification(), Some(SessionState::Error));
+    }
+
+    #[test]
+    fn rename_to_flags_session_as_renamed() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
+        assert!(!s.is_renamed());
+        s.rename_to("custom".into());
+        assert_eq!(s.name, "custom");
+        assert!(s.is_renamed());
+    }
+
+    #[test]
+    fn merge_snapshot_skips_name_when_renamed() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
+        s.rename_to("custom".into());
+        let snap = DiscoverySnapshot {
+            id: SessionId::new("id1"),
+            cwd: PathBuf::from("/tmp/x"),
+            name: "x".into(),
+            tty: None,
+            branch: None,
+            cpu_percent: 0.0,
+            pid: None,
+            detected_state: SessionState::Idle,
+            current_tool: None,
+            usage: TokenUsage::default(),
+            jsonl_path: None,
+            jsonl_age_secs: None,
+        };
+        s.merge_snapshot(snap, None);
+        // Rename wins over snapshot name.
+        assert_eq!(s.name, "custom");
     }
 }

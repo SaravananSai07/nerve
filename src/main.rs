@@ -165,7 +165,7 @@ fn main() -> std::io::Result<()> {
                 s.tty.as_deref().unwrap_or("?"),
                 s.branch.as_deref().unwrap_or("—"),
                 s.format_duration(),
-                s.activity.sparkline(),
+                s.activity_sparkline(),
                 token_info,
             );
         }

@@ -704,8 +704,7 @@ impl App {
             return;
         }
         if let Some(session) = self.registry.get_mut(id.as_str()) {
-            session.name = new_name;
-            session.renamed = true;
+            session.rename_to(new_name);
         }
         // Name change affects both filter (matches_query) and Name-sort
         // ordering, so the FilteredView cache must rebuild.
@@ -862,48 +861,21 @@ impl App {
             let detected_state = snap.detected_state.clone();
             let id = snap.id.clone();
             let cwd_str = snap.cwd.to_string_lossy().into_owned();
+            let name_override = self
+                .config
+                .session_name_for(&cwd_str)
+                .map(String::as_str);
 
             if let Some(existing) = self.registry.get_mut(id.as_str()) {
-                existing.cpu_percent = snap.cpu_percent;
-                existing.tty = snap.tty;
-                existing.branch = snap.branch;
-                existing.pid = snap.pid;
-
-                if !existing.renamed {
-                    if let Some(override_name) = self.config.session_name_for(&cwd_str) {
-                        existing.name = override_name.clone();
-                    } else {
-                        existing.name = snap.name;
-                    }
-                }
-
-                if detected_state == SessionState::Processing
-                    || matches!(detected_state, SessionState::ToolRunning(_))
-                {
-                    existing.activity.record_activity();
-                }
-
-                if let Some(tool) = snap.current_tool.take() {
-                    existing.current_tool = Some(tool);
-                }
-
-                // The discovery worker owns the JSONL cache: cumulative
-                // usage and rotation detection already happened inside
-                // `load_session` against `JsonlCache`. The snapshot's
-                // `usage` is the authoritative total for the file's
-                // current length, so just copy it.
-                existing.usage = snap.usage;
-                if existing.jsonl_path.is_none() {
-                    existing.jsonl_path = snap.jsonl_path;
-                }
+                existing.merge_snapshot(snap, name_override);
+                existing.record_activity_if_busy(&detected_state);
 
                 if existing.propose_state(detected_state) {
                     any_transition = true;
-                    let current = existing.state().clone();
-                    if existing.try_take_notification(&current) {
+                    if let Some(state) = existing.take_pending_notification() {
                         pending.push(PendingNotification {
                             name: existing.name.clone(),
-                            state: current,
+                            state,
                             target: SessionTarget {
                                 cwd: existing.cwd.to_string_lossy().into_owned(),
                                 name: existing.name.clone(),
@@ -918,8 +890,8 @@ impl App {
                     }
                 }
             } else {
-                if let Some(override_name) = self.config.session_name_for(&cwd_str) {
-                    snap.name = override_name.clone();
+                if let Some(over) = name_override {
+                    snap.name = over.to_string();
                 }
                 // `from_snapshot` seeds the state machine with the
                 // detected state directly — no Processing-flash while

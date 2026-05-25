@@ -252,7 +252,7 @@ fn render_card(
     }
 
     let mut sparkline_spans = vec![
-        Span::styled(session.activity.sparkline(), Style::default().fg(state_color)),
+        Span::styled(session.activity_sparkline(), Style::default().fg(state_color)),
         Span::styled(
             format!("  {:.0}% cpu", session.cpu_percent),
             Style::default().fg(secondary_fg),

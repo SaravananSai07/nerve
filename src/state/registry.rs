@@ -190,7 +190,7 @@ impl SessionRegistry {
 
     pub fn shift_all_activity(&mut self) {
         for session in self.sessions.values_mut() {
-            session.activity.shift_if_needed();
+            session.shift_activity();
         }
         // No version bump: `FilteredView` stores only ids, not
         // content. Renderers resolve `&Session` on demand, so
@@ -202,13 +202,13 @@ impl SessionRegistry {
         let reserved: std::collections::HashSet<String> = self
             .sessions
             .values()
-            .filter(|s| s.renamed)
+            .filter(|s| s.is_renamed())
             .map(|s| s.name.clone())
             .collect();
 
         let mut base_to_ids: HashMap<String, Vec<SessionId>> = HashMap::new();
         for (id, session) in &self.sessions {
-            if session.renamed {
+            if session.is_renamed() {
                 continue;
             }
             let base = strip_disambiguation_suffix(&session.name);
