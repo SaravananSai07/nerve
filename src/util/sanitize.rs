@@ -83,6 +83,66 @@ fn is_safe_char(c: char) -> bool {
     )
 }
 
+/// An owned string that has passed through ANSI / control-byte
+/// filtering. Constructible only via `Sanitised::new`, so the type
+/// system carries the "this string is safe to render in the TUI"
+/// invariant from ingestion boundaries through to display.
+///
+/// Idempotent: re-sanitising an already-clean value is a no-op
+/// (`strip_ansi` is monotonic and the control-byte filter agrees on
+/// its output), so callers can wrap without worrying about whether
+/// upstream code already sanitised.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Sanitised(String);
+
+impl Sanitised {
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        let cleaned = strip_ansi(&raw).into_owned();
+        let filtered: String = cleaned
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+            .collect();
+        Self(filtered)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl std::fmt::Display for Sanitised {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for Sanitised {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for Sanitised {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for Sanitised {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +215,51 @@ mod tests {
     fn unicode_passes_through() {
         let s = "café — émoji 🎉";
         assert_eq!(strip_ansi(s), s);
+    }
+
+    // --- Sanitised newtype ---
+
+    #[test]
+    fn new_strips_ansi_csi_sequences() {
+        assert_eq!(Sanitised::new("\x1b[31mred\x1b[0m"), "red");
+    }
+
+    #[test]
+    fn new_strips_osc_sequences() {
+        assert_eq!(Sanitised::new("ok\x1b]52;c;ZXZpbA==\x07tail"), "oktail");
+    }
+
+    #[test]
+    fn new_preserves_tab_newline_cr() {
+        let input = "a\tb\nc\rd";
+        assert_eq!(Sanitised::new(input), input);
+    }
+
+    #[test]
+    fn new_drops_other_control_bytes() {
+        // NUL (\x00), BEL (\x07), and DEL (\x7f) are all stripped.
+        assert_eq!(Sanitised::new("a\x00b\x07c\x7fd"), "abcd");
+    }
+
+    #[test]
+    fn new_is_idempotent() {
+        let once = Sanitised::new("\x1b[1mfoo");
+        let twice = Sanitised::new(once.as_str());
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn display_writes_inner_string() {
+        assert_eq!(format!("{}", Sanitised::new("hello")), "hello");
+    }
+
+    #[test]
+    fn partial_eq_against_str_literal() {
+        assert!(Sanitised::new("x") == "x");
+    }
+
+    #[test]
+    fn default_is_empty() {
+        assert!(Sanitised::default().is_empty());
     }
 }

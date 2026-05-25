@@ -5,12 +5,13 @@ use serde::Deserialize;
 
 use crate::log_warn;
 use crate::state::session::SessionState;
+use crate::util::sanitize::Sanitised;
 
 const THEME_MAX_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Theme {
-    pub(crate) name: String,
+    pub(crate) name: Sanitised,
     pub(crate) border: Color,
     pub(crate) text: Color,
     pub(crate) processing: Color,
@@ -87,7 +88,19 @@ impl Theme {
             .and_then(|s| s.to_str())
             .unwrap_or("custom")
             .to_string();
-        let name = raw.name.unwrap_or(fallback_name);
+        let raw_name = raw.name.unwrap_or(fallback_name);
+        // Fall back to "custom" when sanitisation collapses the name to
+        // empty (a name made entirely of escape bytes) or when the name
+        // is long enough to bloat the status bar. Length-only fallback
+        // sidesteps the UTF-8 byte-boundary pitfall of mid-string slicing.
+        let name = {
+            let s = Sanitised::new(raw_name);
+            if s.is_empty() || s.len() > 64 {
+                Sanitised::new("custom")
+            } else {
+                s
+            }
+        };
         let idle = parse_color(&raw.idle, "idle")?;
         // muted falls back to idle so existing user themes don't
         // suddenly fail to load — the chrome stays at its prior
@@ -134,7 +147,7 @@ impl Theme {
 
     pub(crate) fn nightfox() -> Self {
         Self {
-            name: "nightfox".into(),
+            name: Sanitised::new("nightfox"),
             border: Color::Rgb(0x71, 0x83, 0x9b),
             text: Color::Rgb(0xcd, 0xce, 0xcf),
             processing: Color::Rgb(0x81, 0xb2, 0x9a),
@@ -150,7 +163,7 @@ impl Theme {
 
     pub(crate) fn tokyonight() -> Self {
         Self {
-            name: "tokyonight".into(),
+            name: Sanitised::new("tokyonight"),
             border: Color::Rgb(0x56, 0x5f, 0x89),
             text: Color::Rgb(0xc0, 0xca, 0xf5),
             processing: Color::Rgb(0x9e, 0xce, 0x6a),
@@ -167,7 +180,7 @@ impl Theme {
     pub(crate) fn catppuccin() -> Self {
         // Mocha variant
         Self {
-            name: "catppuccin".into(),
+            name: Sanitised::new("catppuccin"),
             border: Color::Rgb(0x6c, 0x70, 0x86),
             text: Color::Rgb(0xcd, 0xd6, 0xf4),
             processing: Color::Rgb(0xa6, 0xe3, 0xa1),
@@ -183,7 +196,7 @@ impl Theme {
 
     pub(crate) fn gruvbox() -> Self {
         Self {
-            name: "gruvbox".into(),
+            name: Sanitised::new("gruvbox"),
             border: Color::Rgb(0x66, 0x5c, 0x54),
             text: Color::Rgb(0xeb, 0xdb, 0xb2),
             processing: Color::Rgb(0xb8, 0xbb, 0x26),
@@ -199,7 +212,7 @@ impl Theme {
 
     pub(crate) fn dracula() -> Self {
         Self {
-            name: "dracula".into(),
+            name: Sanitised::new("dracula"),
             border: Color::Rgb(0x62, 0x72, 0xa4),
             text: Color::Rgb(0xf8, 0xf8, 0xf2),
             processing: Color::Rgb(0x50, 0xfa, 0x7b),
@@ -215,7 +228,7 @@ impl Theme {
 
     pub(crate) fn rosepine() -> Self {
         Self {
-            name: "rosepine".into(),
+            name: Sanitised::new("rosepine"),
             border: Color::Rgb(0x6e, 0x6a, 0x86),
             text: Color::Rgb(0xe0, 0xde, 0xf4),
             processing: Color::Rgb(0x9c, 0xce, 0xd6),

@@ -123,7 +123,7 @@ impl App {
         let theme_name = &config.appearance.theme;
         let theme_index = themes
             .iter()
-            .position(|t| t.name == *theme_name)
+            .position(|t| t.name.as_str() == theme_name.as_str())
             .unwrap_or(0);
         let theme = themes[theme_index].clone();
         let bridge = Bridge::auto_detect();
