@@ -375,11 +375,20 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Ctrl+C always quits, regardless of overlay. This is the one
+        // hard exit; `q` from inside an overlay closes the overlay.
+        if let KeyCode::Char('c') = code {
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                self.should_quit = true;
+                return;
+            }
+        }
         match &self.overlay {
             Overlay::Help => {
                 match code {
-                    KeyCode::Char('?') | KeyCode::Esc => self.overlay = Overlay::None,
-                    KeyCode::Char('q') => self.should_quit = true,
+                    KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc => {
+                        self.overlay = Overlay::None;
+                    }
                     _ => {}
                 }
                 return;
@@ -394,13 +403,15 @@ impl App {
             }
             Overlay::Preview { .. } => {
                 match code {
-                    KeyCode::Char('p') | KeyCode::Char('P') | KeyCode::Esc => {
+                    KeyCode::Char('p')
+                    | KeyCode::Char('P')
+                    | KeyCode::Char('q')
+                    | KeyCode::Esc => {
                         self.overlay = Overlay::None;
                     }
-                    KeyCode::Char('q') => self.should_quit = true,
                     KeyCode::Char('j') | KeyCode::Down => {
                         if let Overlay::Preview { scroll, .. } = &mut self.overlay {
-                            *scroll += 1;
+                            *scroll = scroll.saturating_add(1);
                         }
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
@@ -414,14 +425,21 @@ impl App {
             }
             Overlay::ConfirmKill { .. } => {
                 match code {
-                    KeyCode::Char('y') => {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
                         if let Overlay::ConfirmKill { name, id } =
                             std::mem::replace(&mut self.overlay, Overlay::None)
                         {
                             self.execute_kill(&name, id.as_str());
                         }
                     }
-                    KeyCode::Char('n') | KeyCode::Esc => self.overlay = Overlay::None,
+                    // Enter / n / Esc / q all cancel — kill is
+                    // destructive, so the "punch through with Enter"
+                    // reflex resolves to the safe choice.
+                    KeyCode::Char('n')
+                    | KeyCode::Char('N')
+                    | KeyCode::Char('q')
+                    | KeyCode::Enter
+                    | KeyCode::Esc => self.overlay = Overlay::None,
                     _ => {}
                 }
                 return;
@@ -437,9 +455,6 @@ impl App {
 
         match code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
             KeyCode::Char('j') | KeyCode::Down => {
                 let count = self.num_filtered();
                 let next = self.selected + self.cols;
@@ -465,7 +480,11 @@ impl App {
                     self.selected += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char('g') => {
+            // Enter is the only "switch to that session's tab" key.
+            // Plain `g` previously aliased here, but vim users hitting
+            // `g` (expecting `gg` = top, or to-of-list navigation)
+            // would teleport into a session with no return path.
+            KeyCode::Enter => {
                 self.go_to_selected_tab();
             }
             KeyCode::Char('s') => {

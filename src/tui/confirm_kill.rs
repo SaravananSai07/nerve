@@ -24,20 +24,38 @@ pub fn render(frame: &mut Frame, theme: &Theme, name: &str) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Truncate long names so the prompt fits the modal's inner width
+    // (48 cols minus border + leading "Kill '" + trailing "'?").
+    let display_name = truncate_chars(name, 35);
     let lines = vec![
         Line::from(Span::styled(
-            format!(" Kill '{name}'?"),
+            format!(" Kill '{display_name}'?"),
             Style::default().fg(theme.text),
         )),
         Line::raw(""),
+        // Default-on-cancel: Enter / Esc / n / q all dismiss the dialog
+        // safely. `y` is the only key that actually fires SIGTERM, so
+        // a "punch-through-with-Enter" reflex resolves to no-op.
         Line::from(vec![
             Span::styled(" [y]", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
-            Span::styled(" confirm  ", Style::default().fg(theme.idle)),
-            Span::styled("[n/Esc]", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-            Span::styled(" cancel", Style::default().fg(theme.idle)),
+            Span::styled(" kill  ", Style::default().fg(theme.idle)),
+            Span::styled(
+                "[Enter/Esc/n]",
+                Style::default().fg(theme.processing).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" cancel (default)", Style::default().fg(theme.idle)),
         ]),
     ];
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
