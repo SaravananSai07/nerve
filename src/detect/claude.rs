@@ -629,11 +629,14 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
     let trimmed = first_line.trim();
-    let truncated = crate::util::text::truncate_chars(trimmed, 80);
-    // Strip ANSI / OSC / C0+C1 controls before the snippet reaches the TUI.
-    // Defends against an untrusted JSONL painting the host terminal via
-    // escape sequences (cursor jumps, OSC 52 clipboard writes, etc.).
-    strip_ansi(&truncated).into_owned()
+    // Strip ANSI / OSC / C0+C1 controls BEFORE truncating. Truncating
+    // first could split a CSI / OSC sequence, and `strip_ansi` would
+    // then discard everything past the dangling introducer — silently
+    // swallowing the truncated payload and any ellipsis we appended.
+    // Strip first means truncate sees only printable text; the
+    // grapheme cap is honoured deterministically.
+    let cleaned = strip_ansi(trimmed);
+    crate::util::text::truncate_chars(&cleaned, 80)
 }
 
 pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {

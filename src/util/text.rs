@@ -7,9 +7,13 @@ use unicode_segmentation::UnicodeSegmentation;
 /// mid-cluster — that would leave orphan combining marks in the
 /// output.
 ///
-/// `max_graphemes == 0` returns an empty string; `max_graphemes == 1`
-/// returns just the ellipsis when truncation is needed.
+/// `max_graphemes == 0` always returns an empty string;
+/// `max_graphemes == 1` returns just the ellipsis when truncation
+/// is needed.
 pub fn truncate_chars(s: &str, max_graphemes: usize) -> String {
+    if max_graphemes == 0 {
+        return String::new();
+    }
     let clusters: Vec<&str> = s.graphemes(true).collect();
     if clusters.len() <= max_graphemes {
         return s.to_string();
@@ -63,5 +67,15 @@ mod tests {
     #[test]
     fn max_one_returns_ellipsis_only() {
         assert_eq!(truncate_chars("hello", 1), "…");
+    }
+
+    #[test]
+    fn max_zero_returns_empty_regardless_of_input() {
+        // The doc-comment promises an empty string; previously the
+        // body fell through to `push('…')` and returned a single
+        // ellipsis instead.
+        assert_eq!(truncate_chars("hello", 0), "");
+        assert_eq!(truncate_chars("", 0), "");
+        assert_eq!(truncate_chars("👨\u{200d}💻", 0), "");
     }
 }

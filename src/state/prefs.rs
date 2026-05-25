@@ -49,6 +49,20 @@ impl Prefs {
         match toml::from_str::<Self>(&contents) {
             Ok(mut prefs) => {
                 prefs.migrate();
+                // Defence in depth: prefs.toml is user-editable and may
+                // travel via dotfile sync. Today no render path consumes
+                // `dismissed_update_version`, but it's persistent storage
+                // — the next code change that adds a "dismissed for vX"
+                // status message would otherwise have an unsanitised
+                // ANSI vector handed to it on a plate.
+                if let Some(ref v) = prefs.dismissed_update_version {
+                    let cleaned: String = crate::util::sanitize::strip_ansi(v)
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect();
+                    prefs.dismissed_update_version =
+                        if cleaned.is_empty() { None } else { Some(cleaned) };
+                }
                 prefs
             }
             Err(e) => {

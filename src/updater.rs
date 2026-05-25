@@ -104,13 +104,26 @@ pub fn maybe_check_in_background(paths: &Paths, enabled: bool) {
 /// Read the cached latest version and return it iff strictly newer than the
 /// running binary. None means "no banner" — either no cache yet, network down,
 /// or we're already on the latest.
+///
+/// The cached value is re-sanitised on read. `fetch_latest_version` strips at
+/// the network boundary, but `update_cache.json` is a second trust boundary:
+/// a sibling process / sync corruption / a malicious helper writing into
+/// `$XDG_CONFIG_HOME` could plant a value the network fix never sees. Strip
+/// on read so the rendering path can trust whatever the cache yields.
 pub fn pending_update(paths: &Paths, current: &str) -> Option<String> {
     let cache = read_cache(&paths.update_cache_file());
     if cache.last_known_version.is_empty() {
         return None;
     }
-    if is_newer(&cache.last_known_version, current) {
-        Some(cache.last_known_version)
+    let cleaned: String = crate::util::sanitize::strip_ansi(&cache.last_known_version)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if is_newer(&cleaned, current) {
+        Some(cleaned)
     } else {
         None
     }
