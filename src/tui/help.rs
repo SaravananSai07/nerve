@@ -35,6 +35,8 @@ const BINDINGS: &[(&str, &str)] = &[
     ("?", "Toggle this help"),
     ("q", "Close current overlay (or quit from main view)"),
     ("Ctrl+C", "Quit nerve"),
+    ("", "─ preferences ─"),
+    ("", "~/.config/nerve/prefs.toml  (mute, dismissed banner, etc.)"),
 ];
 
 pub fn render(frame: &mut Frame, theme: &Theme) {

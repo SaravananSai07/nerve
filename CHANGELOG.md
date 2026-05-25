@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased — TUI / UX changes
+
+**Keybindings**
+
+- `g` no longer aliases Enter for "switch to session's tab". Enter is
+  now the only navigation key for that destructive cross-app action.
+- `u` dismisses the update banner (per-version; a newer release
+  surfaces it again).
+- `q` inside any overlay closes the overlay rather than quitting the
+  app. Ctrl+C still quits unconditionally.
+- The confirm-kill modal binds Enter to cancel (safer default for a
+  destructive prompt); only `y` / `Y` fires SIGTERM.
+- Preview overlay grows PgUp/PgDn, g/G, and clamps the scroll cursor
+  so holding `j` past the bottom doesn't trap the cursor.
+
+**Help overlay**
+
+- Documents every binding the code accepts (Shift+P live capture,
+  Ctrl+C, scroll keys). Grouped into navigate / actions / view /
+  preview / app / preferences sections.
+- Caps height to the available frame so small terminals don't draw
+  half-off-screen.
+
+**Rendering**
+
+- Sparkline switches from `▓░` to `█·` for consistent cell width on
+  every monospace font (Apple Terminal rendered the shaded blocks
+  unevenly).
+- Theme grows a `muted` colour for chrome text (status hints, log
+  numbers, modal hints) distinct from `idle` (state colour). User
+  themes without `muted` fall back to `idle` so existing TOML files
+  still load.
+- Status bar splits left (counts) and right (chrome hints +
+  `[muted]`). The right half is right-aligned so the muted indicator
+  survives a narrow terminal.
+- Card grid grows a 3-column mode at width ≥ 160 (previously capped
+  at 2).
+- Overlay `centered()` clamps to the parent area.
+
+**Inputs**
+
+- Rename caps by char count, not byte length — CJK names work to
+  the full 48-character limit.
+- Search overlay shows `fuzzy · case-insensitive` plus the keybinds.
+
+**Status messages**
+
+- Coloured by intent (success/info/error) — successful kills read
+  green, errors red, navigational notes neutral. Previously every
+  message rendered as `theme.error`.
+
 ## Unreleased — wire-format and API changes
 
 **`--dump` JSON schema** now emits the discovery worker's snapshot
