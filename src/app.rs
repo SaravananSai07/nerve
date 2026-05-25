@@ -11,7 +11,7 @@ use crate::paths::Paths;
 use crate::platform::{Bridge, SessionTarget};
 use crate::signals::ShutdownFlag;
 use crate::state::filtered_view::FilteredView;
-use crate::state::session::{Session, SessionId, SessionState};
+use crate::state::session::{DiscoverySnapshot, Session, SessionId, SessionState};
 use crate::state::prefs::Prefs;
 use crate::state::registry::SessionRegistry;
 use crate::tui::preview::PreviewSource;
@@ -829,7 +829,10 @@ impl App {
 
     /// Stage 2 — pure registry mutation. Returns the batch of
     /// notifications that should fire once the mutation is complete.
-    fn apply_discovery(&mut self, discovered: Vec<Session>) -> Vec<PendingNotification> {
+    fn apply_discovery(
+        &mut self,
+        discovered: Vec<DiscoverySnapshot>,
+    ) -> Vec<PendingNotification> {
         let active_ids: std::collections::HashSet<&str> =
             discovered.iter().map(|s| s.id.as_str()).collect();
 
@@ -849,22 +852,22 @@ impl App {
         let mut any_transition = false;
         let mut any_membership_change = any_marked_stale;
 
-        for session in discovered {
-            let detected_state = session.state().clone();
-            let id = session.id.clone();
-            let cwd_str = session.cwd.to_string_lossy().into_owned();
+        for mut snap in discovered {
+            let detected_state = snap.detected_state.clone();
+            let id = snap.id.clone();
+            let cwd_str = snap.cwd.to_string_lossy().into_owned();
 
             if let Some(existing) = self.registry.get_mut(id.as_str()) {
-                existing.cpu_percent = session.cpu_percent;
-                existing.tty = session.tty;
-                existing.branch = session.branch;
-                existing.pid = session.pid;
+                existing.cpu_percent = snap.cpu_percent;
+                existing.tty = snap.tty;
+                existing.branch = snap.branch;
+                existing.pid = snap.pid;
 
                 if !existing.renamed {
                     if let Some(override_name) = self.config.session_name_for(&cwd_str) {
                         existing.name = override_name.clone();
                     } else {
-                        existing.name = session.name.clone();
+                        existing.name = snap.name;
                     }
                 }
 
@@ -874,8 +877,8 @@ impl App {
                     existing.activity.record_activity();
                 }
 
-                if let SessionState::ToolRunning(ref tool) = detected_state {
-                    existing.current_tool = Some(tool.clone());
+                if let Some(tool) = snap.current_tool.take() {
+                    existing.current_tool = Some(tool);
                 }
 
                 // The discovery worker owns the JSONL cache: cumulative
@@ -883,18 +886,18 @@ impl App {
                 // `load_session` against `JsonlCache`. The snapshot's
                 // `usage` is the authoritative total for the file's
                 // current length, so just copy it.
-                existing.usage = session.usage;
+                existing.usage = snap.usage;
                 if existing.jsonl_path.is_none() {
-                    existing.jsonl_path = session.jsonl_path;
+                    existing.jsonl_path = snap.jsonl_path;
                 }
 
                 if existing.propose_state(detected_state) {
                     any_transition = true;
                     let current = existing.state().clone();
-                    if existing.last_notified_state.as_ref() != Some(&current) {
+                    if existing.try_take_notification(&current) {
                         pending.push(PendingNotification {
                             name: existing.name.clone(),
-                            state: current.clone(),
+                            state: current,
                             target: SessionTarget {
                                 cwd: existing.cwd.to_string_lossy().into_owned(),
                                 name: existing.name.clone(),
@@ -906,17 +909,16 @@ impl App {
                                 tty: existing.tty.clone(),
                             },
                         });
-                        existing.last_notified_state = Some(current);
                     }
                 }
             } else {
-                let mut new_session = session;
                 if let Some(override_name) = self.config.session_name_for(&cwd_str) {
-                    new_session.name = override_name.clone();
+                    snap.name = override_name.clone();
                 }
-                // Worker has already populated `usage` from JsonlCache;
-                // nothing else to do for first-sighting accounting.
-                self.registry.upsert(new_session);
+                // `from_snapshot` seeds the state machine with the
+                // detected state directly — no Processing-flash while
+                // the proposal counter climbs from the default.
+                self.registry.upsert(Session::from_snapshot(snap));
                 any_membership_change = true;
             }
         }

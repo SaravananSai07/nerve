@@ -4,6 +4,7 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::state::state_machine::StateMachine;
+#[cfg(test)]
 use crate::util::sanitize::strip_ansi;
 
 /// Consecutive `propose_state` calls required before the visible
@@ -133,12 +134,33 @@ impl SessionState {
     }
 }
 
+/// Plain snapshot of everything the discovery worker can know about a
+/// session at a point in time. Decoupling this from `Session` means
+/// the worker never constructs registry-owned state (StateMachine,
+/// state_changed_at, ActivityHistory, last_notified_state) — those
+/// belong to whichever `Session` the registry owns, and the worker
+/// has no business creating them just so they get overwritten.
 #[derive(Debug, Clone)]
+pub struct DiscoverySnapshot {
+    pub id: SessionId,
+    pub cwd: PathBuf,
+    pub name: String,
+    pub tty: Option<String>,
+    pub branch: Option<String>,
+    pub cpu_percent: f32,
+    pub pid: Option<u32>,
+    pub detected_state: SessionState,
+    pub current_tool: Option<String>,
+    pub usage: TokenUsage,
+    pub jsonl_path: Option<PathBuf>,
+    pub jsonl_age_secs: Option<f64>,
+}
+
 pub struct Session {
     pub id: SessionId,
     pub cwd: PathBuf,
     pub name: String,
-    pub state_changed_at: Instant,
+    state_changed_at: Instant,
     pub tty: Option<String>,
     pub branch: Option<String>,
     pub cpu_percent: f32,
@@ -149,15 +171,81 @@ pub struct Session {
     pub usage: TokenUsage,
     pub pid: Option<u32>,
     pub jsonl_age_secs: Option<f64>,
-    pub last_notified_state: Option<SessionState>,
+    last_notified_state: Option<SessionState>,
     state_machine: StateMachine<SessionState>,
 }
 
+// Manual Clone keeps the field privacy intact (deriving Clone with a
+// non-pub field is allowed, but spelling it out makes the boundary
+// obvious to a future reader.).
+impl Clone for Session {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            cwd: self.cwd.clone(),
+            name: self.name.clone(),
+            state_changed_at: self.state_changed_at,
+            tty: self.tty.clone(),
+            branch: self.branch.clone(),
+            cpu_percent: self.cpu_percent,
+            current_tool: self.current_tool.clone(),
+            activity: self.activity.clone(),
+            jsonl_path: self.jsonl_path.clone(),
+            renamed: self.renamed,
+            usage: self.usage.clone(),
+            pid: self.pid,
+            jsonl_age_secs: self.jsonl_age_secs,
+            last_notified_state: self.last_notified_state.clone(),
+            state_machine: self.state_machine.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("state", self.state())
+            .finish()
+    }
+}
+
 impl Session {
+    /// Construct a registry-side `Session` from a freshly observed
+    /// snapshot. The state machine is seeded directly with the
+    /// detected state — `propose_state` would otherwise keep the
+    /// session at `Processing` for the first CONFIRM_TICKS while it
+    /// confirmed its very first proposal.
+    pub fn from_snapshot(snap: DiscoverySnapshot) -> Self {
+        // The cwd basename is the default name unless an override has
+        // already been applied upstream; sanitisation already happened
+        // in `discovery_snapshot_from_session_file`.
+        Self {
+            id: snap.id,
+            cwd: snap.cwd,
+            name: snap.name,
+            state_changed_at: Instant::now(),
+            tty: snap.tty,
+            branch: snap.branch,
+            cpu_percent: snap.cpu_percent,
+            current_tool: snap.current_tool,
+            activity: ActivityHistory::new(),
+            jsonl_path: snap.jsonl_path,
+            renamed: false,
+            usage: snap.usage,
+            pid: snap.pid,
+            jsonl_age_secs: snap.jsonl_age_secs,
+            last_notified_state: None,
+            state_machine: StateMachine::new(snap.detected_state, CONFIRM_TICKS),
+        }
+    }
+
+    /// Test-only constructor — production code always goes through
+    /// `from_snapshot`. The default initial state is `Processing` so
+    /// that propose_state semantics match production behavior.
+    #[cfg(test)]
     pub fn new(id: SessionId, cwd: PathBuf) -> Self {
-        // cwd basename is attacker-influenceable (mkdir $'\x1b[2Jpwned'),
-        // and the name renders raw on every tick of the always-on cards
-        // view — sanitise at ingestion so it can't repaint the host.
         let name = cwd
             .file_name()
             .map(|n| strip_ansi(&n.to_string_lossy()).into_owned())
@@ -204,6 +292,18 @@ impl Session {
         if self.state_machine.current() != &new_state {
             self.state_machine.set(new_state);
             self.state_changed_at = Instant::now();
+        }
+    }
+
+    /// Notification dedup: returns true if `state` differs from the
+    /// last state we surfaced a notification for, and records it. The
+    /// only legitimate writer of `last_notified_state` lives here.
+    pub fn try_take_notification(&mut self, state: &SessionState) -> bool {
+        if self.last_notified_state.as_ref() != Some(state) {
+            self.last_notified_state = Some(state.clone());
+            true
+        } else {
+            false
         }
     }
 
@@ -429,5 +529,38 @@ mod tests {
     fn matches_query_empty() {
         let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
         assert!(session.matches_query(""));
+    }
+
+    #[test]
+    fn from_snapshot_seeds_state_machine_with_detected_state() {
+        // A session first observed as Idle should report Idle
+        // immediately — not Processing for the first 3 ticks while the
+        // confirmation counter climbs from the StateMachine default.
+        let snap = DiscoverySnapshot {
+            id: SessionId::new("id1"),
+            cwd: PathBuf::from("/tmp/x"),
+            name: "x".into(),
+            tty: None,
+            branch: None,
+            cpu_percent: 0.0,
+            pid: None,
+            detected_state: SessionState::Idle,
+            current_tool: None,
+            usage: TokenUsage::default(),
+            jsonl_path: None,
+            jsonl_age_secs: None,
+        };
+        let session = Session::from_snapshot(snap);
+        assert_eq!(session.state(), &SessionState::Idle);
+    }
+
+    #[test]
+    fn try_take_notification_dedups() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
+        assert!(s.try_take_notification(&SessionState::Idle));
+        // Same state again: no fresh notification.
+        assert!(!s.try_take_notification(&SessionState::Idle));
+        // Different state: fresh again.
+        assert!(s.try_take_notification(&SessionState::Error));
     }
 }

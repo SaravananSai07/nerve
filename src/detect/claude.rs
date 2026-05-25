@@ -11,7 +11,7 @@ use crate::detect::git::BranchCache;
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process;
 use crate::state::log_entry::LogEntry;
-use crate::state::session::{Session, SessionId, SessionState, TokenUsage};
+use crate::state::session::{DiscoverySnapshot, Session, SessionId, SessionState, TokenUsage};
 use crate::util::sanitize::strip_ansi;
 
 /// Cap on the size of a per-pid session JSON file. The format is small
@@ -45,13 +45,18 @@ fn sessions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
 }
 
+/// CLI / one-shot path. Materialises each snapshot into a Session so
+/// the JSON wire schema produced by `--dump` and `--list` stays
+/// stable. The TUI hot path consumes snapshots directly through
+/// `discover_sessions_with`.
 pub fn discover_sessions() -> Vec<Session> {
-    // CLI / one-shot path: take a fresh process snapshot every call.
-    // The TUI hot path goes through `discover_sessions_with`.
     let table = process::ProcessTable::refreshed();
     let mut cache = JsonlCache::new();
     let mut branch_cache = BranchCache::new();
     discover_sessions_with(&table, &mut cache, &mut branch_cache)
+        .into_iter()
+        .map(Session::from_snapshot)
+        .collect()
 }
 
 /// Discover sessions against the cached process table, JSONL cache,
@@ -62,7 +67,7 @@ pub fn discover_sessions_with(
     table: &process::ProcessTable,
     cache: &mut JsonlCache,
     branch_cache: &mut BranchCache,
-) -> Vec<Session> {
+) -> Vec<DiscoverySnapshot> {
     let dir = match sessions_dir() {
         Some(d) if d.exists() => d,
         _ => return Vec::new(),
@@ -136,7 +141,7 @@ fn load_session(
     cache: &mut JsonlCache,
     branch_cache: &mut BranchCache,
     project_dirs: &[PathBuf],
-) -> Option<Session> {
+) -> Option<DiscoverySnapshot> {
     let sf = read_session_file(path)?;
 
     // O(1) lookups via the cached pid index, rather than repeated
@@ -176,43 +181,52 @@ fn load_session(
         .to_string();
 
     let cwd = PathBuf::from(&sf.cwd);
-    let session_id = SessionId::new(resolved_id.clone());
-    let mut session = Session::new(session_id, cwd.clone());
-    session.pid = Some(sf.pid);
-
-    // Already resolved above — reuse instead of re-scanning.
-    session.tty = Some(proc.tty.clone());
-    session.cpu_percent = proc.cpu;
-    session.branch = branch_cache.read_or_refresh(&cwd);
+    let name = cwd
+        .file_name()
+        .map(|n| strip_ansi(&n.to_string_lossy()).into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    let branch = branch_cache.read_or_refresh(&cwd);
 
     let jsonl_path = find_jsonl(&resolved_id, &cwd, project_dirs);
-    let detected = if let Some(ref jp) = jsonl_path {
-        session.jsonl_path = Some(jp.clone());
-        session.jsonl_age_secs = Some(file_age_secs(jp));
+    let (detected, usage, jsonl_age_secs) = if let Some(ref jp) = jsonl_path {
         let (tail_state, usage) = cache.read_or_refresh(
             jp,
             |p| read_tail_state(p).unwrap_or(SessionState::Idle),
             parse_token_usage,
         );
-        session.usage = usage;
-        refine_with_runtime(tail_state, jp, sf.pid, table)
+        let refined = refine_with_runtime(tail_state, jp, sf.pid, table);
+        (refined, usage, Some(file_age_secs(jp)))
     } else {
         // No transcript to read. Trust Claude's own status field if it set one;
         // otherwise default to Idle. CPU is deliberately not used — Claude's
         // TUI burns CPU on keystroke rendering, which would otherwise flip an
         // idle session to Processing whenever the user is typing.
-        match sf.status.as_deref() {
+        let detected = match sf.status.as_deref() {
             Some("busy") => SessionState::Processing,
             _ => SessionState::Idle,
-        }
+        };
+        (detected, TokenUsage::default(), None)
     };
 
-    if let SessionState::ToolRunning(ref tool) = detected {
-        session.current_tool = Some(tool.clone());
-    }
-    session.set_state(detected);
+    let current_tool = match &detected {
+        SessionState::ToolRunning(tool) => Some(tool.clone()),
+        _ => None,
+    };
 
-    Some(session)
+    Some(DiscoverySnapshot {
+        id: SessionId::new(resolved_id),
+        cwd,
+        name,
+        tty: Some(proc.tty.clone()),
+        branch,
+        cpu_percent: proc.cpu,
+        pid: Some(sf.pid),
+        detected_state: detected,
+        current_tool,
+        usage,
+        jsonl_path,
+        jsonl_age_secs,
+    })
 }
 
 fn read_session_file(path: &Path) -> Option<SessionFile> {
@@ -782,50 +796,50 @@ fn is_claude_process(pid: u32) -> bool {
     })
 }
 
-fn should_replace(existing: &Session, candidate: &Session) -> bool {
-    candidate.state().sort_priority() < existing.state().sort_priority()
-        || (candidate.state().sort_priority() == existing.state().sort_priority()
+fn should_replace(existing: &DiscoverySnapshot, candidate: &DiscoverySnapshot) -> bool {
+    candidate.detected_state.sort_priority() < existing.detected_state.sort_priority()
+        || (candidate.detected_state.sort_priority() == existing.detected_state.sort_priority()
             && candidate.pid > existing.pid)
 }
 
-fn deduplicate_sessions(sessions: Vec<Session>) -> Vec<Session> {
+fn deduplicate_sessions(sessions: Vec<DiscoverySnapshot>) -> Vec<DiscoverySnapshot> {
     // Phase 1: Deduplicate by PID — multiple session files for the same
     // Claude process collapse into the one with the best state.
-    let mut by_pid: HashMap<u32, Session> = HashMap::new();
-    let mut no_pid: Vec<Session> = Vec::new();
-    for session in sessions {
-        if let Some(pid) = session.pid {
+    let mut by_pid: HashMap<u32, DiscoverySnapshot> = HashMap::new();
+    let mut no_pid: Vec<DiscoverySnapshot> = Vec::new();
+    for snap in sessions {
+        if let Some(pid) = snap.pid {
             by_pid
                 .entry(pid)
                 .and_modify(|existing| {
-                    if should_replace(existing, &session) {
-                        *existing = session.clone();
+                    if should_replace(existing, &snap) {
+                        *existing = snap.clone();
                     }
                 })
-                .or_insert(session);
+                .or_insert(snap);
         } else {
-            no_pid.push(session);
+            no_pid.push(snap);
         }
     }
 
-    let pid_deduped: Vec<Session> = by_pid.into_values().chain(no_pid).collect();
+    let pid_deduped: Vec<DiscoverySnapshot> = by_pid.into_values().chain(no_pid).collect();
 
     // Phase 2: Deduplicate by TTY — multiple processes on the same terminal
     // collapse into the most active one.
-    let mut by_tty: HashMap<String, Session> = HashMap::new();
-    for session in pid_deduped {
-        let tty = match &session.tty {
+    let mut by_tty: HashMap<String, DiscoverySnapshot> = HashMap::new();
+    for snap in pid_deduped {
+        let tty = match &snap.tty {
             Some(t) if t != "??" && t != "?" => t.clone(),
-            _ => format!("__notty_{}", session.id),
+            _ => format!("__notty_{}", snap.id),
         };
         by_tty
             .entry(tty)
             .and_modify(|existing| {
-                if should_replace(existing, &session) {
-                    *existing = session.clone();
+                if should_replace(existing, &snap) {
+                    *existing = snap.clone();
                 }
             })
-            .or_insert(session);
+            .or_insert(snap);
     }
 
     by_tty.into_values().collect()

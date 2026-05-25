@@ -13,14 +13,14 @@ use crate::detect::git::BranchCache;
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process::ProcessTable;
 use crate::signals::ShutdownFlag;
-use crate::state::session::Session;
+use crate::state::session::DiscoverySnapshot;
 use crate::{log_err, log_warn};
 
 /// Handle to a background discovery worker. Drop the handle to ask the
 /// worker to exit (the dropped receiver makes the worker's next `send`
 /// fail, which it interprets as "consumer is gone, exit").
 pub struct DiscoveryWorker {
-    pub rx: Receiver<Vec<Session>>,
+    pub rx: Receiver<Vec<DiscoverySnapshot>>,
     /// Sender for the wake-channel. Kept alive so the worker's
     /// `recv_timeout(refresh_interval)` keeps timing out instead of
     /// hitting `Disconnected` and exiting. The FS watcher clones this
@@ -196,7 +196,7 @@ impl DiscoveryWorker {
     /// intermediate ones would only ever be displayed for one frame
     /// each, so coalescing to "latest wins" is correct). Returns
     /// `None` if the channel is empty.
-    pub fn latest_snapshot(&self) -> Option<Vec<Session>> {
+    pub fn latest_snapshot(&self) -> Option<Vec<DiscoverySnapshot>> {
         let mut latest = None;
         while let Ok(snap) = self.rx.try_recv() {
             latest = Some(snap);
@@ -209,7 +209,7 @@ impl DiscoveryWorker {
     /// doesn't paint an empty screen for a second while waiting for
     /// the worker's first cycle. All subsequent reads use
     /// `latest_snapshot` (non-blocking).
-    pub fn next_snapshot_blocking(&self, timeout: Duration) -> Option<Vec<Session>> {
+    pub fn next_snapshot_blocking(&self, timeout: Duration) -> Option<Vec<DiscoverySnapshot>> {
         self.rx.recv_timeout(timeout).ok()
     }
 
