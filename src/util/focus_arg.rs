@@ -1,8 +1,16 @@
-/// Maximum permitted length of a `--focus` argument. Bridge ids are at most
-/// 128 chars (UUID + bridge tag + delimiter). Capping here prevents an
-/// attacker-launched `nerve --focus <huge>` from allocating arbitrary RAM
-/// before the parser ever gets to look at the string.
+/// Bridge ids are at most 128 chars in practice (UUID + tag +
+/// delimiter); capping a little above that prevents an attacker
+/// launching `nerve --focus <huge>` from forcing a multi-megabyte
+/// allocation before the parser even looks at the string.
 pub const FOCUS_ARG_MAX_LEN: usize = 160;
+
+/// True if `c` belongs in a bridge identifier: ASCII alphanumeric
+/// plus the small set of delimiters the bridge protocols actually
+/// use (`: _ - % . $`). Used both by `--focus` validation and by
+/// the notification path that hands ids to `terminal-notifier`.
+pub fn is_safe_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-' | '%' | '.' | '$')
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FocusValidation {
@@ -20,10 +28,7 @@ pub fn validate(arg: String) -> FocusValidation {
         return FocusValidation::TooLong(arg.len());
     }
     for ch in arg.chars() {
-        let b = ch as u32;
-        let allowed = ch.is_ascii_alphanumeric()
-            || matches!(b, 0x3a | 0x5f | 0x2d | 0x25 | 0x2e | 0x24); // : _ - % . $
-        if !allowed {
+        if !is_safe_id_char(ch) {
             return FocusValidation::ForbiddenChar(ch);
         }
     }

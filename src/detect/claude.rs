@@ -327,13 +327,45 @@ fn read_tail_state(path: &Path) -> Option<SessionState> {
         .find_map(parse_jsonl_state)
 }
 
-fn parse_jsonl_state(line: &str) -> Option<SessionState> {
-    let val: serde_json::Value = serde_json::from_str(line).ok()?;
+/// Lightweight schema for the subset of JSONL fields we read when
+/// inferring a session's state from its tail. Deriving over a thin
+/// borrowed struct is ~10× faster than building a full
+/// `serde_json::Value` tree per line and avoids the per-line
+/// `HashMap<String, Value>` allocation.
+#[derive(Deserialize)]
+struct StateRow<'a> {
+    #[serde(default, borrow, rename = "type")]
+    entry_type: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    subtype: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    message: Option<StateMessage<'a>>,
+}
 
-    let entry_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+#[derive(Deserialize)]
+struct StateMessage<'a> {
+    #[serde(default, borrow)]
+    role: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow, rename = "stop_reason")]
+    stop_reason: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    content: Option<Vec<StateContentItem<'a>>>,
+}
+
+#[derive(Deserialize)]
+struct StateContentItem<'a> {
+    #[serde(default, borrow, rename = "type")]
+    item_type: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    name: Option<std::borrow::Cow<'a, str>>,
+}
+
+fn parse_jsonl_state(line: &str) -> Option<SessionState> {
+    let row: StateRow = serde_json::from_str(line).ok()?;
+    let entry_type = row.entry_type.as_deref().unwrap_or("");
 
     if entry_type == "result" {
-        if val.get("subtype").and_then(|s| s.as_str()) == Some("error") {
+        if row.subtype.as_deref() == Some("error") {
             return Some(SessionState::Error);
         }
         return Some(SessionState::Idle);
@@ -347,17 +379,14 @@ fn parse_jsonl_state(line: &str) -> Option<SessionState> {
         return Some(SessionState::Processing);
     }
 
-    let role = val
-        .get("message")
-        .and_then(|m| m.get("role"))
-        .and_then(|r| r.as_str())
-        .unwrap_or("");
+    let msg = row.message.as_ref()?;
+    let role = msg.role.as_deref().unwrap_or("");
 
     if role == "assistant" {
-        if let Some(content) = val.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+        if let Some(content) = msg.content.as_ref() {
             for item in content {
-                if item.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                if item.item_type.as_deref() == Some("tool_use") {
+                    let name = item.name.as_deref().unwrap_or("unknown");
                     if name == "AskUserQuestion" || name == "ExitPlanMode" {
                         return Some(SessionState::WaitingForInput);
                     }
@@ -365,22 +394,16 @@ fn parse_jsonl_state(line: &str) -> Option<SessionState> {
                 }
             }
         }
-
-        let stop_reason = val
-            .get("message")
-            .and_then(|m| m.get("stop_reason"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
-        return Some(match stop_reason {
+        return Some(match msg.stop_reason.as_deref().unwrap_or("") {
             "end_turn" | "max_tokens" | "stop_sequence" => SessionState::Idle,
             _ => SessionState::Processing,
         });
     }
 
     if role == "user" {
-        if let Some(content) = val.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+        if let Some(content) = msg.content.as_ref() {
             for item in content {
-                if item.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                if item.item_type.as_deref() == Some("tool_result") {
                     return Some(SessionState::Processing);
                 }
             }
@@ -391,13 +414,59 @@ fn parse_jsonl_state(line: &str) -> Option<SessionState> {
     None
 }
 
-fn cost_per_million(model: &str) -> (f64, f64, f64, f64) {
-    if model.contains("opus") {
-        (15.0, 75.0, 1.50, 18.75)
-    } else if model.contains("haiku") {
-        (0.80, 4.0, 0.08, 1.0)
-    } else {
-        (3.0, 15.0, 0.30, 3.75)
+/// Mirror of the `assistant`-row schema used by `parse_token_usage`.
+/// Like `StateRow` above, borrowed-Cow fields keep the per-line
+/// parse cost dominated by JSON tokenisation rather than allocation.
+#[derive(Deserialize)]
+struct UsageRow<'a> {
+    #[serde(default, borrow, rename = "type")]
+    entry_type: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    message: Option<UsageMessage<'a>>,
+}
+
+#[derive(Deserialize)]
+struct UsageMessage<'a> {
+    #[serde(default, borrow)]
+    model: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default)]
+    usage: Option<UsageBlock>,
+}
+
+#[derive(Deserialize, Default)]
+struct UsageBlock {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum ModelClass {
+    Opus,
+    Haiku,
+    Other,
+}
+
+impl ModelClass {
+    fn classify(model: &str) -> Self {
+        if model.contains("opus") {
+            Self::Opus
+        } else if model.contains("haiku") {
+            Self::Haiku
+        } else {
+            Self::Other
+        }
+    }
+
+    /// (input, output, cache_read, cache_create) — dollars per
+    /// million tokens.
+    fn rate(self) -> (f64, f64, f64, f64) {
+        match self {
+            Self::Opus => (15.0, 75.0, 1.50, 18.75),
+            Self::Haiku => (0.80, 4.0, 0.08, 1.0),
+            Self::Other => (3.0, 15.0, 0.30, 3.75),
+        }
     }
 }
 
@@ -450,6 +519,12 @@ fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
         return (usage, from_offset);
     }
 
+    // Memoize the per-line model classification: most JSONLs use
+    // one model end-to-end, so a single substring scan up front
+    // covers every subsequent line.
+    let mut last_class: Option<ModelClass> = None;
+    let mut last_rate = ModelClass::Other.rate();
+
     let mut line = String::new();
     loop {
         line.clear();
@@ -462,29 +537,29 @@ fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
         if trimmed.is_empty() {
             continue;
         }
-        let val: serde_json::Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
+        let row: UsageRow = match serde_json::from_str(trimmed) {
+            Ok(r) => r,
             Err(_) => continue,
         };
 
-        let entry_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if entry_type != "assistant" {
+        if row.entry_type.as_deref() != Some("assistant") {
             continue;
         }
 
-        let msg = val.get("message");
-        if let Some(u) = msg.and_then(|m| m.get("usage")) {
-            let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_read = u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_creation = u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(msg) = row.message.as_ref() else { continue };
+        if let Some(u) = msg.usage.as_ref() {
+            let input = u.input_tokens.unwrap_or(0);
+            let output = u.output_tokens.unwrap_or(0);
+            let cache_read = u.cache_read_input_tokens.unwrap_or(0);
+            let cache_creation = u.cache_creation_input_tokens.unwrap_or(0);
 
-            let model = msg
-                .and_then(|m| m.get("model"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("sonnet");
-
-            let (rate_in, rate_out, rate_cache_read, rate_cache_create) = cost_per_million(model);
+            let model = msg.model.as_deref().unwrap_or("sonnet");
+            let class = ModelClass::classify(model);
+            if last_class != Some(class) {
+                last_rate = class.rate();
+                last_class = Some(class);
+            }
+            let (rate_in, rate_out, rate_cache_read, rate_cache_create) = last_rate;
 
             usage.input_tokens += input;
             usage.output_tokens += output;

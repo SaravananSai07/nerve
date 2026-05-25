@@ -146,15 +146,13 @@ fn focus_command(bridge: &Bridge, target: &SessionTarget) -> Option<String> {
     ))
 }
 
-/// Bridge ids carry no user content — they're opaque handles assigned by
-/// Ghostty / tmux. Anything outside the allowed charset means upstream is
-/// misbehaving, and we refuse rather than risk a `-execute` injection.
+/// Bridge ids carry no user content — they're opaque handles
+/// assigned by Ghostty / tmux. Anything outside the allowed
+/// charset means upstream is misbehaving, and we refuse rather
+/// than risk a `-execute` injection.
 #[cfg(target_os = "macos")]
 fn is_safe_bridge_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 128
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-' | b'%' | b'.' | b'$'))
+    !s.is_empty() && s.len() <= 128 && s.chars().all(crate::util::focus_arg::is_safe_id_char)
 }
 
 #[cfg(target_os = "macos")]
