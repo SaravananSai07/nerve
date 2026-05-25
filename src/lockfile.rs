@@ -6,6 +6,8 @@ use nix::fcntl::{Flock, FlockArg};
 use crate::log_warn;
 use crate::paths::Paths;
 
+const LOCK_PID_MAX_BYTES: u64 = 64;
+
 /// Owns the kernel `flock(2)` lease on `~/.config/nerve/nerve.lock`. Dropping
 /// the value releases the lease (kernel reaps the fd on close → flock auto-
 /// releases). The pid of the holder is written into the file for diagnostics.
@@ -47,7 +49,7 @@ impl LockFile {
             Ok(l) => l,
             Err((mut file, _errno)) => {
                 let mut buf = String::new();
-                let _ = file.read_to_string(&mut buf);
+                let _ = (&mut file).take(LOCK_PID_MAX_BYTES).read_to_string(&mut buf);
                 let pid = buf.trim().parse::<u32>().ok();
                 return Err(LockError::AlreadyHeld { pid });
             }

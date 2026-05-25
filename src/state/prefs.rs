@@ -4,6 +4,7 @@ use crate::paths::Paths;
 use crate::{log_err, log_info, log_warn};
 
 const CURRENT_VERSION: u32 = 1;
+const PREFS_MAX_BYTES: u64 = 64 * 1024;
 
 fn default_version() -> u32 {
     CURRENT_VERSION
@@ -38,7 +39,7 @@ impl Default for Prefs {
 impl Prefs {
     pub(crate) fn load(paths: &Paths) -> Self {
         let path = paths.prefs_file();
-        let contents = match std::fs::read_to_string(&path) {
+        let contents = match crate::util::fs::read_capped(&path, PREFS_MAX_BYTES) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(e) => {

@@ -6,6 +6,8 @@ use serde::Deserialize;
 use crate::log_warn;
 use crate::state::session::SessionState;
 
+const THEME_MAX_BYTES: u64 = 64 * 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct Theme {
     pub(crate) name: String,
@@ -78,7 +80,7 @@ impl Theme {
     }
 
     fn from_toml(path: &Path) -> Result<Theme, String> {
-        let contents = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let contents = crate::util::fs::read_capped(path, THEME_MAX_BYTES).map_err(|e| e.to_string())?;
         let raw: RawTheme = toml::from_str(&contents).map_err(|e| e.to_string())?;
         let fallback_name = path
             .file_stem()

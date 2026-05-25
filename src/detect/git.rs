@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+const GIT_REF_MAX_BYTES: u64 = 4 * 1024;
+
 /// Per-cwd cache of branch lookups. First call for a cwd does the
 /// upward `.git` walk and reads HEAD; subsequent calls do one
 /// `stat(2)` on the resolved HEAD path and reuse the cached branch
@@ -50,7 +52,7 @@ impl BranchCache {
                     // HEAD was rewritten (checkout, branch rename) —
                     // re-read it, but skip the upward walk.
                     let hp = head_path.clone();
-                    let branch = fs::read_to_string(&hp)
+                    let branch = crate::util::fs::read_capped(&hp, GIT_REF_MAX_BYTES)
                         .ok()
                         .and_then(|raw| parse_head_contents(raw.trim()));
                     self.entries.insert(
@@ -82,7 +84,7 @@ impl BranchCache {
                 return None;
             }
         };
-        let raw = fs::read_to_string(&head_path).ok()?;
+        let raw = crate::util::fs::read_capped(&head_path, GIT_REF_MAX_BYTES).ok()?;
         let mtime = fs::metadata(&head_path)
             .and_then(|m| m.modified())
             .ok()?;
@@ -125,7 +127,7 @@ fn locate_head_file(start: &Path) -> Option<PathBuf> {
 /// A `.git` file (used by submodules and worktrees) contains
 /// `gitdir: <relative-or-absolute-path>` on its first non-empty line.
 fn follow_gitfile(gitfile: &Path) -> Option<PathBuf> {
-    let contents = fs::read_to_string(gitfile).ok()?;
+    let contents = crate::util::fs::read_capped(gitfile, GIT_REF_MAX_BYTES).ok()?;
     let rest = contents.lines().find_map(|l| l.strip_prefix("gitdir:"))?;
     let trimmed = rest.trim();
     let gitdir = Path::new(trimmed);

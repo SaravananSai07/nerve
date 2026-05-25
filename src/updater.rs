@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use crate::paths::Paths;
 
 const CRATES_API: &str = "https://crates.io/api/v1/crates/nerve-tui";
 const CHECK_INTERVAL_SECS: u64 = 24 * 3600;
+const UPDATE_CACHE_MAX_BYTES: u64 = 16 * 1024;
 
 #[derive(Default, Deserialize, Serialize)]
 struct Cache {
@@ -15,14 +16,14 @@ struct Cache {
     last_known_version: String,
 }
 
-fn read_cache(path: &PathBuf) -> Cache {
-    std::fs::read_to_string(path)
+fn read_cache(path: &Path) -> Cache {
+    crate::util::fs::read_capped(path, UPDATE_CACHE_MAX_BYTES)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-fn write_cache(path: &PathBuf, cache: &Cache) -> Option<()> {
+fn write_cache(path: &Path, cache: &Cache) -> Option<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }

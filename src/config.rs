@@ -6,6 +6,8 @@ use crate::log_warn;
 use crate::paths::Paths;
 use crate::util::sanitize::strip_ansi;
 
+const CONFIG_MAX_BYTES: u64 = 256 * 1024;
+
 #[derive(Deserialize, Default)]
 pub(crate) struct Config {
     #[serde(default)]
@@ -91,7 +93,7 @@ impl Default for AppearanceConfig {
 impl Config {
     pub(crate) fn load(paths: &Paths) -> Self {
         let path = paths.config_file();
-        let contents = match std::fs::read_to_string(&path) {
+        let contents = match crate::util::fs::read_capped(&path, CONFIG_MAX_BYTES) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(e) => {
