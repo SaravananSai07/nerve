@@ -4,7 +4,7 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::state::state_machine::StateMachine;
-use crate::util::sanitize::strip_ansi;
+use crate::util::sanitize::Sanitised;
 
 /// Consecutive `propose_state` calls required before the visible
 /// state actually changes. Defends against flicker in upstream
@@ -165,16 +165,16 @@ pub(crate) struct DiscoverySnapshot {
 pub(crate) struct Session {
     pub(crate) id: SessionId,
     pub(crate) cwd: PathBuf,
-    name: String,
+    name: Sanitised,
     state_changed_at: Instant,
-    pub(crate) tty: Option<String>,
-    pub(crate) branch: Option<String>,
+    pub(crate) tty: Option<Sanitised>,
+    pub(crate) branch: Option<Sanitised>,
     pub(crate) cpu_percent: f32,
     /// Last tool the session was running. Sticks past the
     /// `ToolRunning` state into `Idle` so users can see what the
     /// session was last doing when it goes quiet — only `merge_snapshot`
     /// updates it (and only when the snapshot has a tool to give).
-    pub(crate) current_tool: Option<String>,
+    pub(crate) current_tool: Option<Sanitised>,
     activity: ActivityHistory,
     pub(crate) jsonl_path: Option<PathBuf>,
     /// User-supplied custom name via the rename overlay. Privately
@@ -217,12 +217,12 @@ impl Session {
         Self {
             id: snap.id,
             cwd: snap.cwd,
-            name: snap.name,
+            name: Sanitised::new(snap.name),
             state_changed_at: Instant::now(),
-            tty: snap.tty,
-            branch: snap.branch,
+            tty: snap.tty.map(Sanitised::new),
+            branch: snap.branch.map(Sanitised::new),
             cpu_percent: snap.cpu_percent,
-            current_tool: snap.current_tool,
+            current_tool: snap.current_tool.map(Sanitised::new),
             activity: ActivityHistory::new(),
             jsonl_path: snap.jsonl_path,
             renamed: false,
@@ -239,10 +239,11 @@ impl Session {
     /// that propose_state semantics match production behavior.
     #[cfg(test)]
     pub(crate) fn new(id: SessionId, cwd: PathBuf) -> Self {
-        let name = cwd
-            .file_name()
-            .map(|n| strip_ansi(&n.to_string_lossy()).into_owned())
-            .unwrap_or_else(|| "unknown".into());
+        let name = Sanitised::new(
+            cwd.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown".into()),
+        );
         Self {
             id,
             cwd,
@@ -311,20 +312,20 @@ impl Session {
     /// renamed-by-user case wins over both.
     pub(crate) fn merge_snapshot(&mut self, snap: DiscoverySnapshot, name_override: Option<&str>) {
         self.cpu_percent = snap.cpu_percent;
-        self.tty = snap.tty;
-        self.branch = snap.branch;
+        self.tty = snap.tty.map(Sanitised::new);
+        self.branch = snap.branch.map(Sanitised::new);
         self.pid = snap.pid;
         self.usage = snap.usage;
         if !self.renamed {
             self.name = name_override
-                .map(str::to_string)
-                .unwrap_or(snap.name);
+                .map(Sanitised::new)
+                .unwrap_or_else(|| Sanitised::new(snap.name));
         }
         if let Some(tool) = snap.current_tool {
             // current_tool sticks past the ToolRunning state so users
             // can see what the session was last doing when it goes
             // idle. Only updated when the snapshot has one to give.
-            self.current_tool = Some(tool);
+            self.current_tool = Some(Sanitised::new(tool));
         }
         if self.jsonl_path.is_none() {
             self.jsonl_path = snap.jsonl_path;
@@ -355,22 +356,16 @@ impl Session {
         self.activity.sparkline()
     }
 
-    pub(crate) fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &Sanitised {
         &self.name
     }
 
     /// User-driven rename. Sets the custom name and flags the session
     /// so future discovery snapshots / disambiguation don't overwrite
-    /// it. Sanitises at the boundary — the rename overlay is the only
-    /// name-ingestion point that doesn't go through the snapshot
-    /// pipeline, so the same `strip_ansi` + control-char filter runs
-    /// here for parity.
+    /// it. `Sanitised::new` runs the same strip_ansi + control-char
+    /// filter, so this ingestion point is covered by the type boundary.
     pub(crate) fn rename_to(&mut self, raw: String) {
-        self.name = strip_ansi(&raw)
-            .into_owned()
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect();
+        self.name = Sanitised::new(raw);
         self.renamed = true;
     }
 
@@ -381,7 +376,7 @@ impl Session {
         if self.renamed {
             return;
         }
-        self.name = name;
+        self.name = Sanitised::new(name);
     }
 
     pub(crate) fn is_renamed(&self) -> bool {
@@ -437,7 +432,7 @@ impl Session {
         if query_lower.is_empty() {
             return true;
         }
-        fuzzy_match(query_lower, &self.name)
+        fuzzy_match(query_lower, self.name.as_str())
             || self
                 .cwd
                 .file_name()
@@ -566,7 +561,7 @@ mod tests {
     #[test]
     fn matches_query_by_directory_name() {
         let mut session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
-        session.name = "Custom Name".into();
+        session.name = Sanitised::new("Custom Name");
         assert!(session.matches_query("project"));
     }
 

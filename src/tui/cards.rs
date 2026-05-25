@@ -238,8 +238,8 @@ fn render_card(
         }
     }
 
-    let tty_str = session.tty.as_deref().unwrap_or("?");
-    let branch_str = session.branch.as_deref().unwrap_or("—");
+    let tty_str = session.tty.as_ref().map(|s| s.as_str()).unwrap_or("?");
+    let branch_str = session.branch.as_ref().map(|s| s.as_str()).unwrap_or("—");
 
     let mut lines = vec![
         Line::from(vec![
@@ -252,7 +252,7 @@ fn render_card(
     if let Some(ref tool) = session.current_tool {
         lines.push(Line::from(vec![
             Span::styled("  ◉ ", Style::default().fg(theme.processing)),
-            Span::styled(tool.to_string(), Style::default().fg(text_fg)),
+            Span::styled(tool.as_str(), Style::default().fg(text_fg)),
         ]));
     }
 

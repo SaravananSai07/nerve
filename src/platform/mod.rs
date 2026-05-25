@@ -24,7 +24,7 @@ impl From<&Session> for SessionTarget {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            tty: s.tty.clone(),
+            tty: s.tty.as_ref().map(|t| t.as_str().to_string()),
         }
     }
 }

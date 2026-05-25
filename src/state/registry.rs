@@ -211,7 +211,7 @@ impl SessionRegistry {
             if session.is_renamed() {
                 continue;
             }
-            let base = strip_disambiguation_suffix(session.name());
+            let base = strip_disambiguation_suffix(session.name().as_str());
             base_to_ids.entry(base).or_default().push(id.clone());
         }
 
@@ -219,7 +219,7 @@ impl SessionRegistry {
         for (base, mut ids) in base_to_ids {
             if ids.len() <= 1 && !reserved.contains(&base) {
                 if let Some(session) = self.sessions.get_mut(&ids[0]) {
-                    if session.name() != base {
+                    if session.name().as_str() != base {
                         session.set_auto_name(base);
                         any_renamed = true;
                     }
@@ -237,7 +237,7 @@ impl SessionRegistry {
                     }
                 };
                 if let Some(session) = self.sessions.get_mut(id) {
-                    if session.name() != candidate {
+                    if session.name().as_str() != candidate {
                         session.set_auto_name(candidate);
                         any_renamed = true;
                     }

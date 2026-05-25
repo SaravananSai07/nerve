@@ -12,7 +12,7 @@ use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process;
 use crate::state::log_entry::LogEntry;
 use crate::state::session::{DiscoverySnapshot, SessionId, SessionState, TokenUsage};
-use crate::util::sanitize::strip_ansi;
+use crate::util::sanitize::{Sanitised, strip_ansi};
 
 /// Cap on the size of a per-pid session JSON file. The format is small
 /// (under 1 KiB in practice). Anything bigger is almost certainly garbage
@@ -714,7 +714,7 @@ pub(crate) fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry
                     "tool_use" => {
                         let raw_name =
                             item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                        let name = strip_ansi(raw_name).into_owned();
+                        let name = Sanitised::new(raw_name);
                         let raw_detail: String = item
                             .get("input")
                             .and_then(|i| {
@@ -736,22 +736,21 @@ pub(crate) fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry
                             .chars()
                             .take(200)
                             .collect();
-                        let detail = strip_ansi(&raw_detail).into_owned();
+                        let detail = Sanitised::new(raw_detail);
                         entries.push(LogEntry::ToolUse { name, detail });
                     }
                     "tool_result" => {
                         let is_err = item.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-                        let status = if is_err { "error".to_string() } else { "ok".to_string() };
-                        let snippet = extract_tool_result_snippet(item);
+                        let status = Sanitised::new(if is_err { "error" } else { "ok" });
+                        let snippet = Sanitised::new(extract_tool_result_snippet(item));
                         entries.push(LogEntry::ToolResult { status, snippet });
                     }
                     "text" => {
                         let raw = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         if !raw.is_empty() {
-                            // Sanitize at the boundary so the TUI never sees
-                            // raw ESC / OSC bytes coming from an untrusted
-                            // JSONL transcript.
-                            let text = strip_ansi(raw).into_owned();
+                            // `Sanitised::new` strips ANSI / OSC / C0+C1 bytes
+                            // so the TUI never sees untrusted terminal sequences.
+                            let text = Sanitised::new(raw);
                             if role == "user" {
                                 entries.push(LogEntry::UserText(text));
                             } else if role == "assistant" {
