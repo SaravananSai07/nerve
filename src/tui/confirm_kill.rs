@@ -50,11 +50,22 @@ pub fn render(frame: &mut Frame, theme: &Theme, name: &str) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
+fn truncate_chars(s: &str, max_graphemes: usize) -> String {
+    // Truncate by grapheme cluster, not codepoint, so a decomposed
+    // accent (e + U+0301), a regional-indicator flag, or a ZWJ emoji
+    // sequence isn't sliced mid-cluster — that would leave orphan
+    // combining marks in the kill prompt at exactly the moment the
+    // user is meant to read it carefully.
+    use unicode_segmentation::UnicodeSegmentation;
+    let clusters: Vec<&str> = s.graphemes(true).collect();
+    if clusters.len() <= max_graphemes {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    let mut out: String = clusters
+        .iter()
+        .take(max_graphemes.saturating_sub(1))
+        .copied()
+        .collect();
     out.push('…');
     out
 }

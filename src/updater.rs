@@ -58,10 +58,22 @@ fn fetch_latest_version() -> Option<String> {
         return None;
     }
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    json.get("crate")?
-        .get("max_version")?
-        .as_str()
-        .map(String::from)
+    let raw = json.get("crate")?.get("max_version")?.as_str()?;
+    // Sanitise at the network boundary. A hostile crates.io response
+    // (or TLS MITM) could plant ANSI / control bytes in a string
+    // that later renders in the cards view via the update banner
+    // and persists into prefs.toml via the `u` dismissal. Every
+    // other ingestion point in the codebase strips at boundary;
+    // this one shouldn't be the exception.
+    let cleaned: String = crate::util::sanitize::strip_ansi(raw)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// Spawn a background thread that hits crates.io if the cached check is older
@@ -104,7 +116,11 @@ pub fn pending_update(paths: &Paths, current: &str) -> Option<String> {
     }
 }
 
-fn is_newer(latest: &str, current: &str) -> bool {
+/// True if `latest` parses as a strictly greater version than `current`.
+/// Used by the banner-suppression path to ignore yanked-release
+/// downgrades — if `pending_update` reverts to a version older than
+/// the one a user explicitly dismissed, we don't bother them again.
+pub fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
     parse(latest) > parse(current)
 }

@@ -150,12 +150,15 @@ impl App {
         let prefs = Prefs::load(&paths);
 
         crate::updater::maybe_check_in_background(&paths, config.updates.check_on_launch);
-        // Suppress the update banner when the user has previously
-        // dismissed exactly this version — pressing `u` writes the
-        // banner version into prefs so the next launch stays quiet
-        // unless the upstream version moves again.
+        // Banner suppression is semver-aware: a yanked release that
+        // reverts `pending_update` to a version older than the one
+        // the user dismissed shouldn't reopen the banner. Only
+        // genuinely newer-than-dismissed pendings come through.
         let update_banner = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"))
-            .filter(|v| prefs.dismissed_update_version.as_deref() != Some(v.as_str()));
+            .filter(|v| match prefs.dismissed_update_version.as_deref() {
+                Some(dismissed) => crate::updater::is_newer(v, dismissed),
+                None => true,
+            });
         let status_message = config
             .load_error
             .clone()
@@ -495,10 +498,22 @@ impl App {
         match code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('j') | KeyCode::Down => {
+                // In 3-col mode the last row may be partial. A user
+                // pressing `j` from the rightmost cell of the last
+                // full row would otherwise pin the cursor; snap to
+                // the last selectable session instead.
                 let count = self.num_filtered();
-                let next = self.selected + self.cols;
-                if count > 0 && next < count {
-                    self.selected = next;
+                if count == 0 {
+                    // No-op when there's nothing to select.
+                } else {
+                    let next = self.selected + self.cols;
+                    let last_row = self.selected / self.cols;
+                    let next_row = next / self.cols;
+                    if next < count {
+                        self.selected = next;
+                    } else if next_row > last_row {
+                        self.selected = count - 1;
+                    }
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {

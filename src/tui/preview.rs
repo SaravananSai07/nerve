@@ -92,6 +92,10 @@ fn render_terminal_buffer(
     scroll: &mut usize,
 ) {
     if terminal_lines.is_empty() {
+        // Reset scroll so an empty buffer doesn't leave the cursor
+        // pinned at usize::MAX (the initial value) when the user
+        // later opens a populated buffer in the same overlay.
+        *scroll = 0;
         let msg = Paragraph::new(Line::styled(
             "  No terminal content captured.",
             Style::default().fg(theme.muted),
@@ -128,6 +132,7 @@ fn render_log_entries(
     scroll: &mut usize,
 ) {
     if entries.is_empty() {
+        *scroll = 0;
         let msg = Paragraph::new(Line::styled(
             "  No log entries found.",
             Style::default().fg(theme.muted),

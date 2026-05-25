@@ -447,6 +447,7 @@ dependencies = [
  "signal-hook 0.4.4",
  "tempfile",
  "toml",
+ "unicode-segmentation",
 ]
 
 [[package]]

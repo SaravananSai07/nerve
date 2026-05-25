@@ -629,12 +629,16 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
     let trimmed = first_line.trim();
-    // Truncate by chars, not bytes — slicing at byte 80 would panic on
-    // any codepoint straddling the boundary (e.g. a CJK glyph or emoji
-    // in a tool result), which a hostile JSONL row could trigger
-    // deterministically.
-    let mut truncated: String = trimmed.chars().take(80).collect();
-    if trimmed.chars().count() > 80 {
+    // Truncate by grapheme cluster so a multi-codepoint emoji or a
+    // decomposed accent doesn't render half-broken. Byte slicing
+    // (the prior implementation) panicked on multi-byte codepoints
+    // straddling the cap; codepoint slicing kept the panic safe but
+    // could still leave orphan combining marks. Grapheme is the
+    // correct level here for human-facing snippets.
+    use unicode_segmentation::UnicodeSegmentation;
+    let clusters: Vec<&str> = trimmed.graphemes(true).collect();
+    let mut truncated: String = clusters.iter().take(80).copied().collect();
+    if clusters.len() > 80 {
         truncated.push('…');
     }
     // Strip ANSI / OSC / C0+C1 controls before the snippet reaches the TUI.
