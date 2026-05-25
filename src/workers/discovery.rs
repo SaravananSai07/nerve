@@ -125,7 +125,7 @@ pub fn spawn(
                 }
             }));
             if let Err(payload) = outcome {
-                let msg = panic_payload_str(&payload);
+                let msg = panic_payload_str(&*payload);
                 log_err!("discovery worker panicked, exiting: {msg}");
                 alive_for_thread.store(false, Ordering::Release);
             }
@@ -140,11 +140,21 @@ pub fn spawn(
     })
 }
 
-fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> &str {
+/// Extract a printable message from whatever a `panic!` payload turned
+/// out to be. The two stdlib forms (`&'static str` from a string-literal
+/// panic, `String` from a formatted panic) cover ~all internal panics;
+/// the additional arms handle common third-party shapes (`Cow<str>`,
+/// nested `Box<str>`) so a panic from `notify` or another crate still
+/// produces a useful log line instead of `<non-string ...>`.
+fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> &str {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         s
     } else if let Some(s) = payload.downcast_ref::<String>() {
         s.as_str()
+    } else if let Some(s) = payload.downcast_ref::<Box<str>>() {
+        s
+    } else if let Some(s) = payload.downcast_ref::<std::borrow::Cow<'static, str>>() {
+        s
     } else {
         "<non-string panic payload>"
     }

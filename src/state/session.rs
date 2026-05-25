@@ -156,6 +156,7 @@ pub struct DiscoverySnapshot {
     pub jsonl_age_secs: Option<f64>,
 }
 
+#[derive(Clone)]
 pub struct Session {
     pub id: SessionId,
     pub cwd: PathBuf,
@@ -175,32 +176,10 @@ pub struct Session {
     state_machine: StateMachine<SessionState>,
 }
 
-// Manual Clone keeps the field privacy intact (deriving Clone with a
-// non-pub field is allowed, but spelling it out makes the boundary
-// obvious to a future reader.).
-impl Clone for Session {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id.clone(),
-            cwd: self.cwd.clone(),
-            name: self.name.clone(),
-            state_changed_at: self.state_changed_at,
-            tty: self.tty.clone(),
-            branch: self.branch.clone(),
-            cpu_percent: self.cpu_percent,
-            current_tool: self.current_tool.clone(),
-            activity: self.activity.clone(),
-            jsonl_path: self.jsonl_path.clone(),
-            renamed: self.renamed,
-            usage: self.usage.clone(),
-            pid: self.pid,
-            jsonl_age_secs: self.jsonl_age_secs,
-            last_notified_state: self.last_notified_state.clone(),
-            state_machine: self.state_machine.clone(),
-        }
-    }
-}
-
+// Debug is hand-written rather than derived — the registry-side
+// invariants (state_machine confirmation counter, last_notified_state)
+// are noise in debug output. We surface only the load-bearing
+// identity + current state.
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")

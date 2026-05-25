@@ -779,7 +779,13 @@ impl App {
         }
         // Surface a banner if the worker thread died on us. Without
         // this, a frozen worker is indistinguishable from a quiet one.
-        if !self.discovery.is_alive() && !self.discovery_warned {
+        // Don't clobber a fresh action message (e.g. a kill confirmation
+        // the user just triggered) — the banner can wait for the slot
+        // to come free on the next tick.
+        if !self.discovery.is_alive()
+            && !self.discovery_warned
+            && self.status_message.is_none()
+        {
             self.status_message =
                 Some("discovery worker stopped — see ~/.config/nerve/nerve.log".into());
             self.discovery_warned = true;

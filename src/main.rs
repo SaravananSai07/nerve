@@ -20,11 +20,6 @@ use app::App;
 use paths::Paths;
 use platform::BridgeId;
 
-fn discover_with_usage() -> Vec<state::session::Session> {
-    // `discover_sessions` runs the same JsonlCache the worker uses, so
-    // each session arrives with its cumulative `usage` already populated.
-    detect::claude::discover_sessions()
-}
 
 /// Raise `RLIMIT_NOFILE` soft limit up to `min(hard, 4096)`.
 /// Best-effort: failures are logged but don't block startup.
@@ -144,7 +139,7 @@ fn main() -> std::io::Result<()> {
     }
 
     if std::env::args().any(|a| a == "--dump") {
-        let sessions = discover_with_usage();
+        let sessions = detect::claude::discover_sessions();
         println!(
             "{}",
             serde_json::to_string_pretty(&sessions).unwrap_or_else(|e| format!("error: {e}"))
@@ -153,7 +148,7 @@ fn main() -> std::io::Result<()> {
     }
 
     if std::env::args().any(|a| a == "--list") {
-        let sessions = discover_with_usage();
+        let sessions = detect::claude::discover_sessions();
         if sessions.is_empty() {
             println!("No active sessions found.");
         }
