@@ -152,6 +152,8 @@ fn main() -> std::io::Result<()> {
         if sessions.is_empty() {
             println!("No active sessions found.");
         }
+        // CLI doesn't carry registry-owned state, so we don't print
+        // duration or sparkline — both would always read as zero.
         for s in &sessions {
             let token_info = if s.usage.total_tokens() > 0 {
                 format!(" | {}", s.usage.compact_display())
@@ -159,13 +161,11 @@ fn main() -> std::io::Result<()> {
                 String::new()
             };
             println!(
-                "{} | {} | {} | {} | {} | {}{}",
+                "{} | {} | {} | {}{}",
                 s.name,
-                s.state().label(),
+                s.detected_state.label(),
                 s.tty.as_deref().unwrap_or("?"),
                 s.branch.as_deref().unwrap_or("—"),
-                s.format_duration(),
-                s.activity_sparkline(),
                 token_info,
             );
         }

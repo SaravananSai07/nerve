@@ -140,7 +140,7 @@ impl SessionState {
 /// state_changed_at, ActivityHistory, last_notified_state) — those
 /// belong to whichever `Session` the registry owns, and the worker
 /// has no business creating them just so they get overwritten.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DiscoverySnapshot {
     pub id: SessionId,
     pub cwd: PathBuf,
@@ -412,28 +412,6 @@ impl Session {
                 .map(|dir| fuzzy_match(query_lower, dir))
                 .unwrap_or(false)
             || fuzzy_match(query_lower, &self.cwd.to_string_lossy())
-    }
-}
-
-impl Serialize for Session {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("Session", 14)?;
-        s.serialize_field("id", &self.id)?;
-        s.serialize_field("cwd", &self.cwd)?;
-        s.serialize_field("name", &self.name)?;
-        s.serialize_field("state", self.state())?;
-        s.serialize_field("tty", &self.tty)?;
-        s.serialize_field("branch", &self.branch)?;
-        s.serialize_field("cpu_percent", &self.cpu_percent)?;
-        s.serialize_field("current_tool", &self.current_tool)?;
-        s.serialize_field("activity", &self.activity)?;
-        s.serialize_field("jsonl_path", &self.jsonl_path)?;
-        s.serialize_field("jsonl_age_secs", &self.jsonl_age_secs)?;
-        s.serialize_field("renamed", &self.renamed)?;
-        s.serialize_field("usage", &self.usage)?;
-        s.serialize_field("pid", &self.pid)?;
-        s.end()
     }
 }
 

@@ -11,7 +11,7 @@ use crate::detect::git::BranchCache;
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process;
 use crate::state::log_entry::LogEntry;
-use crate::state::session::{DiscoverySnapshot, Session, SessionId, SessionState, TokenUsage};
+use crate::state::session::{DiscoverySnapshot, SessionId, SessionState, TokenUsage};
 use crate::util::sanitize::strip_ansi;
 
 /// Cap on the size of a per-pid session JSON file. The format is small
@@ -45,18 +45,16 @@ fn sessions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
 }
 
-/// CLI / one-shot path. Materialises each snapshot into a Session so
-/// the JSON wire schema produced by `--dump` and `--list` stays
-/// stable. The TUI hot path consumes snapshots directly through
-/// `discover_sessions_with`.
-pub fn discover_sessions() -> Vec<Session> {
+/// CLI / one-shot path. Returns snapshots directly — `--dump` and
+/// `--list` work with the worker's observation, not a synthesised
+/// `Session` that would carry meaningless registry-owned fields
+/// (state-machine confirmation counter, empty activity history,
+/// zero-duration since "now").
+pub fn discover_sessions() -> Vec<DiscoverySnapshot> {
     let table = process::ProcessTable::refreshed();
     let mut cache = JsonlCache::new();
     let mut branch_cache = BranchCache::new();
     discover_sessions_with(&table, &mut cache, &mut branch_cache)
-        .into_iter()
-        .map(Session::from_snapshot)
-        .collect()
 }
 
 /// Discover sessions against the cached process table, JSONL cache,
