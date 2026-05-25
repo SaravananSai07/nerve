@@ -88,10 +88,18 @@ fn is_safe_char(c: char) -> bool {
 /// system carries the "this string is safe to render in the TUI"
 /// invariant from ingestion boundaries through to display.
 ///
-/// Idempotent: re-sanitising an already-clean value is a no-op
-/// (`strip_ansi` is monotonic and the control-byte filter agrees on
-/// its output), so callers can wrap without worrying about whether
-/// upstream code already sanitised.
+/// Idempotent on its own output: re-wrapping an already-`Sanitised`
+/// value (via `.as_str()` round-trip) yields the same bytes. Note
+/// that `strip_ansi` alone is *not* a fixed point — it lets Cf
+/// format chars (U+200E etc.) through that the second-pass
+/// `is_control` filter drops. The second pass is the source of
+/// truth for "safe to render"; treat `strip_ansi` as a CSI/OSC/DCS
+/// pre-filter, not a complete sanitiser.
+// DO NOT add `impl From<String> for Sanitised` or `impl From<&str>`:
+// either would let callers bypass `Sanitised::new` and silently
+// undo the type-level guarantee crate-wide. The only inhabited-
+// string constructor is `new`. `Default` is derived because the
+// empty string is vacuously safe (no escapes possible).
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Sanitised(String);
 

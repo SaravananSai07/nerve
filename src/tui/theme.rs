@@ -96,6 +96,10 @@ impl Theme {
         let name = {
             let s = Sanitised::new(raw_name);
             if s.is_empty() || s.len() > 64 {
+                log_warn!(
+                    "themes: name in {} rejected (empty after sanitise or >64 B) — using 'custom'",
+                    path.display()
+                );
                 Sanitised::new("custom")
             } else {
                 s

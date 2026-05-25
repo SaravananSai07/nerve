@@ -62,13 +62,22 @@ fn fixture_dirs() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)
     (tmp, home, config)
 }
 
+/// On a clean success run, stderr must be empty. A regression that
+/// adds a noisy eprintln to a code path still exiting 0 (e.g. a new
+/// "could not read sessions dir: permission denied" warning) would
+/// otherwise slip through with only the exit-code assertion.
+fn assert_clean_success(code: i32, stderr: &str) {
+    assert_eq!(code, 0, "exit code; stderr: {stderr}");
+    assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
+}
+
 #[test]
 fn dump_with_empty_sessions_dir_returns_empty_json_array() {
     let (_tmp, home, config) = fixture_dirs();
     std::fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
 
     let (code, stdout, stderr) = run_cli(&["--dump"], &home, &config);
-    assert_eq!(code, 0, "exit code; stderr: {stderr}");
+    assert_clean_success(code, &stderr);
 
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("--dump must always emit valid JSON");
@@ -83,7 +92,7 @@ fn dump_with_missing_claude_dir_returns_empty_json_array() {
     // path: nerve must not crash, must still emit valid JSON.
 
     let (code, stdout, stderr) = run_cli(&["--dump"], &home, &config);
-    assert_eq!(code, 0, "exit code; stderr: {stderr}");
+    assert_clean_success(code, &stderr);
 
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("--dump must always emit valid JSON");
@@ -97,7 +106,7 @@ fn list_with_empty_sessions_dir_exits_cleanly() {
     std::fs::create_dir_all(home.join(".claude").join("sessions")).unwrap();
 
     let (code, stdout, stderr) = run_cli(&["--list"], &home, &config);
-    assert_eq!(code, 0, "exit code; stderr: {stderr}");
+    assert_clean_success(code, &stderr);
     assert!(
         !stdout.is_empty(),
         "--list should print at least an empty-state line, got nothing"
@@ -110,5 +119,5 @@ fn list_with_missing_claude_dir_exits_cleanly() {
     // No `~/.claude/`.
 
     let (code, _stdout, stderr) = run_cli(&["--list"], &home, &config);
-    assert_eq!(code, 0, "exit code; stderr: {stderr}");
+    assert_clean_success(code, &stderr);
 }

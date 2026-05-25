@@ -6,11 +6,13 @@ impl App {
     pub(super) fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         // Ctrl+C always quits, regardless of overlay. This is the one
         // hard exit; `q` from inside an overlay closes the overlay.
-        if let KeyCode::Char('c') = code {
-            if modifiers.contains(KeyModifiers::CONTROL) {
-                self.should_quit = true;
-                return;
-            }
+        // Match both `c` and `C` so the comment ("always quits") holds
+        // when the user has Caps Lock on or Shift down.
+        if matches!(code, KeyCode::Char('c') | KeyCode::Char('C'))
+            && modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.should_quit = true;
+            return;
         }
         match &self.overlay {
             Overlay::Help => {
