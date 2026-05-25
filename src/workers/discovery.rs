@@ -6,6 +6,7 @@ use std::time::Duration;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::detect::claude::discover_sessions_with;
+use crate::detect::git::BranchCache;
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process::ProcessTable;
 use crate::log_warn;
@@ -59,6 +60,7 @@ pub fn spawn(
         .spawn(move || {
             let mut table = ProcessTable::refreshed();
             let mut cache = JsonlCache::new();
+            let mut branch_cache = BranchCache::new();
             loop {
                 if shutdown.requested() {
                     return;
@@ -66,7 +68,7 @@ pub fn spawn(
 
                 table.refresh_if_stale(process_scan_interval);
                 let scan_start = std::time::Instant::now();
-                let sessions = discover_sessions_with(&table, &mut cache);
+                let sessions = discover_sessions_with(&table, &mut cache, &mut branch_cache);
                 let scan_elapsed = scan_start.elapsed();
                 // A full scan should take ~10-50 ms on local disk;
                 // persistent overruns indicate disk or network-

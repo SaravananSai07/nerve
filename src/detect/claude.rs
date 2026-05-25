@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
+use crate::detect::git::BranchCache;
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process;
 use crate::state::log_entry::LogEntry;
@@ -49,15 +50,18 @@ pub fn discover_sessions() -> Vec<Session> {
     // The TUI hot path goes through `discover_sessions_with`.
     let table = process::ProcessTable::refreshed();
     let mut cache = JsonlCache::new();
-    discover_sessions_with(&table, &mut cache)
+    let mut branch_cache = BranchCache::new();
+    discover_sessions_with(&table, &mut cache, &mut branch_cache)
 }
 
-/// Discover sessions against a cached process table and a JSONL
-/// state cache. On an idle session this collapses to a single
-/// `stat(2)` per JSONL instead of seek + 256 KiB read + parse.
+/// Discover sessions against the cached process table, JSONL cache,
+/// and branch cache. On an idle session this collapses to one
+/// `stat(2)` per JSONL plus one `stat(2)` per HEAD — no reads, no
+/// re-walks.
 pub fn discover_sessions_with(
     table: &process::ProcessTable,
     cache: &mut JsonlCache,
+    branch_cache: &mut BranchCache,
 ) -> Vec<Session> {
     let dir = match sessions_dir() {
         Some(d) if d.exists() => d,
@@ -66,6 +70,7 @@ pub fn discover_sessions_with(
 
     let mut sessions = Vec::new();
     let mut seen_jsonls: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut seen_cwds: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
@@ -89,19 +94,22 @@ pub fn discover_sessions_with(
         };
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json") {
-            if let Some(session) = load_session(&path, table, cache, &project_dirs) {
+            if let Some(session) = load_session(&path, table, cache, branch_cache, &project_dirs)
+            {
                 if let Some(ref jp) = session.jsonl_path {
                     seen_jsonls.insert(jp.clone());
                 }
+                seen_cwds.insert(session.cwd.clone());
                 sessions.push(session);
             }
         }
     }
 
-    // Evict cache entries whose JSONLs are no longer referenced —
-    // bounds the cache to the live working set instead of growing
-    // forever across days of uptime.
+    // Evict cache entries whose JSONLs / cwds are no longer
+    // referenced — bounds both caches to the live working set
+    // instead of growing forever across days of uptime.
     cache.retain_present(|p| seen_jsonls.contains(p));
+    branch_cache.retain_present(|p| seen_cwds.contains(p));
 
     deduplicate_sessions(sessions)
 }
@@ -126,6 +134,7 @@ fn load_session(
     path: &Path,
     table: &process::ProcessTable,
     cache: &mut JsonlCache,
+    branch_cache: &mut BranchCache,
     project_dirs: &[PathBuf],
 ) -> Option<Session> {
     let sf = read_session_file(path)?;
@@ -169,7 +178,7 @@ fn load_session(
     // Already resolved above — reuse instead of re-scanning.
     session.tty = Some(proc.tty.clone());
     session.cpu_percent = proc.cpu;
-    session.branch = crate::detect::git::read_branch(&cwd);
+    session.branch = branch_cache.read_or_refresh(&cwd);
 
     let jsonl_path = find_jsonl(&resolved_id, &cwd, project_dirs);
     let detected = if let Some(ref jp) = jsonl_path {
