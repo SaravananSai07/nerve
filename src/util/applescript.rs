@@ -33,8 +33,8 @@ pub fn spawn(script: &str, args: &[&str]) -> std::io::Result<std::process::Child
 
 /// Run `setsid()` in the child between fork and exec so the child
 /// becomes its own session leader and is no longer in nerve's
-/// process group. Closes L14 — a SIGTERM to nerve no longer
-/// propagates to notification subprocs mid-display.
+/// process group. A SIGTERM to nerve then doesn't propagate to
+/// notification subprocs mid-display.
 fn detach_from_pgrp(cmd: &mut Command) {
     unsafe {
         cmd.pre_exec(|| {

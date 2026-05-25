@@ -20,8 +20,8 @@ pub struct Theme {
     pub selected_text: Color,
 }
 
-/// The six built-in themes, in cycle order. User-provided themes from
-/// `~/.config/nerve/themes/*.toml` are appended at runtime (closes A13).
+/// Built-in themes in cycle order. User themes from
+/// `~/.config/nerve/themes/*.toml` are appended at runtime.
 const BUILTIN_NAMES: &[&str] = &[
     "nightfox",
     "tokyonight",

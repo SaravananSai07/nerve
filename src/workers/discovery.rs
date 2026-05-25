@@ -22,27 +22,24 @@ pub struct DiscoveryWorker {
     /// hitting `Disconnected` and exiting. The FS watcher clones this
     /// sender and pushes to it on every event under `sessions_dir`.
     _wake: Sender<()>,
-    /// File-system watcher on `~/.claude/sessions/`. Held by the
-    /// handle so the watcher's background thread stays alive for the
-    /// lifetime of the worker (closes A12 + L10). May be None when
-    /// the directory didn't exist at spawn time or the platform
-    /// watcher couldn't initialise.
+    /// Held so the watcher's background thread stays alive for
+    /// the worker's lifetime. `None` when the directory didn't
+    /// exist at spawn time or the platform watcher couldn't
+    /// initialise — the worker then falls back to its timer.
     _watcher: Option<RecommendedWatcher>,
     _join: Option<JoinHandle<()>>,
 }
 
-/// Spawn a discovery worker. The worker repeatedly:
-///   1. Refreshes its `ProcessTable` if older than `process_scan_interval`.
-///   2. Calls `discover_sessions_with` to build a `Vec<Session>`.
-///   3. Sends the snapshot through the channel.
-///   4. Sleeps until `refresh_interval` elapses *or* the FS watcher
-///      kicks the wake-channel because something under `sessions_dir`
-///      changed.
+/// Spawn a discovery worker.
+///   1. Refresh the `ProcessTable` if older than `process_scan_interval`.
+///   2. Run `discover_sessions_with` to build a `Vec<Session>`.
+///   3. Send the snapshot through the channel.
+///   4. Sleep until either `refresh_interval` elapses or the FS
+///      watcher kicks the wake-channel.
 ///
-/// Moving this off the UI thread (closes A20) means a slow disk or a
-/// hung osascript fork can no longer freeze the TUI. Pairing it with
-/// the FS watcher (closes A12 + L10) means an idle nerve sleeps
-/// indefinitely — the FS event drives the wakes rather than a poll.
+/// Discovery off the UI thread keeps a slow disk from freezing the
+/// TUI. The FS watcher means an idle nerve sleeps indefinitely —
+/// the FS event drives wakes rather than a poll.
 pub fn spawn(
     refresh_interval: Duration,
     process_scan_interval: Duration,
@@ -71,10 +68,9 @@ pub fn spawn(
                 let scan_start = std::time::Instant::now();
                 let sessions = discover_sessions_with(&table, &mut cache);
                 let scan_elapsed = scan_start.elapsed();
-                // Budget heuristic (closes L29). On a fast laptop a
-                // full scan is ~10-50 ms; persistent budget overruns
-                // mean disk or network mount slowness and warrant a
-                // trace.
+                // A full scan should take ~10-50 ms on local disk;
+                // persistent overruns indicate disk or network-
+                // mount slowness and warrant a trace.
                 if scan_elapsed > Duration::from_millis(750) {
                     log_warn!(
                         "discovery: scan took {} ms ({} sessions)",
@@ -91,9 +87,23 @@ pub fn spawn(
                 // event wake. Disconnected → graceful exit (the wake
                 // sender lives on the handle that's about to drop).
                 match wake_rx.recv_timeout(refresh_interval) {
-                    Ok(_) => continue,
+                    Ok(_) => {
+                        // Coalesce a burst: notify fires multiple
+                        // events for one logical change (write →
+                        // close → flush → rename), so drain every
+                        // pending wake before scanning again.
+                        while wake_rx.try_recv().is_ok() {}
+                        continue;
+                    }
                     Err(RecvTimeoutError::Timeout) => continue,
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        // Shouldn't happen — the `_wake` sender is
+                        // held by the handle for the worker's
+                        // lifetime — but log so a regression isn't
+                        // silent.
+                        log_warn!("discovery: wake channel disconnected unexpectedly");
+                        return;
+                    }
                 }
             }
         })?;

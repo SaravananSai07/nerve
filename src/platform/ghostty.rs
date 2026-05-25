@@ -8,19 +8,21 @@ use crate::util::applescript;
 struct TerminalInfo {
     terminal_id: String,
     cwd: String,
-    /// `cwd` canonicalized once at query time so the matching loop
-    /// in `find_terminal_for_session` doesn't `realpath(3)` every
-    /// candidate per lookup (closes L24). Falls back to the raw
-    /// `cwd` if canonicalize fails.
+    /// Canonicalized once at query time so the matching loop in
+    /// `find_terminal_for_session` doesn't `realpath(3)` every
+    /// candidate per lookup. Falls back to the raw `cwd` if
+    /// canonicalize fails.
     cwd_canonical: PathBuf,
     name: String,
 }
 
 pub struct GhosttyBridge {
-    /// Resolved lazily on a background thread (closes L20). Reads
-    /// see `None` until detection finishes; this only affects the
-    /// "preview restores focus to nerve" courtesy step — preview
-    /// + go-to-session still work, they just don't bounce back.
+    /// Resolved lazily on a background thread so the 100 ms
+    /// osascript+sleep probe doesn't gate startup. Reads see
+    /// `None` until detection finishes; that window only affects
+    /// the "preview restores focus to nerve" courtesy step —
+    /// preview + go-to-session still work, they just don't bounce
+    /// focus back.
     nerve_terminal_id: Arc<OnceLock<Option<String>>>,
 }
 
@@ -329,8 +331,8 @@ fn find_terminal_for_session<'a>(
         if is_nerve_terminal(t) {
             continue;
         }
-        // Pre-canonicalized at query time (closes L24) — no
-        // per-lookup `realpath(3)` syscall here anymore.
+        // Pre-canonicalized at query time — no per-lookup
+        // `realpath(3)` syscall here.
         let is_match = t.cwd_canonical == session_canonical
             || std::path::Path::new(&t.cwd) == session_path;
         if is_match {
@@ -367,17 +369,17 @@ fn find_terminal_for_session<'a>(
         return Some(exact_matches[0]);
     }
 
-    // Longest prefix match for cd'd sessions. Canonicalize both sides so
-    // a malicious cwd that uses `..` traversal can't false-match an
-    // unrelated terminal (S14). `Path::starts_with` is component-based,
-    // not byte-based, so once both paths are canonical the comparison
-    // can no longer be tricked by traversal segments.
+    // Longest prefix match for cd'd sessions. Canonicalise both
+    // sides first so a malicious cwd using `..` traversal can't
+    // false-match an unrelated terminal. `Path::starts_with` is
+    // component-based, so once both paths are canonical the
+    // comparison can't be tricked by traversal segments.
     let mut best: Option<(usize, &TerminalInfo)> = None;
     for t in terminals {
         if is_nerve_terminal(t) {
             continue;
         }
-        // Pre-canonicalized terminal cwd (L24) — no syscall here.
+        // Pre-canonicalized terminal cwd — no syscall here.
         let t_canonical = &t.cwd_canonical;
         let session_for_match = &session_canonical;
         if session_for_match.starts_with(t_canonical)

@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Return the current branch name for the repo containing `cwd`, or `None`
-/// if `cwd` is not inside a git working tree. Replaces a `git rev-parse`
-/// fork — avoids paying for an exec per session per tick and avoids the
-/// security exposure of running git in an attacker-controlled cwd (S7).
+/// Current branch name for the repo containing `cwd`, or `None` if
+/// `cwd` isn't inside a git working tree. Reading `.git/HEAD`
+/// directly avoids both the per-tick `git rev-parse` fork and the
+/// security exposure of running git in an attacker-controlled cwd
+/// (git would evaluate the repo's `core.hooksPath`, etc.).
 pub fn read_branch(cwd: &Path) -> Option<String> {
     let head_path = locate_head_file(cwd)?;
     let raw = fs::read_to_string(&head_path).ok()?;

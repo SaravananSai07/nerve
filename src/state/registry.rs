@@ -35,12 +35,10 @@ pub struct SessionRegistry {
     sessions: HashMap<SessionId, Session>,
     order: Vec<SessionId>,
     sort_mode: SortMode,
-    /// Monotonic counter incremented whenever a mutation could affect the
-    /// rendered/filtered view (insertion, removal, state change, rename,
-    /// activity tick, sort change). Consumers like `FilteredView` snapshot
-    /// the value and rebuild only when it changes — eliminating the
-    /// per-frame filter-rebuild cost when nothing has actually changed
-    /// (closes A1).
+    /// Monotonic counter bumped whenever a mutation could change the
+    /// rendered/filtered view. `FilteredView` snapshots this and
+    /// rebuilds only on mismatch, so a steady-state idle tick pays
+    /// zero filter cost.
     version: u64,
 }
 
@@ -54,13 +52,13 @@ impl SessionRegistry {
         }
     }
 
-    #[allow(dead_code)]
     pub fn version(&self) -> u64 {
         self.version
     }
 
-    /// Bump the version counter. Public so callers that mutate sessions
-    /// via `get_mut` can announce that the rendered view should rebuild.
+    /// Announce that the rendered view should rebuild. Callers
+    /// mutating through `get_mut` use this to flag changes the
+    /// registry can't otherwise detect.
     pub fn bump_version(&mut self) {
         self.version = self.version.wrapping_add(1);
     }
@@ -79,9 +77,9 @@ impl SessionRegistry {
     }
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
-        // SessionId: Borrow<str>, so HashMap lookups with &str work.
-        // Callers should call `bump_version()` if the mutation affects
-        // the rendered view (state, name, etc.).
+        // Callers must call `bump_version()` after a mutation that
+        // affects the rendered view (state, name, etc.); the registry
+        // can't detect that on its own.
         self.sessions.get_mut(id)
     }
 
@@ -106,10 +104,10 @@ impl SessionRegistry {
                 sessions.sort_by(|a, b| a.name.cmp(&b.name));
             }
             SortMode::Age => {
-                // Hoist one Instant::now() outside the sort comparator so
-                // every comparison sees the same `now` snapshot (closes
-                // part of L13/L30). Without this each cmp call sampled
-                // an independently-drifting `Instant`.
+                // One `Instant::now()` outside the comparator so all
+                // pairwise compares see the same `now` snapshot —
+                // otherwise the sort could observe inconsistent
+                // orderings under heavy load.
                 let now = Instant::now();
                 sessions.sort_by_key(|s| std::cmp::Reverse(s.state_duration_at(now)));
             }
@@ -157,12 +155,11 @@ impl SessionRegistry {
         }
     }
 
-    /// Evict sessions that have passed their state-specific retention
-    /// window. `Vanished` (process gone) ages out after `vanished_grace_secs`
-    /// so the user gets a brief notice that the session ended. `Dormant`
-    /// (idle ≥ 48 h but process alive) is kept indefinitely; the user may
-    /// still come back to it (A22 — replaces the fused 60-s timeout
-    /// that previously treated both cases identically).
+    /// State-specific retention. `Vanished` (process gone) ages out
+    /// after `vanished_grace_secs` so the user gets a brief notice
+    /// that the session ended. `Dormant` (process alive, idle ≥ 48 h)
+    /// is kept indefinitely — the user may resume it and the tab/
+    /// pane info is still valid.
     pub fn remove_stale(&mut self, vanished_grace_secs: u64) {
         let active_cwds: std::collections::HashSet<std::path::PathBuf> = self
             .sessions
@@ -175,17 +172,13 @@ impl SessionRegistry {
         self.sessions.retain(|_, s| {
             match s.state {
                 SessionState::Vanished => {
-                    // Evict immediately if a live session has taken over
-                    // the same cwd; otherwise wait out the grace window.
+                    // Evict early when a live session has reclaimed
+                    // the cwd; otherwise wait out the grace window.
                     if active_cwds.contains(&s.cwd) {
                         return false;
                     }
                     s.state_duration().as_secs() <= vanished_grace_secs
                 }
-                // Dormant sessions stay around forever — the user might
-                // resume them, and the process is still alive so the
-                // tab/pane info is valid.
-                SessionState::Dormant => true,
                 _ => true,
             }
         });
@@ -199,12 +192,10 @@ impl SessionRegistry {
         for session in self.sessions.values_mut() {
             session.activity.shift_if_needed();
         }
-        // No version bump: the cached `FilteredView` stores only session
-        // IDs, not their content. Renderers iterate the cache and
-        // resolve `&Session` references on demand, which means activity
-        // sparkline changes flow through automatically without needing
-        // the filter cache to invalidate. Bumping here would defeat the
-        // steady-state win.
+        // No version bump: `FilteredView` stores only ids, not
+        // content. Renderers resolve `&Session` on demand, so
+        // sparkline changes flow through without invalidating the
+        // filter — bumping would defeat the steady-state win.
     }
 
     pub fn re_disambiguate_names(&mut self) {

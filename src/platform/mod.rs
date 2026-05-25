@@ -16,11 +16,11 @@ pub enum Bridge {
     #[cfg(target_os = "macos")]
     Ghostty(ghostty::GhosttyBridge),
     Tmux(tmux::TmuxBridge),
-    /// No terminal integration available — running outside a supported
-    /// terminal multiplexer / host. All operations are no-ops that
-    /// surface a clear error to the user. Eliminates the
-    /// `Option<Bridge>` shape that previously peppered the codebase
-    /// with `if let Some(...)` checks (closes A4).
+    /// No terminal integration available — running outside a
+    /// supported host. Lets us hand back a `Bridge` value instead
+    /// of `Option<Bridge>` so the rest of the codebase doesn't
+    /// pepper itself with `if let Some(bridge) = ...`. All
+    /// operations are no-ops with a clear error surface.
     NoOp,
 }
 

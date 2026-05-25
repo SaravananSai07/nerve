@@ -5,15 +5,15 @@ use serde::Serialize;
 
 use crate::state::state_machine::StateMachine;
 
-/// Number of consecutive `propose_state` calls required before the
-/// session's state actually changes. Defends against flicker (CPU
-/// spikes, transient file rewrites) at the detection layer.
+/// Consecutive `propose_state` calls required before the visible
+/// state actually changes. Defends against flicker in upstream
+/// signals (CPU spikes, transient file rewrites).
 const CONFIRM_TICKS: u8 = 3;
 
-/// Strongly-typed wrapper for the canonical id we use to identify a
-/// Claude session in the registry. Encapsulates the `--resume`-vs-
-/// `sessionId` precedence rule at the constructor so the rest of the
-/// codebase never has to think about it.
+/// Canonical session identity. Wrapping `String` here gives the
+/// rest of the codebase a single type to think about, and lets us
+/// encode the `--resume` precedence rule in one place (the
+/// constructor) instead of scattering it through call sites.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct SessionId(String);
 
@@ -91,15 +91,13 @@ pub enum SessionState {
     WaitingForInput,
     Idle,
     Error,
-    /// The per-pid session file has disappeared from discovery — the
-    /// process is almost certainly gone. Evicted from the registry
-    /// after a short grace period (closes A9 — was previously fused
-    /// with `Dormant` under a single `Stale` variant).
+    /// The per-pid session file has vanished from discovery — the
+    /// process is almost certainly gone. Evicted after a short grace
+    /// window so the user notices the session ended.
     Vanished,
-    /// Session was `WaitingForInput` long enough (≥ 48 h) that we no
-    /// longer assume the user is coming back to it imminently, but the
-    /// process is alive. Never evicted automatically (A22 — replaces
-    /// the old fixed-60-s timeout with a state-specific policy).
+    /// Was `WaitingForInput` long enough (≥ 48 h) that we no longer
+    /// assume the user is coming back to it imminently, but the
+    /// process is alive. Kept indefinitely.
     Dormant,
 }
 
@@ -128,8 +126,9 @@ impl SessionState {
         }
     }
 
-    /// True if this state represents a session that is no longer
-    /// actively producing work and is a candidate for eviction.
+    /// True for states where the session is no longer actively
+    /// producing work — `start_kill` uses this to refuse a redundant
+    /// SIGTERM on a dead/dormant session.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Vanished | Self::Dormant)
     }
@@ -140,10 +139,9 @@ pub struct Session {
     pub id: SessionId,
     pub cwd: PathBuf,
     pub name: String,
-    /// Mirror of `state_machine.current()`, kept in sync via
-    /// `propose_state`/`set_state`. Public so callers can match on it
-    /// without going through an accessor — the underlying logic lives
-    /// inside `state_machine`.
+    /// Mirror of `state_machine.current()`, kept in sync by
+    /// `propose_state` / `set_state`. Public so callers can pattern-
+    /// match directly; the logic lives in `state_machine`.
     pub state: SessionState,
     pub state_changed_at: Instant,
     pub tty: Option<String>,
@@ -152,10 +150,10 @@ pub struct Session {
     pub current_tool: Option<String>,
     pub activity: ActivityHistory,
     pub jsonl_path: Option<PathBuf>,
-    /// Inode of the JSONL the last time we read tokens from it. When
-    /// this changes (file rotated / replaced), `App::apply_discovery`
-    /// resets the token-usage offset to 0 so we don't seek into a
-    /// new file at the old position (closes L5).
+    /// Inode at the time we last parsed tokens. A change here means
+    /// the file was rotated or replaced under us, so `apply_discovery`
+    /// resets the read offset rather than seeking into a fresh file
+    /// at a stale position.
     pub jsonl_inode: Option<u64>,
     pub renamed: bool,
     pub usage: TokenUsage,
@@ -193,9 +191,8 @@ impl Session {
         }
     }
 
-    /// Propose a transition. Returns true when the threshold of
-    /// consecutive identical proposals has been hit and the visible
-    /// `state` field has been updated.
+    /// Propose a transition. Returns true once the proposal has
+    /// been confirmed `CONFIRM_TICKS` times in a row.
     pub fn propose_state(&mut self, new_state: SessionState) -> bool {
         if self.state_machine.propose(new_state) {
             self.state = self.state_machine.current().clone();
@@ -206,9 +203,9 @@ impl Session {
         }
     }
 
-    /// Force-transition without confirmations. Used when authority
-    /// comes from a side channel (e.g. discovery says the session
-    /// vanished → mark Stale immediately).
+    /// Force a transition without confirmations. For when authority
+    /// comes from a side channel — e.g. discovery says the session's
+    /// file vanished, so we mark it `Vanished` right away.
     pub fn set_state(&mut self, new_state: SessionState) {
         if self.state != new_state {
             self.state_machine.set(new_state.clone());
@@ -217,18 +214,18 @@ impl Session {
         }
     }
 
-    /// Convenience wrapper that samples `Instant::now()` itself —
-    /// used by CLI paths (`--list`/`--dump`) and tests where the
-    /// per-frame consistency win doesn't apply.
+    /// One-shot wrapper used by CLI paths and tests; samples its
+    /// own `Instant::now()`. Render and sort paths use
+    /// `state_duration_at` with a frame-level `now` instead, so all
+    /// cards in one frame share a single timestamp.
     pub fn state_duration(&self) -> std::time::Duration {
         self.state_duration_at(Instant::now())
     }
 
-    /// Duration since the last state change, computed against a
-    /// caller-supplied `now`. Hot path (rendering, sorting) passes a
-    /// single `Instant::now()` sampled at frame top so every card in
-    /// the same frame agrees on the timestamp (closes L13 + L30).
     pub fn state_duration_at(&self, now: Instant) -> std::time::Duration {
+        // `saturating_duration_since` so a clock that briefly walks
+        // backwards (suspend/resume) returns zero rather than an
+        // absurd Duration.
         now.saturating_duration_since(self.state_changed_at)
     }
 
@@ -248,9 +245,9 @@ impl Session {
     }
 }
 
-/// `query_lower` must already be ASCII-lowercase; lowercase the query once
-/// per filter pass at the call site to avoid per-target allocations.
-/// ASCII-only case folding — sufficient for filenames and paths.
+/// Caller must lowercase `query_lower` once per filter pass so we
+/// don't re-allocate per target. ASCII-only case folding —
+/// sufficient for filenames and paths.
 pub fn fuzzy_match(query_lower: &str, target: &str) -> bool {
     let mut qi = query_lower.chars().peekable();
     for tc in target.chars() {

@@ -4,7 +4,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::DefaultTerminal;
 
 use crate::config::Config;
-use crate::detect::claude::{self, LogEntry};
+use crate::detect::claude;
 use crate::log_info;
 use crate::notify::Notifier;
 use crate::paths::Paths;
@@ -14,6 +14,7 @@ use crate::state::filtered_view::FilteredView;
 use crate::state::session::{Session, SessionId, SessionState};
 use crate::state::prefs::Prefs;
 use crate::state::registry::SessionRegistry;
+use crate::tui::preview::PreviewSource;
 use crate::tui::{cards, confirm_kill, confirm_preview, help, preview, rename};
 use crate::tui::theme::Theme;
 use crate::workers::discovery::DiscoveryWorker;
@@ -32,6 +33,17 @@ fn is_controlling_tty<F: std::os::fd::AsFd>(fd: F) -> bool {
 
 fn stdin_is_controlling_tty() -> bool {
     is_controlling_tty(std::io::stdin())
+}
+
+/// Free function so preview-overlay constructors don't have to
+/// borrow `&mut self` just to read a transcript tail.
+fn load_log_entries(
+    jsonl_path: &Option<std::path::PathBuf>,
+) -> Vec<crate::state::log_entry::LogEntry> {
+    match jsonl_path {
+        Some(jp) => claude::read_tail_entries(jp, 50),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(unix)]
@@ -61,7 +73,13 @@ enum Overlay {
     Help,
     Search,
     Rename(String),
-    Preview,
+    /// The variant owns its content so closing the overlay drops
+    /// the captured buffer with it — nothing stale hangs around on
+    /// `App` after the user dismisses preview.
+    Preview {
+        scroll: usize,
+        source: PreviewSource,
+    },
     ConfirmKill { name: String, id: SessionId },
     ConfirmPreview,
 }
@@ -72,19 +90,18 @@ pub struct App {
     config: Config,
     registry: SessionRegistry,
     filtered: FilteredView,
-    /// Background discovery worker. Owns the `ProcessTable` and runs
-    /// `discover_sessions_with` on its own thread so the UI never blocks
-    /// on `ps -eo` forks or slow JSONL reads (closes A20). The UI
-    /// drains the latest snapshot per tick via `try_recv`.
+    /// Discovery runs on its own thread; the UI never blocks on
+    /// `ps -eo` forks or slow JSONL reads. We drain the latest
+    /// snapshot per tick via `try_recv`.
     discovery: DiscoveryWorker,
-    /// True iff the host terminal currently has focus. Drives the
-    /// "skip the draw" optimisation in the main loop — when nerve
-    /// isn't visible we don't pay for ratatui's render at all,
-    /// just keep the discovery worker running (L26).
+    /// True while the host terminal has focus. The render is the
+    /// expensive part of a tick; when unfocused we skip it and let
+    /// the discovery worker keep the registry warm for when we
+    /// come back.
     focused: bool,
     claude_installed: bool,
-    /// Built-ins + any user themes loaded from ~/.config/nerve/themes/
-    /// at startup (closes A13). Cycle order is deterministic.
+    /// Built-ins followed by anything loaded from
+    /// `~/.config/nerve/themes/*.toml`. Cycle order is deterministic.
     themes: Vec<Theme>,
     theme: Theme,
     theme_index: usize,
@@ -97,18 +114,14 @@ pub struct App {
     should_quit: bool,
     notifier: Notifier,
     prefs: Prefs,
-    preview_scroll: usize,
-    preview_entries: Vec<LogEntry>,
-    preview_lines: Vec<String>,
-    has_terminal_capture: bool,
     visited_session: Option<String>,
     update_banner: Option<String>,
 }
 
-/// Notification waiting to be fired at the end of a refresh. The
-/// detector phase mutates the registry to completion before any
-/// notifier I/O runs (closes A11 — registry mutations no longer
-/// interleave with `spawn()` calls that could block).
+/// Notification queued by the discovery phase, dispatched after
+/// the registry mutation has fully settled. Decoupling the two
+/// stages means a slow `osascript` spawn can't interleave with a
+/// mid-flight registry write.
 struct PendingNotification {
     name: String,
     state: SessionState,
@@ -174,18 +187,14 @@ impl App {
             should_quit: false,
             notifier,
             prefs,
-            preview_scroll: 0,
-            preview_entries: Vec::new(),
-            preview_lines: Vec::new(),
-            has_terminal_capture: false,
             visited_session: None,
             update_banner,
         }
     }
 
     /// Floor each loop iteration to `MIN_LOOP_INTERVAL` so a runaway
-    /// poll-true (closed stdin returning POLLHUP, etc.) can't burn
-    /// CPU at MHz rates. Defends against the L1 / L33 incident class.
+    /// poll-true (closed stdin returning `POLLHUP`, etc.) can't burn
+    /// CPU at MHz rates.
     fn floor_iteration(&self, loop_start: std::time::Instant) {
         let elapsed = loop_start.elapsed();
         if elapsed < MIN_LOOP_INTERVAL {
@@ -193,10 +202,10 @@ impl App {
         }
     }
 
-    /// What the loop does when nerve is unfocused (L26): drain
-    /// pending events to keep the focus/quit/signal flags fresh and
-    /// pump discovery once, but skip the entire draw path. With FS
-    /// watcher driving the worker, idle CPU drops to near zero.
+    /// Unfocused tick: drain pending events so focus/quit/signal
+    /// flags stay fresh and pump discovery once, but skip the entire
+    /// draw path. With the FS watcher driving the worker, idle CPU
+    /// drops to near zero.
     fn tick_unfocused(&mut self) -> std::io::Result<()> {
         // Drain any queued events so a FocusGained or quit keystroke
         // arrives promptly when the user comes back. Block up to a
@@ -228,25 +237,27 @@ impl App {
 
         while !self.should_quit && !self.shutdown.requested() && stdin_is_controlling_tty() {
             let loop_start = std::time::Instant::now();
-            // preview_scroll is mutated by the preview overlay; hoist to avoid a
-            // self-aliasing borrow with the immutable reads elsewhere in the closure
-            let mut preview_scroll = self.preview_scroll;
+            // Hoist preview scroll so the draw closure can take `&mut`
+            // without conflicting with the `&self.overlay` borrow it
+            // also needs. The new value is written back after draw.
+            let mut preview_scroll = match &self.overlay {
+                Overlay::Preview { scroll, .. } => *scroll,
+                _ => 0,
+            };
 
-            // Skip the (expensive) draw when nerve isn't focused — the
-            // terminal is showing whatever's underneath us anyway, and
-            // the discovery worker keeps the registry warm for when we
-            // come back (L26).
+            // Skip the draw when unfocused — the terminal is showing
+            // whatever's underneath us, and the worker keeps the
+            // registry warm for when we come back.
             if !self.focused {
                 self.tick_unfocused()?;
                 self.floor_iteration(loop_start);
                 continue;
             }
 
-            // Refresh the cached FilteredView before drawing. On steady
-            // state (registry version + query unchanged) this is a single
-            // comparison; only mutations or query keystrokes trigger a
-            // rebuild. Closes A1 — the filter is no longer computed
-            // multiple times per frame.
+            // Refresh the cached FilteredView before drawing. On
+            // steady state (registry version + query unchanged)
+            // this is one comparison; only mutations or query
+            // keystrokes trigger a rebuild.
             self.filtered
                 .refresh(&self.registry, self.search_query.as_deref());
 
@@ -301,15 +312,13 @@ impl App {
                         ));
                         frame.render_widget(para, inner);
                     }
-                    Overlay::Preview => {
+                    Overlay::Preview { source, .. } => {
                         if let Some(session) = visible.get(self.selected) {
                             preview::render(
                                 frame,
                                 &self.theme,
                                 session,
-                                &self.preview_entries,
-                                &self.preview_lines,
-                                self.has_terminal_capture,
+                                source,
                                 &mut preview_scroll,
                             );
                         }
@@ -324,7 +333,10 @@ impl App {
                 }
             })?;
 
-            self.preview_scroll = preview_scroll;
+            // Write back the (possibly clamped) scroll position.
+            if let Overlay::Preview { scroll, .. } = &mut self.overlay {
+                *scroll = preview_scroll;
+            }
 
             if event::poll(Duration::from_millis(self.config.general.refresh_interval_ms))? {
                 match event::read()? {
@@ -334,11 +346,11 @@ impl App {
                         if let Some(name) = self.visited_session.take() {
                             self.status_message = Some(format!("returned from '{name}'"));
                         }
-                        // Bridge re-detect (L25): if we started with
-                        // NoOp (env wasn't recognised at launch) but
-                        // the user has since moved nerve into a
-                        // supported terminal, pick it up on the next
-                        // focus-gain instead of needing a relaunch.
+                        // If we started with NoOp (TERM_PROGRAM
+                        // wasn't recognised at launch) but the user
+                        // has since moved nerve into a supported
+                        // terminal, pick it up on focus-gain rather
+                        // than requiring a relaunch.
                         if !self.bridge.is_active() {
                             self.bridge = Bridge::auto_detect();
                         }
@@ -347,10 +359,10 @@ impl App {
                         self.focused = false;
                     }
                     Event::Resize(_, _) => {
-                        // Coalesce burst resize events that fire while
-                        // the user drags a window edge — drain every
-                        // queued event before the next render so we
-                        // don't paint once per pixel (L11).
+                        // Coalesce burst Resize events that fire
+                        // during a window-edge drag — drain every
+                        // queued resize so we render once per drag
+                        // tick, not once per pixel.
                         while event::poll(Duration::from_millis(0))? {
                             if !matches!(event::read()?, Event::Resize(_, _)) {
                                 break;
@@ -393,13 +405,21 @@ impl App {
                 self.handle_rename_key(code);
                 return;
             }
-            Overlay::Preview => {
+            Overlay::Preview { .. } => {
                 match code {
-                    KeyCode::Char('p') | KeyCode::Char('P') | KeyCode::Esc => self.overlay = Overlay::None,
+                    KeyCode::Char('p') | KeyCode::Char('P') | KeyCode::Esc => {
+                        self.overlay = Overlay::None;
+                    }
                     KeyCode::Char('q') => self.should_quit = true,
-                    KeyCode::Char('j') | KeyCode::Down => self.preview_scroll += 1,
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if let Overlay::Preview { scroll, .. } = &mut self.overlay {
+                            *scroll += 1;
+                        }
+                    }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                        if let Overlay::Preview { scroll, .. } = &mut self.overlay {
+                            *scroll = scroll.saturating_sub(1);
+                        }
                     }
                     _ => {}
                 }
@@ -563,42 +583,29 @@ impl App {
         };
         let jsonl_path = session.jsonl_path.clone();
 
-        if let Some(text) = self.bridge.capture_screen(&target) {
-            self.preview_lines = text.lines().map(|l| l.to_string()).collect();
-            self.preview_entries = Vec::new();
-            self.has_terminal_capture = true;
-            self.preview_scroll = usize::MAX;
-            self.overlay = Overlay::Preview;
-            return;
-        }
-
-        self.load_log_entries(&jsonl_path);
-        self.has_terminal_capture = false;
-        self.preview_scroll = usize::MAX;
-        self.overlay = Overlay::Preview;
+        let source = match self.bridge.capture_screen(&target) {
+            Some(text) => PreviewSource::TerminalCapture(
+                text.lines().map(|l| l.to_string()).collect(),
+            ),
+            None => PreviewSource::LogEntries(load_log_entries(&jsonl_path)),
+        };
+        self.overlay = Overlay::Preview {
+            scroll: usize::MAX,
+            source,
+        };
     }
 
     fn open_log_preview(&mut self) {
-        let session = self.nth_filtered(self.selected);
-        if let Some(session) = session {
-            let jsonl_path = session.jsonl_path.clone();
-            self.load_log_entries(&jsonl_path);
-        } else {
-            self.preview_entries = Vec::new();
-        }
-        self.preview_lines = Vec::new();
-        self.has_terminal_capture = false;
-        self.preview_scroll = usize::MAX;
-        self.overlay = Overlay::Preview;
+        let entries = match self.nth_filtered(self.selected) {
+            Some(s) => load_log_entries(&s.jsonl_path),
+            None => Vec::new(),
+        };
+        self.overlay = Overlay::Preview {
+            scroll: usize::MAX,
+            source: PreviewSource::LogEntries(entries),
+        };
     }
 
-    fn load_log_entries(&mut self, jsonl_path: &Option<std::path::PathBuf>) {
-        if let Some(ref jp) = jsonl_path {
-            self.preview_entries = claude::read_tail_entries(jp, 50);
-        } else {
-            self.preview_entries = Vec::new();
-        }
-    }
 
     fn start_kill(&mut self) {
         let Some(session) = self.nth_filtered(self.selected) else {
@@ -614,8 +621,9 @@ impl App {
     }
 
     fn execute_kill(&mut self, name: &str, id: &str) {
-        // `kill_by_session_id` resolves + validates + signals as one
-        // operation so a recycled pid can't slip through (S4 / L19).
+        // Single function handles resolve + re-validate + signal so
+        // a recycled pid can't slip through between the lookup and
+        // the kill.
         match claude::kill_by_session_id(id) {
             Ok(pid) => {
                 self.status_message = Some(format!("sent SIGTERM to '{name}' (pid {pid})"));
@@ -770,28 +778,32 @@ impl App {
         self.registry.remove_stale(60);
         self.apply_filter();
 
-        if matches!(self.overlay, Overlay::Preview) && !self.has_terminal_capture {
-            let Some(session) = self.nth_filtered(self.selected) else {
-                return;
-            };
-            if let Some(ref jp) = session.jsonl_path {
-                self.preview_entries = claude::read_tail_entries(jp, 50);
+        // Keep the log-preview content fresh while the overlay is open
+        // — but only when we're showing parsed entries (a captured
+        // terminal buffer is a point-in-time snapshot and shouldn't be
+        // silently replaced).
+        let needs_refresh = matches!(
+            &self.overlay,
+            Overlay::Preview { source: PreviewSource::LogEntries(_), .. }
+        );
+        if needs_refresh {
+            let jsonl_path = self.nth_filtered(self.selected).and_then(|s| s.jsonl_path.clone());
+            let entries = load_log_entries(&jsonl_path);
+            if let Overlay::Preview { source, .. } = &mut self.overlay {
+                *source = PreviewSource::LogEntries(entries);
             }
         }
     }
 
-    /// Top-level discovery tick — runs on the UI thread but does *no*
-    /// I/O. The background worker (`DiscoveryWorker`) handles `ps`
-    /// forks and JSONL reads; this drain-and-apply pattern means slow
-    /// disk or hung subprocesses no longer block the UI (closes A20).
-    /// Three discrete stages (A3 / A11):
-    ///   1. Drain the latest discovery snapshot from the worker channel
+    /// UI-thread tick. Does no I/O of its own; the discovery worker
+    /// owns that. Three stages:
+    ///   1. Drain the latest snapshot from the worker channel
     ///      (coalescing any backlog to the freshest one).
-    ///   2. Apply the snapshot to the registry, collecting pending
+    ///   2. Apply it to the registry, collecting pending
     ///      notifications without dispatching them yet.
-    ///   3. Dispatch the notification batch. Because (2) finishes before
-    ///      (3) starts, a slow `osascript` spawn can no longer freeze a
-    ///      mid-refresh registry mutation.
+    ///   3. Dispatch the notification batch. Splitting (2) from (3)
+    ///      means a slow `osascript` spawn can't interleave with a
+    ///      mid-flight registry mutation.
     fn refresh_sessions(&mut self) {
         if let Some(discovered) = self.discovery.latest_snapshot() {
             let pending = self.apply_discovery(discovered);
@@ -859,9 +871,9 @@ impl App {
                 }
 
                 if let Some(ref jp) = session.jsonl_path {
-                    // Detect inode change (log rotation) and reset
-                    // the offset rather than seeking into a brand-new
-                    // file at the old offset (closes L5).
+                    // If the inode changed, the file was rotated /
+                    // replaced — reset the offset so we don't seek
+                    // into a brand-new file at a stale position.
                     let current_inode = inode_of_path(jp);
                     let offset = if existing.jsonl_inode != current_inode {
                         0
@@ -927,20 +939,17 @@ impl App {
             }
         }
 
-        // Only re-disambiguate when membership actually changed
-        // (insertions or stale-marks). Existing-session updates can
-        // only have moved a state forward, never introduced a new name
-        // clash — skipping the O(n²)-ish scan on steady-state idle
-        // ticks (closes A18).
+        // Disambiguation is only meaningful when membership
+        // changed; an existing-session update can't introduce a new
+        // name clash. Skipping the O(n²)-ish scan on idle ticks.
         if any_membership_change {
             self.registry.re_disambiguate_names();
         }
-        // Per-tick activity bucket shift. Mutating side of activity is
-        // split between this call (time-based shifts) and inline
-        // `record_activity` (event-based set). Two paths are kept
-        // deliberate, documented here so future edits don't try to
-        // collapse them into one and accidentally drop one of the two
-        // mechanisms (A19 — documented invariant, not fused).
+        // The activity ring buffer has two write paths by design —
+        // `record_activity` (event-driven, called inline above) and
+        // `shift_if_needed` (time-driven, here). Their inputs are
+        // different and fusing them would either drop the event
+        // signal or recompute elapsed-time shifts per session.
         self.registry.shift_all_activity();
 
         if any_transition {

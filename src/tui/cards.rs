@@ -61,8 +61,8 @@ pub fn render(
         (chunks[0], chunks[1])
     };
 
-    // Sample `now` once per frame so every card's duration display
-    // and any age-based sort consult the same `Instant` (L13 / L30).
+    // One `Instant::now()` per frame so every card's duration
+    // display agrees on a single timestamp.
     let now = Instant::now();
     render_cards(frame, card_area, sessions, selected, theme, now);
     render_status_bar(
@@ -370,11 +370,11 @@ fn render_empty(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(text, inner);
 }
 
-/// Shown when `~/.claude/` doesn't exist yet — first-time setup
-/// path (closes A21). Distinct from `render_empty` so the user
-/// gets a clear "you need to install Claude Code first" message
-/// rather than a confusing "no sessions detected" when the cause
-/// is that the data directory itself is missing.
+/// Shown when `~/.claude/` is missing entirely (first-time
+/// setup). Distinct from `render_empty` so the user gets a clear
+/// "install Claude Code" message rather than the confusing "no
+/// sessions detected" when the cause is that Claude Code itself
+/// hasn't been set up.
 fn render_setup_hint(frame: &mut Frame, area: Rect, theme: &Theme) {
     let block = Block::default()
         .title(Span::styled(

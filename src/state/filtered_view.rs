@@ -1,25 +1,15 @@
 use super::registry::{SessionRegistry, SortMode};
 use super::session::{Session, SessionId};
 
-/// A versioned cache of the registry's sorted+filtered session list.
-/// Rebuilt only when the registry's version changes or the search query
-/// changes. Eliminates the previous 3-per-frame filter recomputation
-/// (closes A1).
-///
-/// The cache stores `SessionId`s, not `&Session` references — references
-/// can't outlive a `&mut Registry` borrow, but ids can. `get()` /
-/// `iter()` resolve ids back into `&Session` via the registry on demand.
+/// Versioned cache of the registry's sorted+filtered session list.
+/// Stores `SessionId`s, not `&Session` references: references can't
+/// outlive a `&mut Registry` borrow, but ids can. `get()` / `iter()`
+/// resolve ids back to `&Session` via the registry on demand.
 #[derive(Default)]
 pub struct FilteredView {
-    /// Ordered list of session ids matching the current sort + filter.
     ids: Vec<SessionId>,
-    /// Snapshot of the registry version when `ids` was last built.
-    /// A mismatch means the view is stale and must be rebuilt.
     registry_version: u64,
-    /// Snapshot of the query (already ASCII-lowercased) used when `ids`
-    /// was last built. `None` means "no filter — all sessions".
     query_lower: Option<String>,
-    /// True after the first refresh — used to force the initial build.
     primed: bool,
 }
 
@@ -28,19 +18,18 @@ impl FilteredView {
         Self::default()
     }
 
-    /// Rebuild the cached id list if the registry version or query has
-    /// changed since the last refresh. Cheap when nothing has changed
-    /// (one comparison, no allocations).
+    /// Rebuild only when the registry version or query has changed
+    /// since the last refresh. Cheap when nothing has changed (one
+    /// comparison, no allocations).
     pub fn refresh(&mut self, registry: &SessionRegistry, query: Option<&str>) {
         let new_query: Option<String> = query
             .filter(|q| !q.is_empty())
             .map(|q| q.to_ascii_lowercase());
 
         let version = registry.version();
-        // SortMode::Age uses `state_duration()` which depends on the
-        // current Instant — its result changes every tick even when no
-        // session mutates. Force a rebuild in that mode rather than
-        // pretending the cached order is still correct.
+        // SortMode::Age's key is `state_duration()`, which depends on
+        // `Instant::now()` — its ordering can change between ticks
+        // even when no session mutates. Force a rebuild in that mode.
         let force = matches!(registry.sort_mode(), SortMode::Age);
         if !force
             && self.primed
@@ -166,7 +155,7 @@ mod tests {
         assert_eq!(view.len(), 1);
 
         view.refresh(&reg, Some(""));
-        assert_eq!(view.len(), 2); // empty query treated as no filter
+        assert_eq!(view.len(), 2);
     }
 
     #[test]
@@ -184,10 +173,8 @@ mod tests {
         let names: Vec<_> = view.iter(&reg).map(|s| s.name.clone()).collect();
         assert_eq!(names.len(), 2);
 
-        // out-of-range
         assert!(view.get(&reg, 99).is_none());
 
-        // SessionState parameter unused but ensures the constructor compiled.
         let _ = SessionState::Idle;
     }
 

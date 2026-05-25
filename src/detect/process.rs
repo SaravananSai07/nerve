@@ -11,22 +11,14 @@ pub struct ProcessInfo {
     pub args: String,
 }
 
-/// O(1) pid → index lookup over a process snapshot (closes L7). Built
-/// once per `ProcessTable::refreshed`; the previous linear-scan
-/// `find_process` was called repeatedly in inner loops during
-/// discovery.
 type PidIndex = HashMap<u32, usize>;
 
-/// Cached snapshot of the system's process table plus its parent→child
-/// index. Refreshed lazily on a TTL configured by `process_scan_interval_ms`
-/// (closes A7 — the setting was previously dead config). Each refresh is
-/// one `ps -eo` fork; with the default 5 s TTL that's roughly 80%
-/// fewer forks than the previous per-tick scan.
+/// Cached snapshot of the process table plus its parent→child index.
+/// Refreshed on a TTL (`process_scan_interval_ms`) so we don't fork
+/// `ps -eo` on every tick — at the default 5 s that's roughly 80 %
+/// fewer forks than a per-tick scan.
 pub struct ProcessTable {
     procs: Vec<ProcessInfo>,
-    /// Indexed lookup ready for hot-path use. `find_by_pid` returns
-    /// O(1) instead of the legacy `find_process` linear scan.
-    #[allow(dead_code)]
     pid_index: PidIndex,
     child_map: HashMap<u32, Vec<u32>>,
     snapshot_at: Instant,
@@ -63,9 +55,7 @@ impl ProcessTable {
         &self.child_map
     }
 
-    /// O(1) pid lookup. Was a linear scan via `find_process`
-    /// previously — closes L7.
-    #[allow(dead_code)]
+    /// O(1) pid lookup over the cached snapshot.
     pub fn find_by_pid(&self, pid: u32) -> Option<&ProcessInfo> {
         let idx = *self.pid_index.get(&pid)?;
         self.procs.get(idx)
@@ -82,10 +72,9 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
         Err(_) => return Vec::new(),
     };
 
-    // Byte-level line split avoids one allocation of the full ps
-    // stdout as a `String` (L8). For 600 processes this is ~70 KiB
-    // we don't have to copy + UTF-8-validate up front; each line
-    // is validated lazily by `from_utf8_lossy` only as we read it.
+    // Iterate bytes-then-validate so we don't pay for a single
+    // `from_utf8_lossy` over the entire ps output (~70 KiB at 600
+    // procs); each line is validated lazily as we go.
     let mut out = Vec::with_capacity(64);
     let mut header_seen = false;
     for chunk in output.stdout.split(|&b| b == b'\n') {
@@ -159,10 +148,8 @@ mod tests {
     fn process_table_refreshes_once_per_ttl_window() {
         let mut table = ProcessTable::refreshed();
         let first_snapshot_at = table.snapshot_at;
-        // Within the TTL window the snapshot stamp stays put.
         table.refresh_if_stale(Duration::from_secs(60));
         assert_eq!(table.snapshot_at, first_snapshot_at);
-        // A zero-TTL forces an immediate refresh; the stamp advances.
         std::thread::sleep(Duration::from_millis(2));
         table.refresh_if_stale(Duration::from_millis(0));
         assert!(table.snapshot_at > first_snapshot_at);
@@ -177,11 +164,11 @@ pub fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
     map
 }
 
+/// Linear scan over a slice. Hot-path callers (`load_session`,
+/// `infer_state_from_jsonl`) use `ProcessTable::find_by_pid` instead;
+/// this exists for `is_claude_process` and other places that only
+/// have a `&[ProcessInfo]`.
 pub fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
-    // Linear scan — kept for the legacy call sites in
-    // `is_claude_process` and inside `discover_sessions` which only
-    // see a `&[ProcessInfo]`. Hot-path callers use
-    // `ProcessTable::find_by_pid` instead (closes L7).
     procs.iter().find(|p| p.pid == pid)
 }
 
@@ -212,10 +199,3 @@ pub fn has_child_named(
     false
 }
 
-pub fn get_tty_for_pid(procs: &[ProcessInfo], pid: u32) -> Option<String> {
-    find_process(procs, pid).map(|p| p.tty.clone())
-}
-
-pub fn get_cpu_for_pid(procs: &[ProcessInfo], pid: u32) -> f32 {
-    find_process(procs, pid).map(|p| p.cpu).unwrap_or(0.0)
-}

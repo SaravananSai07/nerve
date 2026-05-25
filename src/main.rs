@@ -32,8 +32,8 @@ fn discover_with_usage() -> Vec<state::session::Session> {
     sessions
 }
 
-/// Raise `RLIMIT_NOFILE` soft limit up to `min(hard, 4096)`. Closes L35.
-/// Quiet best-effort: failures are logged but don't block startup.
+/// Raise `RLIMIT_NOFILE` soft limit up to `min(hard, 4096)`.
+/// Best-effort: failures are logged but don't block startup.
 fn raise_fd_limit() {
     use nix::libc;
     let mut rlim = libc::rlimit {
@@ -135,11 +135,9 @@ fn main() -> std::io::Result<()> {
     let _ = paths.ensure_config_dir();
     log::init(Some(paths.log_file()));
 
-    // Raise the per-process FD soft limit to a generous value
-    // (defaults vary: 256 on stock macOS, 1024 on most Linux). With
-    // many active sessions × open JSONLs × occasional notification
-    // spawn we want headroom (closes L35). Best-effort; logged on
-    // failure.
+    // Many active sessions × open JSONLs × occasional notification
+    // spawn can run into the default 256-fd cap on macOS. Raise
+    // the soft limit early; failures are logged but non-fatal.
     raise_fd_limit();
 
     if let Some(arg) = parse_focus_arg() {

@@ -4,17 +4,35 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::detect::claude::LogEntry;
+use crate::state::log_entry::LogEntry;
 use crate::state::session::Session;
 use super::theme::Theme;
+
+/// What the preview overlay renders. Lives inside the
+/// `Overlay::Preview` variant in `app.rs` so closing the overlay
+/// drops the captured buffer with it. The discriminant also
+/// doubles as the "LIVE vs LOG" header label.
+pub enum PreviewSource {
+    /// Captured terminal scrollback from Ghostty's screen capture.
+    TerminalCapture(Vec<String>),
+    /// Parsed JSONL entries from the session transcript.
+    LogEntries(Vec<LogEntry>),
+}
+
+impl PreviewSource {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::TerminalCapture(_) => "LIVE",
+            Self::LogEntries(_) => "LOG",
+        }
+    }
+}
 
 pub fn render(
     frame: &mut Frame,
     theme: &Theme,
     session: &Session,
-    entries: &[LogEntry],
-    terminal_lines: &[String],
-    has_terminal_capture: bool,
+    source: &PreviewSource,
     scroll: &mut usize,
 ) {
     let area = frame.area();
@@ -25,14 +43,13 @@ pub fn render(
     frame.render_widget(Clear, area);
 
     let indicator = theme.state_indicator(&session.state);
-    let source_label = if has_terminal_capture { "LIVE" } else { "LOG" };
     let title = format!(
         " {} {} {} | {} | {} ",
         session.name,
         indicator,
         session.state.label(),
         session.format_duration(),
-        source_label,
+        source.label(),
     );
 
     let block = Block::default()
@@ -47,10 +64,13 @@ pub fn render(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if has_terminal_capture {
-        render_terminal_buffer(frame, inner, theme, terminal_lines, scroll);
-    } else {
-        render_log_entries(frame, inner, theme, entries, scroll);
+    match source {
+        PreviewSource::TerminalCapture(lines) => {
+            render_terminal_buffer(frame, inner, theme, lines, scroll);
+        }
+        PreviewSource::LogEntries(entries) => {
+            render_log_entries(frame, inner, theme, entries, scroll);
+        }
     }
 }
 

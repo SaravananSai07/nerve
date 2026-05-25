@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::process;
+use crate::state::log_entry::LogEntry;
 use crate::state::session::{Session, SessionId, SessionState, TokenUsage};
 use crate::util::sanitize::strip_ansi;
 
@@ -17,11 +18,12 @@ use crate::util::sanitize::strip_ansi;
 /// or hostile content planted in `~/.claude/sessions/`.
 const SESSION_JSON_MAX_BYTES: u64 = 64 * 1024;
 
-/// Open a JSONL transcript file with `O_NOFOLLOW`. Defends against an
-/// attacker swapping a final-component symlink between our exists()-check
-/// in `find_jsonl` and the actual open call (S13). Multi-component
-/// directory-level traversal is out of scope — `~/.claude/projects/` is
-/// user-owned, so cross-user attacks already require a prior compromise.
+/// Open a JSONL transcript file with `O_NOFOLLOW`. Defends against
+/// an attacker swapping a final-component symlink between our
+/// `exists()` check in `find_jsonl` and the actual open. Multi-
+/// component directory-level traversal is out of scope —
+/// `~/.claude/projects/` is user-owned, so any cross-user attack
+/// already presupposes a prior compromise.
 fn open_jsonl(path: &Path) -> std::io::Result<std::fs::File> {
     OpenOptions::new()
         .read(true)
@@ -50,10 +52,9 @@ pub fn discover_sessions() -> Vec<Session> {
     discover_sessions_with(&table, &mut cache)
 }
 
-/// Discovery against a (possibly cached) process table and a
-/// `JsonlCache` that short-circuits unchanged transcripts (closes
-/// L4 + L5 + L28). A 1 Hz refresh tick on an idle session now does
-/// one `stat(2)` per JSONL instead of seek + 256 KiB read + parse.
+/// Discover sessions against a cached process table and a JSONL
+/// state cache. On an idle session this collapses to a single
+/// `stat(2)` per JSONL instead of seek + 256 KiB read + parse.
 pub fn discover_sessions_with(
     table: &process::ProcessTable,
     cache: &mut JsonlCache,
@@ -71,17 +72,14 @@ pub fn discover_sessions_with(
         Err(_) => return Vec::new(),
     };
 
-    // List ~/.claude/projects/ subdirectories ONCE per scan rather
-    // than per session. Without this every session whose cwd didn't
-    // match the exact-encoded path triggered its own read_dir
-    // (closes L6).
+    // Enumerate `~/.claude/projects/` once per scan instead of
+    // once per session — every cwd that didn't match the exact-
+    // encoded path used to trigger its own read_dir.
     let project_dirs = list_project_dirs();
 
     for entry in entries {
-        // Per-entry IO errors get logged (L31) but don't bail the
-        // whole scan — one corrupt per-pid JSON shouldn't blank the
-        // dashboard, but we still want a trail when something is
-        // wrong.
+        // Log per-entry IO errors but don't bail the scan — one
+        // corrupt per-pid JSON shouldn't blank the dashboard.
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -91,13 +89,7 @@ pub fn discover_sessions_with(
         };
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "json") {
-            if let Some(session) = load_session(
-                &path,
-                table.procs(),
-                table.child_map(),
-                cache,
-                &project_dirs,
-            ) {
+            if let Some(session) = load_session(&path, table, cache, &project_dirs) {
                 if let Some(ref jp) = session.jsonl_path {
                     seen_jsonls.insert(jp.clone());
                 }
@@ -132,14 +124,15 @@ fn list_project_dirs() -> Vec<PathBuf> {
 
 fn load_session(
     path: &Path,
-    procs: &[process::ProcessInfo],
-    child_map: &HashMap<u32, Vec<u32>>,
+    table: &process::ProcessTable,
     cache: &mut JsonlCache,
     project_dirs: &[PathBuf],
 ) -> Option<Session> {
     let sf = read_session_file(path)?;
 
-    let proc = process::find_process(procs, sf.pid)?;
+    // O(1) lookups via the cached pid index, rather than repeated
+    // linear scans through the full process table.
+    let proc = table.find_by_pid(sf.pid)?;
     let comm = proc.comm.rsplit('/').next().unwrap_or(&proc.comm);
     if comm != "claude" {
         return None;
@@ -149,7 +142,7 @@ fn load_session(
     // that invoke `claude` repeatedly). Real interactive sessions either have a
     // real TTY or are launched from a shell / terminal multiplexer.
     if proc.tty == "??" || proc.tty == "?" {
-        let parent_is_shell = process::find_process(procs, proc.ppid).is_some_and(|p| {
+        let parent_is_shell = table.find_by_pid(proc.ppid).is_some_and(|p| {
             let name = p.comm.rsplit('/').next().unwrap_or(&p.comm);
             matches!(name, "zsh" | "bash" | "fish" | "sh" | "dash" | "csh" | "tcsh"
                          | "nu" | "tmux" | "screen")
@@ -173,13 +166,14 @@ fn load_session(
     let mut session = Session::new(session_id, cwd.clone());
     session.pid = Some(sf.pid);
 
-    session.tty = process::get_tty_for_pid(procs, sf.pid);
-    session.cpu_percent = process::get_cpu_for_pid(procs, sf.pid);
+    // Already resolved above — reuse instead of re-scanning.
+    session.tty = Some(proc.tty.clone());
+    session.cpu_percent = proc.cpu;
     session.branch = crate::detect::git::read_branch(&cwd);
 
     let jsonl_path = find_jsonl(&resolved_id, &cwd, project_dirs);
     if let Some(ref jp) = jsonl_path {
-        session.state = infer_state_from_jsonl(jp, sf.pid, procs, child_map, cache);
+        session.state = infer_state_from_jsonl(jp, sf.pid, table, cache);
         session.jsonl_path = Some(jp.clone());
         session.jsonl_age_secs = Some(file_age_secs(jp));
     } else {
@@ -201,8 +195,7 @@ fn load_session(
 }
 
 fn read_session_file(path: &Path) -> Option<SessionFile> {
-    // O_NOFOLLOW guards the per-pid session JSON the same way we guard
-    // JSONL transcripts (S13).
+    // Same O_NOFOLLOW guard we use for JSONL transcripts.
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW)
@@ -249,16 +242,14 @@ fn find_jsonl(session_id: &str, cwd: &Path, project_dirs: &[PathBuf]) -> Option<
 pub fn infer_state_from_jsonl(
     path: &Path,
     pid: u32,
-    procs: &[process::ProcessInfo],
-    child_map: &HashMap<u32, Vec<u32>>,
+    table: &process::ProcessTable,
     cache: &mut JsonlCache,
 ) -> SessionState {
-    // mtime short-circuit (L4 + L28): the 256 KiB tail-read +
-    // serde_json parse is the per-tick hot spot. Skip it entirely
-    // when the file's mtime/len/inode are unchanged since the last
-    // observation; reuse the cached tail-parse result and re-apply
-    // the runtime refinement (CPU / caffeinate / mtime-age) against
-    // the current process snapshot.
+    // The 256 KiB tail read + serde_json parse is the per-tick
+    // hot spot. Skip it whenever the file's mtime/len/inode are
+    // unchanged; reuse the cached tail-parse result and re-apply
+    // the runtime refinement (CPU / caffeinate / mtime-age)
+    // against the current process snapshot.
     let tail_parse = if let Some(cached) = cache.cached_state(path) {
         cached
     } else {
@@ -266,7 +257,7 @@ pub fn infer_state_from_jsonl(
         cache.record_state(path, fresh.clone());
         fresh
     };
-    refine_with_runtime(tail_parse, path, pid, procs, child_map)
+    refine_with_runtime(tail_parse, path, pid, table)
 }
 
 /// Apply the runtime conditions (CPU%, caffeinate child, mtime age)
@@ -276,11 +267,10 @@ fn refine_with_runtime(
     tail_parse: SessionState,
     path: &Path,
     pid: u32,
-    procs: &[process::ProcessInfo],
-    child_map: &HashMap<u32, Vec<u32>>,
+    table: &process::ProcessTable,
 ) -> SessionState {
     let mtime_age = file_age_secs(path);
-    let cpu = process::get_cpu_for_pid(procs, pid);
+    let cpu = table.find_by_pid(pid).map(|p| p.cpu).unwrap_or(0.0);
 
     let state = tail_parse;
     if matches!(state, SessionState::Idle | SessionState::Error) {
@@ -300,7 +290,7 @@ fn refine_with_runtime(
     // keystroke rendering, which would otherwise flip an idle session to
     // Processing whenever the user is typing.
     if mtime_age <= 300.0
-        || process::has_child_named(procs, child_map, pid, "caffeinate")
+        || process::has_child_named(table.procs(), table.child_map(), pid, "caffeinate")
     {
         return state;
     }
@@ -512,15 +502,6 @@ fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
     (usage, new_offset)
 }
 
-#[derive(Debug, Clone)]
-pub enum LogEntry {
-    UserText(String),
-    AssistantText(String),
-    ToolUse { name: String, detail: String },
-    ToolResult { status: String, snippet: String },
-    Result { is_error: bool },
-}
-
 fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
     let content = match item.get("content") {
         Some(c) => c,
@@ -666,23 +647,16 @@ pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
     entries.into_iter().skip(skip).collect()
 }
 
-/// Resolve a session id to its pid AND atomically (within the same function
-/// scope) re-validate that the pid is still a `claude` process before
-/// sending SIGTERM. This closes the pid-reuse TOCTOU (S4 / L19): between
-/// a separate resolve-then-kill, the kernel could have recycled the pid
-/// to an unrelated user process and we'd SIGTERM that instead.
+/// Resolve a session id to its pid AND re-validate that the pid is
+/// still a `claude` process, then send SIGTERM — all in the same
+/// function. Between a separate resolve-then-kill the kernel could
+/// recycle the pid to an unrelated user process and we'd SIGTERM
+/// that instead.
 pub fn kill_by_session_id(session_id: &str) -> Result<u32, String> {
     let dir = sessions_dir().ok_or_else(|| "no sessions dir".to_string())?;
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
 
     for entry in entries.flatten() {
-        // entries.flatten() silently drops permission/IO errors on
-        // individual files; that's intentional here — we'd rather
-        // skip the one bad file than fail the whole discovery (a
-        // single corrupt per-pid JSON shouldn't blank the dashboard).
-        // L31 — see also `log_warn` calls in read_session_file for
-        // the explicit failure paths.
-        let _ = ();
         let path = entry.path();
         if !path.extension().is_some_and(|e| e == "json") {
             continue;

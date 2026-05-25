@@ -4,14 +4,12 @@ use std::time::SystemTime;
 
 use crate::state::session::SessionState;
 
-/// Per-JSONL tail-parse cache. The worker stores the previous
-/// `read_tail_state` result keyed by (mtime, len, inode). On the next
-/// tick, if those stats are unchanged, the worker can skip the
-/// 256 KiB read + serde_json parse and reuse the cached result
-/// (closes L4 + L28). The inode component also catches log rotation
-/// / truncation where the path stays the same but the file changes
-/// underneath (closes the L5 inode-change angle for the state path;
-/// the usage path tracks inodes on `Session` directly).
+/// Per-JSONL tail-parse cache. Stores the previous `read_tail_state`
+/// result keyed by `(mtime, len, inode)`. On a subsequent tick with
+/// identical stats the worker reuses the cached state instead of
+/// re-reading the tail and re-parsing — that read + parse was the
+/// dominant per-tick cost on idle sessions. The inode component also
+/// catches log rotation / truncation at the same path.
 #[derive(Default)]
 pub struct JsonlCache {
     entries: HashMap<PathBuf, JsonlEntry>,
