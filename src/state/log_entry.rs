@@ -3,7 +3,7 @@
 /// overlay can consume the type without a downward dependency from
 /// the presentation layer into the detection layer.
 #[derive(Debug, Clone)]
-pub enum LogEntry {
+pub(crate) enum LogEntry {
     UserText(String),
     AssistantText(String),
     ToolUse { name: String, detail: String },

@@ -9,12 +9,12 @@ use crate::log_warn;
 /// Shared flag that flips to `true` the moment any termination signal arrives.
 /// The main loop polls it at the top of each iteration and exits cleanly.
 #[derive(Clone)]
-pub struct ShutdownFlag {
+pub(crate) struct ShutdownFlag {
     inner: Arc<AtomicBool>,
 }
 
 impl ShutdownFlag {
-    pub fn install() -> std::io::Result<Self> {
+    pub(crate) fn install() -> std::io::Result<Self> {
         let inner = Arc::new(AtomicBool::new(false));
         for sig in [SIGHUP, SIGTERM, SIGINT, SIGQUIT] {
             signal_hook::flag::register(sig, Arc::clone(&inner))?;
@@ -22,19 +22,19 @@ impl ShutdownFlag {
         Ok(Self { inner })
     }
 
-    pub fn requested(&self) -> bool {
+    pub(crate) fn requested(&self) -> bool {
         self.inner.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
-    pub fn for_test() -> Self {
+    pub(crate) fn for_test() -> Self {
         Self {
             inner: Arc::new(AtomicBool::new(false)),
         }
     }
 
     #[cfg(test)]
-    pub fn raise(&self) {
+    pub(crate) fn raise(&self) {
         self.inner.store(true, Ordering::SeqCst);
     }
 }
@@ -43,7 +43,7 @@ impl ShutdownFlag {
 /// arrives. Without this, every `osascript`/`terminal-notifier` we
 /// `.spawn()` leaves a zombie until the process exits — over a long
 /// session, that's a slow process-table DoS.
-pub fn spawn_child_reaper() -> std::io::Result<()> {
+pub(crate) fn spawn_child_reaper() -> std::io::Result<()> {
     let mut signals = Signals::new([SIGCHLD])?;
     std::thread::Builder::new()
         .name("nerve-reaper".into())

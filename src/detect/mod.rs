@@ -1,4 +1,4 @@
-pub mod claude;
-pub mod git;
-pub mod jsonl_cache;
-pub mod process;
+pub(crate) mod claude;
+pub(crate) mod git;
+pub(crate) mod jsonl_cache;
+pub(crate) mod process;

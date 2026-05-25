@@ -16,7 +16,7 @@ use std::time::SystemTime;
 /// the new branch — acceptable since `git init` is a human-scale
 /// event.
 #[derive(Default)]
-pub struct BranchCache {
+pub(crate) struct BranchCache {
     entries: HashMap<PathBuf, BranchEntry>,
 }
 
@@ -30,11 +30,11 @@ enum BranchEntry {
 }
 
 impl BranchCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn read_or_refresh(&mut self, cwd: &Path) -> Option<String> {
+    pub(crate) fn read_or_refresh(&mut self, cwd: &Path) -> Option<String> {
         // Cached InTree: stat the known HEAD path and reuse the
         // parsed branch if the mtime matches. The walk that found
         // HEAD in the first place doesn't repeat.
@@ -100,7 +100,7 @@ impl BranchCache {
 
     /// Drop entries for cwds no longer referenced by an active
     /// session, so the cache doesn't grow unbounded.
-    pub fn retain_present<F: Fn(&Path) -> bool>(&mut self, keep: F) {
+    pub(crate) fn retain_present<F: Fn(&Path) -> bool>(&mut self, keep: F) {
         self.entries.retain(|cwd, _| keep(cwd));
     }
 }

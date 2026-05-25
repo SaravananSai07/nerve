@@ -1,3 +1,5 @@
+#![deny(unreachable_pub)]
+
 mod app;
 mod config;
 mod detect;

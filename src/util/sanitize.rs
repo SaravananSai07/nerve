@@ -11,7 +11,7 @@ use std::borrow::Cow;
 ///
 /// Defends against an untrusted JSONL transcript painting the host terminal
 /// with arbitrary escapes (cursor moves, OSC 52 clipboard writes, etc.).
-pub fn strip_ansi(input: &str) -> Cow<'_, str> {
+pub(crate) fn strip_ansi(input: &str) -> Cow<'_, str> {
     if input.chars().all(is_safe_char) {
         return Cow::Borrowed(input);
     }

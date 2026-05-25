@@ -10,7 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 /// `max_graphemes == 0` always returns an empty string;
 /// `max_graphemes == 1` returns just the ellipsis when truncation
 /// is needed.
-pub fn truncate_graphemes(s: &str, max_graphemes: usize) -> String {
+pub(crate) fn truncate_graphemes(s: &str, max_graphemes: usize) -> String {
     if max_graphemes == 0 {
         return String::new();
     }

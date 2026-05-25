@@ -7,25 +7,25 @@ use crate::log_warn;
 use crate::state::session::SessionState;
 
 #[derive(Debug, Clone)]
-pub struct Theme {
-    pub name: String,
-    pub border: Color,
-    pub text: Color,
-    pub processing: Color,
-    pub waiting: Color,
+pub(crate) struct Theme {
+    pub(crate) name: String,
+    pub(crate) border: Color,
+    pub(crate) text: Color,
+    pub(crate) processing: Color,
+    pub(crate) waiting: Color,
     /// Idle-session state color. Deliberately dim so an idle card
     /// fades into the background. Don't use this for chrome text —
     /// `muted` exists for that.
-    pub idle: Color,
+    pub(crate) idle: Color,
     /// Chrome text (status-bar hints, secondary card text, help
     /// section dividers). Distinct from `idle` so a session-state
     /// color choice doesn't drag UI affordances below WCAG-AA
     /// contrast on dark backgrounds.
-    pub muted: Color,
-    pub error: Color,
-    pub stale: Color,
-    pub selected_bg: Color,
-    pub selected_text: Color,
+    pub(crate) muted: Color,
+    pub(crate) error: Color,
+    pub(crate) stale: Color,
+    pub(crate) selected_bg: Color,
+    pub(crate) selected_text: Color,
 }
 
 /// Built-in themes in cycle order. User themes from
@@ -45,7 +45,7 @@ impl Theme {
     /// deterministic (alphabetical by filename within the user
     /// section) so launching with a particular `theme` config value
     /// always lands on the same index.
-    pub fn catalog(themes_dir: Option<&Path>) -> Vec<Theme> {
+    pub(crate) fn catalog(themes_dir: Option<&Path>) -> Vec<Theme> {
         let mut catalog: Vec<Theme> = BUILTIN_NAMES.iter().map(|n| Self::by_name(n)).collect();
         if let Some(dir) = themes_dir {
             let mut user = Self::load_user_themes(dir);
@@ -119,7 +119,7 @@ impl Theme {
         })
     }
 
-    pub fn by_name(name: &str) -> Self {
+    pub(crate) fn by_name(name: &str) -> Self {
         match name {
             "tokyonight" | "tokyo-night" => Self::tokyonight(),
             "catppuccin" => Self::catppuccin(),
@@ -130,7 +130,7 @@ impl Theme {
         }
     }
 
-    pub fn nightfox() -> Self {
+    pub(crate) fn nightfox() -> Self {
         Self {
             name: "nightfox".into(),
             border: Color::Rgb(0x71, 0x83, 0x9b),
@@ -146,7 +146,7 @@ impl Theme {
         }
     }
 
-    pub fn tokyonight() -> Self {
+    pub(crate) fn tokyonight() -> Self {
         Self {
             name: "tokyonight".into(),
             border: Color::Rgb(0x56, 0x5f, 0x89),
@@ -162,7 +162,7 @@ impl Theme {
         }
     }
 
-    pub fn catppuccin() -> Self {
+    pub(crate) fn catppuccin() -> Self {
         // Mocha variant
         Self {
             name: "catppuccin".into(),
@@ -179,7 +179,7 @@ impl Theme {
         }
     }
 
-    pub fn gruvbox() -> Self {
+    pub(crate) fn gruvbox() -> Self {
         Self {
             name: "gruvbox".into(),
             border: Color::Rgb(0x66, 0x5c, 0x54),
@@ -195,7 +195,7 @@ impl Theme {
         }
     }
 
-    pub fn dracula() -> Self {
+    pub(crate) fn dracula() -> Self {
         Self {
             name: "dracula".into(),
             border: Color::Rgb(0x62, 0x72, 0xa4),
@@ -211,7 +211,7 @@ impl Theme {
         }
     }
 
-    pub fn rosepine() -> Self {
+    pub(crate) fn rosepine() -> Self {
         Self {
             name: "rosepine".into(),
             border: Color::Rgb(0x6e, 0x6a, 0x86),
@@ -227,7 +227,7 @@ impl Theme {
         }
     }
 
-    pub fn state_color(&self, state: &SessionState) -> Color {
+    pub(crate) fn state_color(&self, state: &SessionState) -> Color {
         match state {
             SessionState::Processing => self.processing,
             SessionState::ToolRunning(_) => self.processing,
@@ -238,7 +238,7 @@ impl Theme {
         }
     }
 
-    pub fn state_indicator(&self, state: &SessionState) -> &'static str {
+    pub(crate) fn state_indicator(&self, state: &SessionState) -> &'static str {
         match state {
             SessionState::Processing => "●",
             SessionState::ToolRunning(_) => "◉",

@@ -6,7 +6,7 @@ use super::session::{Session, SessionId};
 /// outlive a `&mut Registry` borrow, but ids can. `get()` / `iter()`
 /// resolve ids back to `&Session` via the registry on demand.
 #[derive(Default)]
-pub struct FilteredView {
+pub(crate) struct FilteredView {
     ids: Vec<SessionId>,
     registry_version: u64,
     query_lower: Option<String>,
@@ -14,14 +14,14 @@ pub struct FilteredView {
 }
 
 impl FilteredView {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Rebuild only when the registry version or query has changed
     /// since the last refresh. Cheap when nothing has changed (one
     /// comparison, no allocations).
-    pub fn refresh(&mut self, registry: &SessionRegistry, query: Option<&str>) {
+    pub(crate) fn refresh(&mut self, registry: &SessionRegistry, query: Option<&str>) {
         let new_query: Option<String> = query
             .filter(|q| !q.is_empty())
             .map(|q| q.to_ascii_lowercase());
@@ -56,16 +56,16 @@ impl FilteredView {
         self.primed = true;
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.ids.len()
     }
 
-    pub fn get<'r>(&self, registry: &'r SessionRegistry, index: usize) -> Option<&'r Session> {
+    pub(crate) fn get<'r>(&self, registry: &'r SessionRegistry, index: usize) -> Option<&'r Session> {
         let id = self.ids.get(index)?;
         registry.get(id.as_str())
     }
 
-    pub fn iter<'r>(
+    pub(crate) fn iter<'r>(
         &'r self,
         registry: &'r SessionRegistry,
     ) -> impl Iterator<Item = &'r Session> + 'r {

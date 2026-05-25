@@ -15,19 +15,19 @@ use crate::tui::theme::Theme;
 /// each field through `render`/`render_status_bar` separately tripped
 /// `clippy::too_many_arguments` and made adding a new field a search-
 /// and-replace across two signatures. One struct, one threading.
-pub struct RenderContext<'a> {
-    pub registry: &'a SessionRegistry,
-    pub sessions: &'a [&'a Session],
-    pub selected: usize,
-    pub theme: &'a Theme,
-    pub status_message: Option<&'a StatusMessage>,
-    pub notifications_muted: bool,
-    pub update_banner: Option<&'a str>,
-    pub search_query: Option<&'a str>,
-    pub claude_installed: bool,
+pub(crate) struct RenderContext<'a> {
+    pub(crate) registry: &'a SessionRegistry,
+    pub(crate) sessions: &'a [&'a Session],
+    pub(crate) selected: usize,
+    pub(crate) theme: &'a Theme,
+    pub(crate) status_message: Option<&'a StatusMessage>,
+    pub(crate) notifications_muted: bool,
+    pub(crate) update_banner: Option<&'a str>,
+    pub(crate) search_query: Option<&'a str>,
+    pub(crate) claude_installed: bool,
 }
 
-pub fn render(frame: &mut Frame, area: Rect, ctx: RenderContext<'_>) {
+pub(crate) fn render(frame: &mut Frame, area: Rect, ctx: RenderContext<'_>) {
     if ctx.sessions.is_empty() {
         if let Some(q) = ctx.search_query.filter(|q| !q.is_empty()) {
             render_search_empty(frame, area, ctx.theme, q);

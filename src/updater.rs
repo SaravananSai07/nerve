@@ -79,7 +79,7 @@ fn fetch_latest_version() -> Option<String> {
 /// Spawn a background thread that hits crates.io if the cached check is older
 /// than the TTL. Always non-blocking and best-effort — network failures are
 /// silently ignored. Result is persisted for the next launch to read.
-pub fn maybe_check_in_background(paths: &Paths, enabled: bool) {
+pub(crate) fn maybe_check_in_background(paths: &Paths, enabled: bool) {
     if !enabled {
         return;
     }
@@ -110,7 +110,7 @@ pub fn maybe_check_in_background(paths: &Paths, enabled: bool) {
 /// a sibling process / sync corruption / a malicious helper writing into
 /// `$XDG_CONFIG_HOME` could plant a value the network fix never sees. Strip
 /// on read so the rendering path can trust whatever the cache yields.
-pub fn pending_update(paths: &Paths, current: &str) -> Option<String> {
+pub(crate) fn pending_update(paths: &Paths, current: &str) -> Option<String> {
     let cache = read_cache(&paths.update_cache_file());
     if cache.last_known_version.is_empty() {
         return None;
@@ -139,7 +139,7 @@ pub fn pending_update(paths: &Paths, current: &str) -> Option<String> {
 /// Used by the banner-suppression path to ignore yanked-release
 /// downgrades — if `pending_update` reverts to a version older than
 /// the one a user explicitly dismissed, we don't bother them again.
-pub fn is_newer(latest: &str, current: &str) -> bool {
+pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
     parse(latest) > parse(current)
 }

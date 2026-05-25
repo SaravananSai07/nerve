@@ -2,17 +2,17 @@ use crate::config::NotificationConfig;
 use crate::platform::{Bridge, SessionTarget};
 use crate::state::session::SessionState;
 
-pub struct Notifier {
+pub(crate) struct Notifier {
     config: NotificationConfig,
     terminal_app: Option<String>,
 }
 
 impl Notifier {
-    pub fn new(config: NotificationConfig, terminal_app: Option<String>) -> Self {
+    pub(crate) fn new(config: NotificationConfig, terminal_app: Option<String>) -> Self {
         Self { config, terminal_app }
     }
 
-    pub fn maybe_notify(
+    pub(crate) fn maybe_notify(
         &self,
         session_name: &str,
         state: &SessionState,

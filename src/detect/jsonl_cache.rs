@@ -11,7 +11,7 @@ use crate::state::session::{SessionState, TokenUsage};
 /// sessions. The inode component also catches log rotation / truncation
 /// at the same path so usage isn't double-counted across rotations.
 #[derive(Default)]
-pub struct JsonlCache {
+pub(crate) struct JsonlCache {
     entries: HashMap<PathBuf, JsonlEntry>,
 }
 
@@ -27,7 +27,7 @@ struct JsonlEntry {
 }
 
 impl JsonlCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -41,7 +41,7 @@ impl JsonlCache {
     /// can live in the `detect` layer without depending on the JSONL
     /// parser concretely; the only call site is `load_session`, which
     /// supplies the real functions.
-    pub fn read_or_refresh<S, U>(
+    pub(crate) fn read_or_refresh<S, U>(
         &mut self,
         path: &Path,
         parse_state: S,
@@ -100,7 +100,7 @@ impl JsonlCache {
     /// Drop cache entries whose JSONL files no longer reference an
     /// active session. Called once per discovery scan so the cache
     /// doesn't grow unbounded across days of uptime.
-    pub fn retain_present<F: Fn(&Path) -> bool>(&mut self, keep: F) {
+    pub(crate) fn retain_present<F: Fn(&Path) -> bool>(&mut self, keep: F) {
         self.entries.retain(|path, _| keep(path));
     }
 }

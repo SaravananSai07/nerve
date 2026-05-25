@@ -50,7 +50,7 @@ fn sessions_dir() -> Option<PathBuf> {
 /// `Session` that would carry meaningless registry-owned fields
 /// (state-machine confirmation counter, empty activity history,
 /// zero-duration since "now").
-pub fn discover_sessions() -> Vec<DiscoverySnapshot> {
+pub(crate) fn discover_sessions() -> Vec<DiscoverySnapshot> {
     let table = process::ProcessTable::refreshed();
     let mut cache = JsonlCache::new();
     let mut branch_cache = BranchCache::new();
@@ -61,7 +61,7 @@ pub fn discover_sessions() -> Vec<DiscoverySnapshot> {
 /// and branch cache. On an idle session this collapses to one
 /// `stat(2)` per JSONL plus one `stat(2)` per HEAD — no reads, no
 /// re-walks.
-pub fn discover_sessions_with(
+pub(crate) fn discover_sessions_with(
     table: &process::ProcessTable,
     cache: &mut JsonlCache,
     branch_cache: &mut BranchCache,
@@ -639,7 +639,7 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
     crate::util::text::truncate_graphemes(&cleaned, 80)
 }
 
-pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
+pub(crate) fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
     let mut file = match open_jsonl(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
@@ -751,7 +751,7 @@ pub fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
 /// function. Between a separate resolve-then-kill the kernel could
 /// recycle the pid to an unrelated user process and we'd SIGTERM
 /// that instead.
-pub fn kill_by_session_id(session_id: &str) -> Result<u32, String> {
+pub(crate) fn kill_by_session_id(session_id: &str) -> Result<u32, String> {
     let dir = sessions_dir().ok_or_else(|| "no sessions dir".to_string())?;
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
 

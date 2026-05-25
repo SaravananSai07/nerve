@@ -5,7 +5,7 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 
-pub fn render(frame: &mut Frame, theme: &Theme, input: &str) {
+pub(crate) fn render(frame: &mut Frame, theme: &Theme, input: &str) {
     let area = super::centered(frame.area(), 44, 5);
 
     frame.render_widget(Clear, area);

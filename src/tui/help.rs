@@ -46,7 +46,7 @@ const BINDINGS: &[HelpLine] = &[
     HelpLine::Note("~/.config/nerve/prefs.toml  (mute, dismissed banner, etc.)"),
 ];
 
-pub fn render(frame: &mut Frame, theme: &Theme) {
+pub(crate) fn render(frame: &mut Frame, theme: &Theme) {
     let frame_area = frame.area();
     // Cap height to the available frame so the overlay clips
     // gracefully on small terminals rather than drawing partially

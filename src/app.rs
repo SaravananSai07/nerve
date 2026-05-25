@@ -64,7 +64,7 @@ enum Overlay {
     ConfirmPreview,
 }
 
-pub struct App {
+pub(crate) struct App {
     paths: Paths,
     shutdown: ShutdownFlag,
     config: Config,
@@ -116,7 +116,7 @@ struct PendingNotification {
 }
 
 impl App {
-    pub fn new(paths: Paths, shutdown: ShutdownFlag) -> Self {
+    pub(crate) fn new(paths: Paths, shutdown: ShutdownFlag) -> Self {
         let config = Config::load(&paths);
         let themes_dir = paths.themes_dir();
         let themes = Theme::catalog(Some(&themes_dir));
@@ -231,7 +231,7 @@ impl App {
         Ok(())
     }
 
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+    pub(crate) fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         // Seed the registry from the worker's first snapshot so the
         // initial paint isn't blank. Generous 500 ms cap — in practice
         // the worker produces its first snapshot in ~50-100 ms on a

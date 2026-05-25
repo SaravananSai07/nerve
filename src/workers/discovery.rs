@@ -19,8 +19,8 @@ use crate::{log_err, log_warn};
 /// Handle to a background discovery worker. Drop the handle to ask the
 /// worker to exit (the dropped receiver makes the worker's next `send`
 /// fail, which it interprets as "consumer is gone, exit").
-pub struct DiscoveryWorker {
-    pub rx: Receiver<Vec<DiscoverySnapshot>>,
+pub(crate) struct DiscoveryWorker {
+    pub(crate) rx: Receiver<Vec<DiscoverySnapshot>>,
     /// Sender for the wake-channel. Kept alive so the worker's
     /// `recv_timeout(refresh_interval)` keeps timing out instead of
     /// hitting `Disconnected` and exiting. The FS watcher clones this
@@ -48,7 +48,7 @@ pub struct DiscoveryWorker {
 /// Discovery off the UI thread keeps a slow disk from freezing the
 /// TUI. The FS watcher means an idle nerve sleeps indefinitely —
 /// the FS event drives wakes rather than a poll.
-pub fn spawn(
+pub(crate) fn spawn(
     refresh_interval: Duration,
     process_scan_interval: Duration,
     sessions_dir: PathBuf,
@@ -206,7 +206,7 @@ impl DiscoveryWorker {
     /// intermediate ones would only ever be displayed for one frame
     /// each, so coalescing to "latest wins" is correct). Returns
     /// `None` if the channel is empty.
-    pub fn latest_snapshot(&self) -> Option<Vec<DiscoverySnapshot>> {
+    pub(crate) fn latest_snapshot(&self) -> Option<Vec<DiscoverySnapshot>> {
         let mut latest = None;
         while let Ok(snap) = self.rx.try_recv() {
             latest = Some(snap);
@@ -219,14 +219,14 @@ impl DiscoveryWorker {
     /// doesn't paint an empty screen for a second while waiting for
     /// the worker's first cycle. All subsequent reads use
     /// `latest_snapshot` (non-blocking).
-    pub fn next_snapshot_blocking(&self, timeout: Duration) -> Option<Vec<DiscoverySnapshot>> {
+    pub(crate) fn next_snapshot_blocking(&self, timeout: Duration) -> Option<Vec<DiscoverySnapshot>> {
         self.rx.recv_timeout(timeout).ok()
     }
 
     /// False once the worker thread caught a panic on its way down.
     /// The UI uses this to surface a status banner — without it, a
     /// dead worker just looks like an idle one.
-    pub fn is_alive(&self) -> bool {
+    pub(crate) fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }
 }

@@ -1,5 +1,5 @@
 #[cfg(target_os = "macos")]
-pub mod applescript;
-pub mod focus_arg;
-pub mod sanitize;
-pub mod text;
+pub(crate) mod applescript;
+pub(crate) mod focus_arg;
+pub(crate) mod sanitize;
+pub(crate) mod text;

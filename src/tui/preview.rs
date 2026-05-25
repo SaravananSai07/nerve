@@ -12,7 +12,7 @@ use super::theme::Theme;
 /// `Overlay::Preview` variant in `app.rs` so closing the overlay
 /// drops the captured buffer with it. The discriminant also
 /// doubles as the "LIVE vs LOG" header label.
-pub enum PreviewSource {
+pub(crate) enum PreviewSource {
     /// Captured terminal scrollback from Ghostty's screen capture.
     TerminalCapture(Vec<String>),
     /// Parsed JSONL entries from the session transcript.
@@ -30,7 +30,7 @@ impl PreviewSource {
     /// Total scrollable lines. Used to clamp the scroll cursor at the
     /// handler so holding `j` past the bottom doesn't require an equal
     /// number of `k` presses to recover.
-    pub fn line_count(&self) -> usize {
+    pub(crate) fn line_count(&self) -> usize {
         match self {
             Self::TerminalCapture(lines) => lines.len(),
             Self::LogEntries(entries) => entries.len(),
@@ -38,7 +38,7 @@ impl PreviewSource {
     }
 }
 
-pub fn render(
+pub(crate) fn render(
     frame: &mut Frame,
     theme: &Theme,
     session: &Session,

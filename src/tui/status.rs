@@ -13,21 +13,21 @@ enum StatusKind {
     Error,
 }
 
-pub struct StatusMessage {
+pub(crate) struct StatusMessage {
     kind: StatusKind,
-    pub text: String,
+    pub(crate) text: String,
 }
 
 impl StatusMessage {
-    pub fn info(text: impl Into<String>) -> Self {
+    pub(crate) fn info(text: impl Into<String>) -> Self {
         Self { kind: StatusKind::Info, text: text.into() }
     }
 
-    pub fn success(text: impl Into<String>) -> Self {
+    pub(crate) fn success(text: impl Into<String>) -> Self {
         Self { kind: StatusKind::Success, text: text.into() }
     }
 
-    pub fn error(text: impl Into<String>) -> Self {
+    pub(crate) fn error(text: impl Into<String>) -> Self {
         Self { kind: StatusKind::Error, text: text.into() }
     }
 
@@ -35,7 +35,7 @@ impl StatusMessage {
     /// the StatusKind → Color mapping in one place so a second
     /// renderer (e.g. a future preview-overlay banner) doesn't need
     /// to import the enum to match on it.
-    pub fn color(&self, theme: &Theme) -> Color {
+    pub(crate) fn color(&self, theme: &Theme) -> Color {
         match self.kind {
             StatusKind::Info => theme.text,
             StatusKind::Success => theme.processing,

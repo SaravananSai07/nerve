@@ -9,12 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// no-op.
 static GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-pub struct TerminalGuard {
+pub(crate) struct TerminalGuard {
     terminal: DefaultTerminal,
 }
 
 impl TerminalGuard {
-    pub fn install() -> std::io::Result<Self> {
+    pub(crate) fn install() -> std::io::Result<Self> {
         // Install the panic hook before touching the terminal so that a panic
         // inside ratatui::init() (rare but possible) still calls restore().
         let previous = std::panic::take_hook();
@@ -36,7 +36,7 @@ impl TerminalGuard {
         Ok(Self { terminal })
     }
 
-    pub fn terminal(&mut self) -> &mut DefaultTerminal {
+    pub(crate) fn terminal(&mut self) -> &mut DefaultTerminal {
         &mut self.terminal
     }
 }

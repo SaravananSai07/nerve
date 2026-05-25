@@ -10,12 +10,12 @@ use crate::paths::Paths;
 /// the value releases the lease (kernel reaps the fd on close → flock auto-
 /// releases). The pid of the holder is written into the file for diagnostics.
 #[derive(Debug)]
-pub struct LockFile {
+pub(crate) struct LockFile {
     _lock: Flock<File>,
 }
 
 #[derive(Debug)]
-pub enum LockError {
+pub(crate) enum LockError {
     AlreadyHeld { pid: Option<u32> },
     Io(std::io::Error),
 }
@@ -31,7 +31,7 @@ impl std::fmt::Display for LockError {
 }
 
 impl LockFile {
-    pub fn acquire(paths: &Paths) -> Result<Self, LockError> {
+    pub(crate) fn acquire(paths: &Paths) -> Result<Self, LockError> {
         paths.ensure_config_dir().map_err(LockError::Io)?;
         let path = paths.lock_file();
 

@@ -4,14 +4,14 @@ use std::str::FromStr;
 use crate::state::session::Session;
 
 #[cfg(target_os = "macos")]
-pub mod ghostty;
-pub mod tmux;
+pub(crate) mod ghostty;
+pub(crate) mod tmux;
 
-pub struct SessionTarget {
-    pub cwd: String,
-    pub name: String,
-    pub dir_name: String,
-    pub tty: Option<String>,
+pub(crate) struct SessionTarget {
+    pub(crate) cwd: String,
+    pub(crate) name: String,
+    pub(crate) dir_name: String,
+    pub(crate) tty: Option<String>,
 }
 
 impl From<&Session> for SessionTarget {
@@ -29,7 +29,7 @@ impl From<&Session> for SessionTarget {
     }
 }
 
-pub enum Bridge {
+pub(crate) enum Bridge {
     #[cfg(target_os = "macos")]
     Ghostty(ghostty::GhosttyBridge),
     Tmux(tmux::TmuxBridge),
@@ -42,7 +42,7 @@ pub enum Bridge {
 }
 
 impl Bridge {
-    pub fn auto_detect() -> Self {
+    pub(crate) fn auto_detect() -> Self {
         let term = std::env::var("TERM_PROGRAM").unwrap_or_default();
         match term.as_str() {
             #[cfg(target_os = "macos")]
@@ -58,7 +58,7 @@ impl Bridge {
         }
     }
 
-    pub fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
+    pub(crate) fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
         match self {
             #[cfg(target_os = "macos")]
             Self::Ghostty(g) => g.go_to_session(target),
@@ -69,7 +69,7 @@ impl Bridge {
         }
     }
 
-    pub fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
+    pub(crate) fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
         match self {
             #[cfg(target_os = "macos")]
             Self::Ghostty(g) => g.capture_screen(target),
@@ -78,7 +78,7 @@ impl Bridge {
         }
     }
 
-    pub fn resolve_id(&self, target: &SessionTarget) -> Option<BridgeId> {
+    pub(crate) fn resolve_id(&self, target: &SessionTarget) -> Option<BridgeId> {
         match self {
             #[cfg(target_os = "macos")]
             Self::Ghostty(g) => g.resolve_terminal_id(target).map(BridgeId::Ghostty),
@@ -87,19 +87,19 @@ impl Bridge {
         }
     }
 
-    pub fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         !matches!(self, Self::NoOp)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BridgeId {
+pub(crate) enum BridgeId {
     Ghostty(String),
     Tmux(String),
 }
 
 impl BridgeId {
-    pub fn focus(&self) -> anyhow::Result<()> {
+    pub(crate) fn focus(&self) -> anyhow::Result<()> {
         match self {
             #[cfg(target_os = "macos")]
             Self::Ghostty(id) => ghostty::focus_terminal(id),

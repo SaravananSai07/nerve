@@ -8,10 +8,10 @@ struct Pane {
     cwd: String,
 }
 
-pub struct TmuxBridge;
+pub(crate) struct TmuxBridge;
 
 impl TmuxBridge {
-    pub fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
+    pub(crate) fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
         let pane = self.find_pane(target)?;
 
         let output = Command::new("tmux")
@@ -74,14 +74,14 @@ impl TmuxBridge {
             .find(|p| p.cwd == target.cwd || std::path::Path::new(&p.cwd) == cwd_path)
     }
 
-    pub fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
+    pub(crate) fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
         let pane = self
             .find_pane(target)
             .ok_or_else(|| anyhow::anyhow!("no pane found for cwd {}", target.cwd))?;
         focus_pane(&pane.id)
     }
 
-    pub fn resolve_pane_id(&self, target: &SessionTarget) -> Option<String> {
+    pub(crate) fn resolve_pane_id(&self, target: &SessionTarget) -> Option<String> {
         self.find_pane(target).map(|p| p.id)
     }
 }

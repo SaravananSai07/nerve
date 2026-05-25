@@ -3,7 +3,7 @@
 /// against flicker in upstream signals (CPU spikes, transient file
 /// rewrites). `Session` uses this to debounce its `SessionState`.
 #[derive(Debug, Clone)]
-pub struct StateMachine<T: PartialEq + Clone> {
+pub(crate) struct StateMachine<T: PartialEq + Clone> {
     current: T,
     pending: Option<T>,
     count: u8,
@@ -11,7 +11,7 @@ pub struct StateMachine<T: PartialEq + Clone> {
 }
 
 impl<T: PartialEq + Clone> StateMachine<T> {
-    pub fn new(initial: T, threshold: u8) -> Self {
+    pub(crate) fn new(initial: T, threshold: u8) -> Self {
         debug_assert!(threshold > 0, "threshold must be at least 1");
         Self {
             current: initial,
@@ -21,14 +21,14 @@ impl<T: PartialEq + Clone> StateMachine<T> {
         }
     }
 
-    pub fn current(&self) -> &T {
+    pub(crate) fn current(&self) -> &T {
         &self.current
     }
 
     /// Propose a transition to `next`. Returns true when the proposal has
     /// been confirmed `threshold` times in a row and the current value has
     /// been updated. A different proposal resets the counter.
-    pub fn propose(&mut self, next: T) -> bool {
+    pub(crate) fn propose(&mut self, next: T) -> bool {
         if next == self.current {
             self.pending = None;
             self.count = 0;
@@ -51,7 +51,7 @@ impl<T: PartialEq + Clone> StateMachine<T> {
     /// Force an immediate transition without confirmations. Used when
     /// authority comes from a side channel (e.g. discovery says the
     /// session vanished — mark it `Vanished` straight away).
-    pub fn set(&mut self, next: T) {
+    pub(crate) fn set(&mut self, next: T) {
         if self.current != next {
             self.current = next;
         }

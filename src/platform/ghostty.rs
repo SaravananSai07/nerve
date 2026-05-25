@@ -16,7 +16,7 @@ struct TerminalInfo {
     name: String,
 }
 
-pub struct GhosttyBridge {
+pub(crate) struct GhosttyBridge {
     /// Resolved lazily on a background thread so the 100 ms
     /// osascript+sleep probe doesn't gate startup. Reads see
     /// `None` until detection finishes; that window only affects
@@ -27,7 +27,7 @@ pub struct GhosttyBridge {
 }
 
 impl GhosttyBridge {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         // Detection involves an osascript round-trip + a 100 ms
         // sleep to let Ghostty propagate the title change. Used to
         // happen synchronously during `App::new`; now it's deferred
@@ -56,7 +56,7 @@ impl GhosttyBridge {
             .and_then(|o| o.as_deref())
     }
 
-    pub fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
+    pub(crate) fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
         let terminals = query_terminals().ok()?;
 
         let found = find_terminal_for_session(
@@ -128,7 +128,7 @@ end run"#;
         Some(text)
     }
 
-    pub fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
+    pub(crate) fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
         let terminals = query_terminals()?;
 
         let found = find_terminal_for_session(
@@ -141,7 +141,7 @@ end run"#;
         focus_terminal(&found.terminal_id)
     }
 
-    pub fn resolve_terminal_id(&self, target: &SessionTarget) -> Option<String> {
+    pub(crate) fn resolve_terminal_id(&self, target: &SessionTarget) -> Option<String> {
         let terminals = query_terminals().ok()?;
         find_terminal_for_session(
             &terminals,

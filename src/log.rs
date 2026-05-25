@@ -7,7 +7,7 @@ use std::time::SystemTime;
 const FILE_MAX_BYTES: u64 = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Level {
+pub(crate) enum Level {
     Info,
     Warn,
     Error,
@@ -29,11 +29,11 @@ impl Level {
 /// without ordering ceremony.
 static SINK: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
-pub fn init(file: Option<PathBuf>) {
+pub(crate) fn init(file: Option<PathBuf>) {
     let _ = SINK.set(Mutex::new(file));
 }
 
-pub fn record(level: Level, message: String) {
+pub(crate) fn record(level: Level, message: String) {
     let Some(sink) = SINK.get() else { return };
     let Ok(guard) = sink.lock() else { return };
     let Some(path) = guard.as_deref() else { return };

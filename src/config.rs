@@ -7,25 +7,25 @@ use crate::paths::Paths;
 use crate::util::sanitize::strip_ansi;
 
 #[derive(Deserialize, Default)]
-pub struct Config {
+pub(crate) struct Config {
     #[serde(default)]
-    pub general: GeneralConfig,
+    pub(crate) general: GeneralConfig,
     #[serde(default)]
-    pub appearance: AppearanceConfig,
+    pub(crate) appearance: AppearanceConfig,
     #[serde(default)]
-    pub notifications: NotificationConfig,
+    pub(crate) notifications: NotificationConfig,
     #[serde(default)]
-    pub updates: UpdatesConfig,
+    pub(crate) updates: UpdatesConfig,
     #[serde(default)]
-    pub session_names: HashMap<String, String>,
+    pub(crate) session_names: HashMap<String, String>,
     #[serde(skip)]
-    pub load_error: Option<String>,
+    pub(crate) load_error: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
 #[serde(default)]
-pub struct UpdatesConfig {
-    pub check_on_launch: bool,
+pub(crate) struct UpdatesConfig {
+    pub(crate) check_on_launch: bool,
 }
 
 impl Default for UpdatesConfig {
@@ -38,11 +38,11 @@ impl Default for UpdatesConfig {
 
 #[derive(Deserialize, Clone)]
 #[serde(default)]
-pub struct NotificationConfig {
-    pub on_complete: bool,
-    pub on_waiting: bool,
-    pub on_error: bool,
-    pub sound: bool,
+pub(crate) struct NotificationConfig {
+    pub(crate) on_complete: bool,
+    pub(crate) on_waiting: bool,
+    pub(crate) on_error: bool,
+    pub(crate) sound: bool,
 }
 
 impl Default for NotificationConfig {
@@ -58,10 +58,10 @@ impl Default for NotificationConfig {
 
 #[derive(Deserialize)]
 #[serde(default)]
-pub struct GeneralConfig {
-    pub refresh_interval_ms: u64,
-    pub process_scan_interval_ms: u64,
-    pub terminal: String,
+pub(crate) struct GeneralConfig {
+    pub(crate) refresh_interval_ms: u64,
+    pub(crate) process_scan_interval_ms: u64,
+    pub(crate) terminal: String,
 }
 
 impl Default for GeneralConfig {
@@ -76,8 +76,8 @@ impl Default for GeneralConfig {
 
 #[derive(Deserialize)]
 #[serde(default)]
-pub struct AppearanceConfig {
-    pub theme: String,
+pub(crate) struct AppearanceConfig {
+    pub(crate) theme: String,
 }
 
 impl Default for AppearanceConfig {
@@ -89,7 +89,7 @@ impl Default for AppearanceConfig {
 }
 
 impl Config {
-    pub fn load(paths: &Paths) -> Self {
+    pub(crate) fn load(paths: &Paths) -> Self {
         let path = paths.config_file();
         let contents = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -136,7 +136,7 @@ impl Config {
         }
     }
 
-    pub fn session_name_for(&self, cwd: &str) -> Option<&String> {
+    pub(crate) fn session_name_for(&self, cwd: &str) -> Option<&String> {
         self.session_names.get(cwd)
     }
 }

@@ -1,1 +1,1 @@
-pub mod discovery;
+pub(crate) mod discovery;

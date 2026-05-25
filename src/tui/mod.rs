@@ -1,15 +1,15 @@
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 
-pub mod cards;
-pub mod confirm_kill;
-pub mod confirm_preview;
-pub mod help;
-pub mod preview;
-pub mod rename;
-pub mod status;
-pub mod theme;
+pub(crate) mod cards;
+pub(crate) mod confirm_kill;
+pub(crate) mod confirm_preview;
+pub(crate) mod help;
+pub(crate) mod preview;
+pub(crate) mod rename;
+pub(crate) mod status;
+pub(crate) mod theme;
 
-pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     // Clamp to the available area so a request larger than the
     // current frame returns a Rect that still fits (the overlay box
     // will be smaller than asked-for, but it won't clip off-screen

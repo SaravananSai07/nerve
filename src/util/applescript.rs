@@ -6,7 +6,7 @@ use std::process::{Command, Output, Stdio};
 /// `item N of argv`. This is the only safe way to feed user-controlled
 /// strings to `osascript(1)` — string interpolation invariably leaves
 /// injection holes (newlines, comment markers, `¬` continuation, etc.).
-pub fn run(script: &str, args: &[&str]) -> std::io::Result<Output> {
+pub(crate) fn run(script: &str, args: &[&str]) -> std::io::Result<Output> {
     let mut cmd = Command::new("osascript");
     cmd.arg("-e").arg(script).arg("--");
     for a in args {
@@ -18,7 +18,7 @@ pub fn run(script: &str, args: &[&str]) -> std::io::Result<Output> {
 
 /// Spawn the same shape of invocation but detach (no output capture).
 /// Used by the notification path which fires and forgets.
-pub fn spawn(script: &str, args: &[&str]) -> std::io::Result<std::process::Child> {
+pub(crate) fn spawn(script: &str, args: &[&str]) -> std::io::Result<std::process::Child> {
     let mut cmd = Command::new("osascript");
     cmd.arg("-e").arg(script).arg("--");
     for a in args {

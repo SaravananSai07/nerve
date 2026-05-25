@@ -4,7 +4,7 @@ use std::time::Instant;
 use super::session::{Session, SessionId, SessionState};
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum SortMode {
+pub(crate) enum SortMode {
     Stable,
     State,
     Name,
@@ -12,7 +12,7 @@ pub enum SortMode {
 }
 
 impl SortMode {
-    pub fn next(self) -> Self {
+    pub(crate) fn next(self) -> Self {
         match self {
             Self::Stable => Self::State,
             Self::State => Self::Name,
@@ -21,7 +21,7 @@ impl SortMode {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Stable => "stable",
             Self::State => "state",
@@ -31,7 +31,7 @@ impl SortMode {
     }
 }
 
-pub struct SessionRegistry {
+pub(crate) struct SessionRegistry {
     sessions: HashMap<SessionId, Session>,
     order: Vec<SessionId>,
     sort_mode: SortMode,
@@ -43,7 +43,7 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sessions: HashMap::new(),
             order: Vec::new(),
@@ -52,18 +52,18 @@ impl SessionRegistry {
         }
     }
 
-    pub fn version(&self) -> u64 {
+    pub(crate) fn version(&self) -> u64 {
         self.version
     }
 
     /// Announce that the rendered view should rebuild. Callers
     /// mutating through `get_mut` use this to flag changes the
     /// registry can't otherwise detect.
-    pub fn bump_version(&mut self) {
+    pub(crate) fn bump_version(&mut self) {
         self.version = self.version.wrapping_add(1);
     }
 
-    pub fn upsert(&mut self, session: Session) {
+    pub(crate) fn upsert(&mut self, session: Session) {
         let id = session.id.clone();
         if !self.sessions.contains_key(&id) {
             self.order.push(id.clone());
@@ -72,18 +72,18 @@ impl SessionRegistry {
         self.bump_version();
     }
 
-    pub fn get(&self, id: &str) -> Option<&Session> {
+    pub(crate) fn get(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
     }
 
-    pub fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
+    pub(crate) fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
         // Callers must call `bump_version()` after a mutation that
         // affects the rendered view (state, name, etc.); the registry
         // can't detect that on its own.
         self.sessions.get_mut(id)
     }
 
-    pub fn sorted_sessions(&self) -> Vec<&Session> {
+    pub(crate) fn sorted_sessions(&self) -> Vec<&Session> {
         let mut sessions: Vec<&Session> = self
             .order
             .iter()
@@ -116,24 +116,24 @@ impl SessionRegistry {
         sessions
     }
 
-    pub fn cycle_sort(&mut self) {
+    pub(crate) fn cycle_sort(&mut self) {
         self.sort_mode = self.sort_mode.next();
         self.bump_version();
     }
 
-    pub fn sort_mode(&self) -> SortMode {
+    pub(crate) fn sort_mode(&self) -> SortMode {
         self.sort_mode
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.sessions.len()
     }
 
-    pub fn total_cost_usd(&self) -> f64 {
+    pub(crate) fn total_cost_usd(&self) -> f64 {
         self.sessions.values().map(|s| s.usage.cost_usd).sum()
     }
 
-    pub fn count_by_state(&self) -> StateCount {
+    pub(crate) fn count_by_state(&self) -> StateCount {
         let mut count = StateCount::default();
         for session in self.sessions.values() {
             match session.state() {
@@ -148,7 +148,7 @@ impl SessionRegistry {
         count
     }
 
-    pub fn mark_stale(&mut self, id: &str) {
+    pub(crate) fn mark_stale(&mut self, id: &str) {
         if let Some(session) = self.sessions.get_mut(id) {
             session.set_state(SessionState::Vanished);
             self.bump_version();
@@ -160,7 +160,7 @@ impl SessionRegistry {
     /// that the session ended. `Dormant` (process alive, idle ≥ 48 h)
     /// is kept indefinitely — the user may resume it and the tab/
     /// pane info is still valid.
-    pub fn remove_stale(&mut self, vanished_grace_secs: u64) {
+    pub(crate) fn remove_stale(&mut self, vanished_grace_secs: u64) {
         let active_cwds: HashSet<std::path::PathBuf> = self
             .sessions
             .values()
@@ -188,7 +188,7 @@ impl SessionRegistry {
         }
     }
 
-    pub fn shift_all_activity(&mut self) {
+    pub(crate) fn shift_all_activity(&mut self) {
         for session in self.sessions.values_mut() {
             session.shift_activity();
         }
@@ -198,7 +198,7 @@ impl SessionRegistry {
         // filter — bumping would defeat the steady-state win.
     }
 
-    pub fn re_disambiguate_names(&mut self) {
+    pub(crate) fn re_disambiguate_names(&mut self) {
         let reserved: HashSet<String> = self
             .sessions
             .values()
@@ -249,13 +249,13 @@ impl SessionRegistry {
         }
     }
 
-    pub fn name_taken(&self, name: &str, exclude_id: &str) -> bool {
+    pub(crate) fn name_taken(&self, name: &str, exclude_id: &str) -> bool {
         self.sessions
             .iter()
             .any(|(id, s)| s.name() == name && id.as_str() != exclude_id)
     }
 
-    pub fn ids(&self) -> &[SessionId] {
+    pub(crate) fn ids(&self) -> &[SessionId] {
         &self.order
     }
 }
@@ -273,11 +273,11 @@ fn strip_disambiguation_suffix(name: &str) -> String {
 }
 
 #[derive(Default)]
-pub struct StateCount {
-    pub active: usize,
-    pub waiting: usize,
-    pub idle: usize,
-    pub error: usize,
-    pub dormant: usize,
-    pub vanished: usize,
+pub(crate) struct StateCount {
+    pub(crate) active: usize,
+    pub(crate) waiting: usize,
+    pub(crate) idle: usize,
+    pub(crate) error: usize,
+    pub(crate) dormant: usize,
+    pub(crate) vanished: usize,
 }

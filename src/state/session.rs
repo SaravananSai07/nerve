@@ -16,14 +16,14 @@ const CONFIRM_TICKS: u8 = 3;
 /// encode the `--resume` precedence rule in one place (the
 /// constructor) instead of scattering it through call sites.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-pub struct SessionId(String);
+pub(crate) struct SessionId(String);
 
 impl SessionId {
-    pub fn new(raw: impl Into<String>) -> Self {
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -59,20 +59,20 @@ impl From<&str> for SessionId {
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct TokenUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cost_usd: f64,
+pub(crate) struct TokenUsage {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_creation_tokens: u64,
+    pub(crate) cost_usd: f64,
 }
 
 impl TokenUsage {
-    pub fn total_tokens(&self) -> u64 {
+    pub(crate) fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_creation_tokens
     }
 
-    pub fn compact_display(&self) -> String {
+    pub(crate) fn compact_display(&self) -> String {
         let total_k = self.total_tokens() as f64 / 1000.0;
         if self.cost_usd >= 0.01 {
             format!("{:.0}k/${:.2}", total_k, self.cost_usd)
@@ -84,7 +84,7 @@ impl TokenUsage {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionState {
+pub(crate) enum SessionState {
     Processing,
     ToolRunning(String),
     WaitingForInput,
@@ -101,7 +101,7 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    pub fn sort_priority(&self) -> u8 {
+    pub(crate) fn sort_priority(&self) -> u8 {
         match self {
             Self::Processing => 0,
             Self::ToolRunning(_) => 1,
@@ -113,7 +113,7 @@ impl SessionState {
         }
     }
 
-    pub fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::Processing => "Processing".into(),
             Self::ToolRunning(tool) => format!("Tool: {tool}"),
@@ -128,7 +128,7 @@ impl SessionState {
     /// True for states where the session is no longer actively
     /// producing work — `start_kill` uses this to refuse a redundant
     /// SIGTERM on a dead/dormant session.
-    pub fn is_terminal(&self) -> bool {
+    pub(crate) fn is_terminal(&self) -> bool {
         matches!(self, Self::Vanished | Self::Dormant)
     }
 }
@@ -140,19 +140,19 @@ impl SessionState {
 /// belong to whichever `Session` the registry owns, and the worker
 /// has no business creating them just so they get overwritten.
 #[derive(Debug, Clone, Serialize)]
-pub struct DiscoverySnapshot {
-    pub id: SessionId,
-    pub cwd: PathBuf,
-    pub name: String,
-    pub tty: Option<String>,
-    pub branch: Option<String>,
-    pub cpu_percent: f32,
-    pub pid: Option<u32>,
-    pub detected_state: SessionState,
-    pub current_tool: Option<String>,
-    pub usage: TokenUsage,
-    pub jsonl_path: Option<PathBuf>,
-    pub jsonl_age_secs: Option<f64>,
+pub(crate) struct DiscoverySnapshot {
+    pub(crate) id: SessionId,
+    pub(crate) cwd: PathBuf,
+    pub(crate) name: String,
+    pub(crate) tty: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) cpu_percent: f32,
+    pub(crate) pid: Option<u32>,
+    pub(crate) detected_state: SessionState,
+    pub(crate) current_tool: Option<String>,
+    pub(crate) usage: TokenUsage,
+    pub(crate) jsonl_path: Option<PathBuf>,
+    pub(crate) jsonl_age_secs: Option<f64>,
 }
 
 // Clone is test-only. A Session carries registry-owned mutable state
@@ -162,30 +162,30 @@ pub struct DiscoverySnapshot {
 // to set up fixtures; production paths only ever hand around &Session
 // references.
 #[cfg_attr(test, derive(Clone))]
-pub struct Session {
-    pub id: SessionId,
-    pub cwd: PathBuf,
+pub(crate) struct Session {
+    pub(crate) id: SessionId,
+    pub(crate) cwd: PathBuf,
     name: String,
     state_changed_at: Instant,
-    pub tty: Option<String>,
-    pub branch: Option<String>,
-    pub cpu_percent: f32,
+    pub(crate) tty: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) cpu_percent: f32,
     /// Last tool the session was running. Sticks past the
     /// `ToolRunning` state into `Idle` so users can see what the
     /// session was last doing when it goes quiet — only `merge_snapshot`
     /// updates it (and only when the snapshot has a tool to give).
-    pub current_tool: Option<String>,
+    pub(crate) current_tool: Option<String>,
     activity: ActivityHistory,
-    pub jsonl_path: Option<PathBuf>,
+    pub(crate) jsonl_path: Option<PathBuf>,
     /// User-supplied custom name via the rename overlay. Privately
     /// owned because the legal write path is `rename_to`, which
     /// updates `name` in lockstep — letting external code flip this
     /// without setting the name (or vice versa) breaks the
     /// disambiguation logic in `registry::re_disambiguate_names`.
     renamed: bool,
-    pub usage: TokenUsage,
-    pub pid: Option<u32>,
-    pub jsonl_age_secs: Option<f64>,
+    pub(crate) usage: TokenUsage,
+    pub(crate) pid: Option<u32>,
+    pub(crate) jsonl_age_secs: Option<f64>,
     last_notified_state: Option<SessionState>,
     state_machine: StateMachine<SessionState>,
 }
@@ -210,7 +210,7 @@ impl Session {
     /// detected state — `propose_state` would otherwise keep the
     /// session at `Processing` for the first CONFIRM_TICKS while it
     /// confirmed its very first proposal.
-    pub fn from_snapshot(snap: DiscoverySnapshot) -> Self {
+    pub(crate) fn from_snapshot(snap: DiscoverySnapshot) -> Self {
         // The cwd basename is the default name unless an override has
         // already been applied upstream; sanitisation already happened
         // in `discovery_snapshot_from_session_file`.
@@ -238,7 +238,7 @@ impl Session {
     /// `from_snapshot`. The default initial state is `Processing` so
     /// that propose_state semantics match production behavior.
     #[cfg(test)]
-    pub fn new(id: SessionId, cwd: PathBuf) -> Self {
+    pub(crate) fn new(id: SessionId, cwd: PathBuf) -> Self {
         let name = cwd
             .file_name()
             .map(|n| strip_ansi(&n.to_string_lossy()).into_owned())
@@ -263,13 +263,13 @@ impl Session {
         }
     }
 
-    pub fn state(&self) -> &SessionState {
+    pub(crate) fn state(&self) -> &SessionState {
         self.state_machine.current()
     }
 
     /// Propose a transition. Returns true once the proposal has
     /// been confirmed `CONFIRM_TICKS` times in a row.
-    pub fn propose_state(&mut self, new_state: SessionState) -> bool {
+    pub(crate) fn propose_state(&mut self, new_state: SessionState) -> bool {
         if self.state_machine.propose(new_state) {
             self.state_changed_at = Instant::now();
             true
@@ -281,7 +281,7 @@ impl Session {
     /// Force a transition without confirmations. For when authority
     /// comes from a side channel — e.g. discovery says the session's
     /// file vanished, so we mark it `Vanished` right away.
-    pub fn set_state(&mut self, new_state: SessionState) {
+    pub(crate) fn set_state(&mut self, new_state: SessionState) {
         if self.state_machine.current() != &new_state {
             self.state_machine.set(new_state);
             self.state_changed_at = Instant::now();
@@ -294,7 +294,7 @@ impl Session {
     /// before checking. One clone on the positive path: the value is
     /// cloned once, then split between the stored last-notified slot
     /// and the returned outgoing-notification value.
-    pub fn take_pending_notification(&mut self) -> Option<SessionState> {
+    pub(crate) fn take_pending_notification(&mut self) -> Option<SessionState> {
         let current = self.state_machine.current();
         if self.last_notified_state.as_ref() == Some(current) {
             return None;
@@ -309,7 +309,7 @@ impl Session {
     /// touched — they belong to the registry, not the snapshot. The
     /// caller passes in any config-supplied name override; the
     /// renamed-by-user case wins over both.
-    pub fn merge_snapshot(&mut self, snap: DiscoverySnapshot, name_override: Option<&str>) {
+    pub(crate) fn merge_snapshot(&mut self, snap: DiscoverySnapshot, name_override: Option<&str>) {
         self.cpu_percent = snap.cpu_percent;
         self.tty = snap.tty;
         self.branch = snap.branch;
@@ -338,7 +338,7 @@ impl Session {
     /// work. The "record only when busy" invariant lives here so
     /// callers can't accidentally light up the sparkline during idle
     /// transitions.
-    pub fn record_activity_if_busy(&mut self, state: &SessionState) {
+    pub(crate) fn record_activity_if_busy(&mut self, state: &SessionState) {
         if matches!(state, SessionState::Processing | SessionState::ToolRunning(_)) {
             self.activity.record_activity();
         }
@@ -347,15 +347,15 @@ impl Session {
     /// Time-driven shift of the activity ring. Called once per scan
     /// by the registry so the sparkline keeps decaying when no events
     /// arrive.
-    pub fn shift_activity(&mut self) {
+    pub(crate) fn shift_activity(&mut self) {
         self.activity.shift_if_needed();
     }
 
-    pub fn activity_sparkline(&self) -> String {
+    pub(crate) fn activity_sparkline(&self) -> String {
         self.activity.sparkline()
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
@@ -365,7 +365,7 @@ impl Session {
     /// name-ingestion point that doesn't go through the snapshot
     /// pipeline, so the same `strip_ansi` + control-char filter runs
     /// here for parity.
-    pub fn rename_to(&mut self, raw: String) {
+    pub(crate) fn rename_to(&mut self, raw: String) {
         self.name = strip_ansi(&raw)
             .into_owned()
             .chars()
@@ -377,14 +377,14 @@ impl Session {
     /// Automatic display name. The registry's disambiguation pass
     /// calls this to apply `(N)` suffixes when multiple sessions
     /// share a base; user renames are protected.
-    pub fn set_auto_name(&mut self, name: String) {
+    pub(crate) fn set_auto_name(&mut self, name: String) {
         if self.renamed {
             return;
         }
         self.name = name;
     }
 
-    pub fn is_renamed(&self) -> bool {
+    pub(crate) fn is_renamed(&self) -> bool {
         self.renamed
     }
 
@@ -392,22 +392,22 @@ impl Session {
     /// own `Instant::now()`. Render and sort paths use
     /// `state_duration_at` with a frame-level `now` instead, so all
     /// cards in one frame share a single timestamp.
-    pub fn state_duration(&self) -> std::time::Duration {
+    pub(crate) fn state_duration(&self) -> std::time::Duration {
         self.state_duration_at(Instant::now())
     }
 
-    pub fn state_duration_at(&self, now: Instant) -> std::time::Duration {
+    pub(crate) fn state_duration_at(&self, now: Instant) -> std::time::Duration {
         // `saturating_duration_since` so a clock that briefly walks
         // backwards (suspend/resume) returns zero rather than an
         // absurd Duration.
         now.saturating_duration_since(self.state_changed_at)
     }
 
-    pub fn format_duration(&self) -> String {
+    pub(crate) fn format_duration(&self) -> String {
         self.format_duration_at(Instant::now())
     }
 
-    pub fn format_duration_at(&self, now: Instant) -> String {
+    pub(crate) fn format_duration_at(&self, now: Instant) -> String {
         let secs = self.state_duration_at(now).as_secs();
         if secs < 60 {
             format!("{secs}s")
@@ -422,7 +422,7 @@ impl Session {
 /// Caller must lowercase `query_lower` once per filter pass so we
 /// don't re-allocate per target. ASCII-only case folding —
 /// sufficient for filenames and paths.
-pub fn fuzzy_match(query_lower: &str, target: &str) -> bool {
+pub(crate) fn fuzzy_match(query_lower: &str, target: &str) -> bool {
     let mut qi = query_lower.chars().peekable();
     for tc in target.chars() {
         if qi.peek().copied() == Some(tc.to_ascii_lowercase()) {
@@ -433,7 +433,7 @@ pub fn fuzzy_match(query_lower: &str, target: &str) -> bool {
 }
 
 impl Session {
-    pub fn matches_query(&self, query_lower: &str) -> bool {
+    pub(crate) fn matches_query(&self, query_lower: &str) -> bool {
         if query_lower.is_empty() {
             return true;
         }
@@ -449,27 +449,27 @@ impl Session {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ActivityHistory {
+pub(crate) struct ActivityHistory {
     buckets: [bool; 10],
     #[serde(skip)]
     last_update: Instant,
 }
 
 impl ActivityHistory {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             buckets: [false; 10],
             last_update: Instant::now(),
         }
     }
 
-    pub fn record_activity(&mut self) {
+    pub(crate) fn record_activity(&mut self) {
         self.shift_if_needed();
         self.buckets[9] = true;
         self.last_update = Instant::now();
     }
 
-    pub fn shift_if_needed(&mut self) {
+    pub(crate) fn shift_if_needed(&mut self) {
         let elapsed = self.last_update.elapsed().as_secs();
         let shifts = (elapsed / 30).min(10) as usize;
         if shifts > 0 {
@@ -481,7 +481,7 @@ impl ActivityHistory {
         }
     }
 
-    pub fn sparkline(&self) -> String {
+    pub(crate) fn sparkline(&self) -> String {
         // U+2588 FULL BLOCK + U+2581 LOWER ONE-EIGHTH BLOCK reads as
         // a binary timeline on every monospace font. The prior ▓░
         // pair rendered with unevenly-spaced cells on Apple Terminal;

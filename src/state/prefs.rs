@@ -10,18 +10,18 @@ fn default_version() -> u32 {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Prefs {
+pub(crate) struct Prefs {
     #[serde(default = "default_version")]
-    pub version: u32,
+    pub(crate) version: u32,
     #[serde(default)]
-    pub preview_flicker_accepted: bool,
+    pub(crate) preview_flicker_accepted: bool,
     #[serde(default)]
-    pub notifications_muted: bool,
+    pub(crate) notifications_muted: bool,
     /// Version string the user last dismissed the update banner for.
     /// The banner stays suppressed while `pending_update` matches; a
     /// newer release upstream surfaces the banner again automatically.
     #[serde(default)]
-    pub dismissed_update_version: Option<String>,
+    pub(crate) dismissed_update_version: Option<String>,
 }
 
 impl Default for Prefs {
@@ -36,7 +36,7 @@ impl Default for Prefs {
 }
 
 impl Prefs {
-    pub fn load(paths: &Paths) -> Self {
+    pub(crate) fn load(paths: &Paths) -> Self {
         let path = paths.prefs_file();
         let contents = match std::fs::read_to_string(&path) {
             Ok(s) => s,
@@ -85,7 +85,7 @@ impl Prefs {
         }
     }
 
-    pub fn save(&self, paths: &Paths) {
+    pub(crate) fn save(&self, paths: &Paths) {
         if let Err(e) = paths.ensure_config_dir() {
             log_warn!(
                 "prefs: cannot create config dir {}: {e}",

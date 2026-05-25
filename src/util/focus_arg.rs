@@ -2,25 +2,25 @@
 /// delimiter); capping a little above that prevents an attacker
 /// launching `nerve --focus <huge>` from forcing a multi-megabyte
 /// allocation before the parser even looks at the string.
-pub const FOCUS_ARG_MAX_LEN: usize = 160;
+pub(crate) const FOCUS_ARG_MAX_LEN: usize = 160;
 
 /// True if `c` belongs in a bridge identifier: ASCII alphanumeric
 /// plus the small set of delimiters the bridge protocols actually
 /// use (`: _ - % . $`). Used both by `--focus` validation and by
 /// the notification path that hands ids to `terminal-notifier`.
-pub fn is_safe_id_char(c: char) -> bool {
+pub(crate) fn is_safe_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-' | '%' | '.' | '$')
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum FocusValidation {
+pub(crate) enum FocusValidation {
     Ok(String),
     Empty,
     TooLong(usize),
     ForbiddenChar(char),
 }
 
-pub fn validate(arg: String) -> FocusValidation {
+pub(crate) fn validate(arg: String) -> FocusValidation {
     if arg.is_empty() {
         return FocusValidation::Empty;
     }

@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
-pub struct ProcessInfo {
-    pub pid: u32,
-    pub ppid: u32,
-    pub tty: String,
-    pub comm: String,
-    pub cpu: f32,
-    pub args: String,
+pub(crate) struct ProcessInfo {
+    pub(crate) pid: u32,
+    pub(crate) ppid: u32,
+    pub(crate) tty: String,
+    pub(crate) comm: String,
+    pub(crate) cpu: f32,
+    pub(crate) args: String,
 }
 
 type PidIndex = HashMap<u32, usize>;
@@ -17,7 +17,7 @@ type PidIndex = HashMap<u32, usize>;
 /// Refreshed on a TTL (`process_scan_interval_ms`) so we don't fork
 /// `ps -eo` on every tick — at the default 5 s that's roughly 80 %
 /// fewer forks than a per-tick scan.
-pub struct ProcessTable {
+pub(crate) struct ProcessTable {
     procs: Vec<ProcessInfo>,
     pid_index: PidIndex,
     child_map: HashMap<u32, Vec<u32>>,
@@ -25,7 +25,7 @@ pub struct ProcessTable {
 }
 
 impl ProcessTable {
-    pub fn refreshed() -> Self {
+    pub(crate) fn refreshed() -> Self {
         let procs = scan_processes();
         let pid_index: PidIndex = procs
             .iter()
@@ -41,28 +41,28 @@ impl ProcessTable {
         }
     }
 
-    pub fn refresh_if_stale(&mut self, max_age: Duration) {
+    pub(crate) fn refresh_if_stale(&mut self, max_age: Duration) {
         if self.snapshot_at.elapsed() >= max_age {
             *self = Self::refreshed();
         }
     }
 
-    pub fn procs(&self) -> &[ProcessInfo] {
+    pub(crate) fn procs(&self) -> &[ProcessInfo] {
         &self.procs
     }
 
-    pub fn child_map(&self) -> &HashMap<u32, Vec<u32>> {
+    pub(crate) fn child_map(&self) -> &HashMap<u32, Vec<u32>> {
         &self.child_map
     }
 
     /// O(1) pid lookup over the cached snapshot.
-    pub fn find_by_pid(&self, pid: u32) -> Option<&ProcessInfo> {
+    pub(crate) fn find_by_pid(&self, pid: u32) -> Option<&ProcessInfo> {
         let idx = *self.pid_index.get(&pid)?;
         self.procs.get(idx)
     }
 }
 
-pub fn scan_processes() -> Vec<ProcessInfo> {
+pub(crate) fn scan_processes() -> Vec<ProcessInfo> {
     let output = match std::process::Command::new("ps")
         .args(["-eo", "pid,ppid,tty,comm,%cpu,args"])
         .stderr(std::process::Stdio::null())
@@ -114,7 +114,7 @@ fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
     })
 }
 
-pub fn resume_session_id(args: &str) -> Option<&str> {
+pub(crate) fn resume_session_id(args: &str) -> Option<&str> {
     // Claude Code rewrites the per-PID session file's sessionId after a
     // --resume, but the actual transcript JSONL keeps the original id. The
     // command line is the only place that still names it correctly.
@@ -135,7 +135,7 @@ pub fn resume_session_id(args: &str) -> Option<&str> {
     None
 }
 
-pub fn valid_session_id(raw: &str) -> Option<&str> {
+pub(crate) fn valid_session_id(raw: &str) -> Option<&str> {
     if raw.is_empty() || raw.contains("..") {
         return None;
     }
@@ -145,7 +145,7 @@ pub fn valid_session_id(raw: &str) -> Option<&str> {
     Some(raw)
 }
 
-pub fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
+pub(crate) fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
     let mut map: HashMap<u32, Vec<u32>> = HashMap::new();
     for p in procs {
         map.entry(p.ppid).or_default().push(p.pid);
@@ -157,11 +157,11 @@ pub fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
 /// `infer_state_from_jsonl`) use `ProcessTable::find_by_pid` instead;
 /// this exists for `is_claude_process` and other places that only
 /// have a `&[ProcessInfo]`.
-pub fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
+pub(crate) fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
     procs.iter().find(|p| p.pid == pid)
 }
 
-pub fn has_child_named(
+pub(crate) fn has_child_named(
     procs: &[ProcessInfo],
     child_map: &HashMap<u32, Vec<u32>>,
     parent_pid: u32,
