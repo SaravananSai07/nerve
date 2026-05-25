@@ -114,7 +114,7 @@ fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
     })
 }
 
-pub(crate) fn resume_session_id(args: &str) -> Option<&str> {
+pub(super) fn resume_session_id(args: &str) -> Option<&str> {
     // Claude Code rewrites the per-PID session file's sessionId after a
     // --resume, but the actual transcript JSONL keeps the original id. The
     // command line is the only place that still names it correctly.
@@ -135,7 +135,7 @@ pub(crate) fn resume_session_id(args: &str) -> Option<&str> {
     None
 }
 
-pub(crate) fn valid_session_id(raw: &str) -> Option<&str> {
+pub(super) fn valid_session_id(raw: &str) -> Option<&str> {
     if raw.is_empty() || raw.contains("..") {
         return None;
     }
@@ -145,7 +145,7 @@ pub(crate) fn valid_session_id(raw: &str) -> Option<&str> {
     Some(raw)
 }
 
-pub(crate) fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
+fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
     let mut map: HashMap<u32, Vec<u32>> = HashMap::new();
     for p in procs {
         map.entry(p.ppid).or_default().push(p.pid);
@@ -157,11 +157,11 @@ pub(crate) fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
 /// `infer_state_from_jsonl`) use `ProcessTable::find_by_pid` instead;
 /// this exists for `is_claude_process` and other places that only
 /// have a `&[ProcessInfo]`.
-pub(crate) fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
+fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
     procs.iter().find(|p| p.pid == pid)
 }
 
-pub(crate) fn has_child_named(
+pub(super) fn has_child_named(
     procs: &[ProcessInfo],
     child_map: &HashMap<u32, Vec<u32>>,
     parent_pid: u32,
