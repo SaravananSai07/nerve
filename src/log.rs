@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-const RING_CAPACITY: usize = 256;
 const FILE_MAX_BYTES: u64 = 1_048_576;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,86 +23,37 @@ impl Level {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct LogEntry {
-    pub at: SystemTime,
-    pub level: Level,
-    pub message: String,
-}
-
-struct Sink {
-    ring: Vec<LogEntry>,
-    head: usize,
-    file: Option<PathBuf>,
-}
-
-impl Sink {
-    fn push(&mut self, entry: LogEntry) {
-        if let Some(path) = self.file.as_deref() {
-            let _ = append_to_file(path, &entry);
-        }
-        if self.ring.len() < RING_CAPACITY {
-            self.ring.push(entry);
-        } else {
-            self.ring[self.head] = entry;
-            self.head = (self.head + 1) % RING_CAPACITY;
-        }
-    }
-
-    #[allow(dead_code)]
-    fn snapshot(&self) -> Vec<LogEntry> {
-        if self.ring.len() < RING_CAPACITY {
-            self.ring.clone()
-        } else {
-            let mut out = Vec::with_capacity(RING_CAPACITY);
-            out.extend_from_slice(&self.ring[self.head..]);
-            out.extend_from_slice(&self.ring[..self.head]);
-            out
-        }
-    }
-}
-
-static SINK: OnceLock<Mutex<Sink>> = OnceLock::new();
+/// Append-only file sink shared by every `log_*!` macro. Configured
+/// once at startup via `init`; calls before that point are silently
+/// dropped, which means the macros are safe to call from any module
+/// without ordering ceremony.
+static SINK: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 pub fn init(file: Option<PathBuf>) {
-    let _ = SINK.set(Mutex::new(Sink {
-        ring: Vec::with_capacity(RING_CAPACITY),
-        head: 0,
-        file,
-    }));
+    let _ = SINK.set(Mutex::new(file));
 }
 
 pub fn record(level: Level, message: String) {
     let Some(sink) = SINK.get() else { return };
-    if let Ok(mut s) = sink.lock() {
-        s.push(LogEntry {
-            at: SystemTime::now(),
-            level,
-            message,
-        });
-    }
+    let Ok(guard) = sink.lock() else { return };
+    let Some(path) = guard.as_deref() else { return };
+    let _ = append_to_file(path, level, &message);
 }
 
-#[allow(dead_code)]
-pub fn snapshot() -> Vec<LogEntry> {
-    SINK.get()
-        .and_then(|s| s.lock().ok().map(|s| s.snapshot()))
-        .unwrap_or_default()
-}
-
-fn append_to_file(path: &Path, entry: &LogEntry) -> std::io::Result<()> {
+fn append_to_file(path: &Path, level: Level, message: &str) -> std::io::Result<()> {
+    // Best-effort rotation. The rename + reopen race is benign — at
+    // worst one log line lands in the rolled-over file.
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() > FILE_MAX_BYTES {
             let _ = std::fs::rename(path, path.with_extension("log.1"));
         }
     }
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-    let secs = entry
-        .at
+    let secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    writeln!(f, "[{secs}] {} {}", entry.level.tag(), entry.message)
+    writeln!(f, "[{secs}] {} {message}", level.tag())
 }
 
 #[macro_export]

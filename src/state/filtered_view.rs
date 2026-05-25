@@ -60,11 +60,6 @@ impl FilteredView {
         self.ids.len()
     }
 
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.ids.is_empty()
-    }
-
     pub fn get<'r>(&self, registry: &'r SessionRegistry, index: usize) -> Option<&'r Session> {
         let id = self.ids.get(index)?;
         registry.get(id.as_str())
@@ -77,11 +72,6 @@ impl FilteredView {
         self.ids
             .iter()
             .filter_map(move |id| registry.get(id.as_str()))
-    }
-
-    #[allow(dead_code)]
-    pub fn ids(&self) -> &[SessionId] {
-        &self.ids
     }
 }
 

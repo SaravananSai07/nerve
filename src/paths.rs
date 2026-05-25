@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Paths {
     config_dir: PathBuf,
     home_dir: PathBuf,
 }
 
-#[allow(dead_code)]
 impl Paths {
     pub fn discover() -> Option<Self> {
         // `NERVE_CONFIG_DIR` overrides the OS default. Used by integration
@@ -58,10 +56,6 @@ impl Paths {
 
     pub fn sessions_dir(&self) -> PathBuf {
         self.claude_root().join("sessions")
-    }
-
-    pub fn projects_dir(&self) -> PathBuf {
-        self.claude_root().join("projects")
     }
 
     pub fn ensure_config_dir(&self) -> std::io::Result<()> {
