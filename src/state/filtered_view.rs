@@ -78,7 +78,7 @@ impl FilteredView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::session::{Session, SessionState};
+    use crate::state::session::Session;
     use std::path::PathBuf;
 
     fn make_session(id: &str, name: &str) -> Session {
@@ -164,8 +164,6 @@ mod tests {
         assert_eq!(names.len(), 2);
 
         assert!(view.get(&reg, 99).is_none());
-
-        let _ = SessionState::Idle;
     }
 
     #[test]

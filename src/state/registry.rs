@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use super::session::{Session, SessionId, SessionState};
@@ -151,7 +151,7 @@ impl SessionRegistry {
     pub fn mark_stale(&mut self, id: &str) {
         if let Some(session) = self.sessions.get_mut(id) {
             session.set_state(SessionState::Vanished);
-            self.version = self.version.wrapping_add(1);
+            self.bump_version();
         }
     }
 
@@ -161,7 +161,7 @@ impl SessionRegistry {
     /// is kept indefinitely — the user may resume it and the tab/
     /// pane info is still valid.
     pub fn remove_stale(&mut self, vanished_grace_secs: u64) {
-        let active_cwds: std::collections::HashSet<std::path::PathBuf> = self
+        let active_cwds: HashSet<std::path::PathBuf> = self
             .sessions
             .values()
             .filter(|s| !matches!(s.state(), SessionState::Vanished))
@@ -199,7 +199,7 @@ impl SessionRegistry {
     }
 
     pub fn re_disambiguate_names(&mut self) {
-        let reserved: std::collections::HashSet<String> = self
+        let reserved: HashSet<String> = self
             .sessions
             .values()
             .filter(|s| s.is_renamed())

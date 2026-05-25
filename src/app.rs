@@ -670,16 +670,7 @@ impl App {
             return;
         };
 
-        let target = SessionTarget {
-            cwd: session.cwd.to_string_lossy().into_owned(),
-            name: session.name().to_string(),
-            dir_name: session
-                .cwd
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            tty: session.tty.clone(),
-        };
+        let target = SessionTarget::from(session);
         let jsonl_path = session.jsonl_path.clone();
 
         let source = match self.bridge.capture_screen(&target) {
@@ -842,16 +833,7 @@ impl App {
             return;
         };
 
-        let target = SessionTarget {
-            cwd: session.cwd.to_string_lossy().into_owned(),
-            name: session.name().to_string(),
-            dir_name: session
-                .cwd
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            tty: session.tty.clone(),
-        };
+        let target = SessionTarget::from(session);
 
         match self.bridge.go_to_session(&target) {
             Ok(()) => self.visited_session = Some(target.name),
@@ -992,16 +974,7 @@ impl App {
                         pending.push(PendingNotification {
                             name: existing.name().to_string(),
                             state,
-                            target: SessionTarget {
-                                cwd: existing.cwd.to_string_lossy().into_owned(),
-                                name: existing.name().to_string(),
-                                dir_name: existing
-                                    .cwd
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_default(),
-                                tty: existing.tty.clone(),
-                            },
+                            target: SessionTarget::from(&*existing),
                         });
                     }
                 }

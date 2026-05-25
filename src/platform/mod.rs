@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::state::session::Session;
+
 #[cfg(target_os = "macos")]
 pub mod ghostty;
 pub mod tmux;
@@ -10,6 +12,21 @@ pub struct SessionTarget {
     pub name: String,
     pub dir_name: String,
     pub tty: Option<String>,
+}
+
+impl From<&Session> for SessionTarget {
+    fn from(s: &Session) -> Self {
+        Self {
+            cwd: s.cwd.to_string_lossy().into_owned(),
+            name: s.name().to_string(),
+            dir_name: s
+                .cwd
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            tty: s.tty.clone(),
+        }
+    }
 }
 
 pub enum Bridge {
