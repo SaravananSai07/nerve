@@ -142,10 +142,19 @@ fn main() -> std::io::Result<()> {
 
     if std::env::args().any(|a| a == "--dump") {
         let sessions = detect::claude::discover_sessions();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&sessions).unwrap_or_else(|e| format!("error: {e}"))
-        );
+        match serde_json::to_string_pretty(&sessions) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(e) => {
+                // Scripts pipe `--dump | jq`; previously a serde failure
+                // produced "error: <msg>" on stdout with exit 0, breaking
+                // downstream parsing silently. Emit a valid empty array so
+                // the JSON contract holds, route the diagnosis to stderr,
+                // and exit non-zero so `&&` chains see the failure.
+                eprintln!("nerve: --dump serialisation failed: {e}");
+                println!("[]");
+                std::process::exit(2);
+            }
+        }
         return Ok(());
     }
 
