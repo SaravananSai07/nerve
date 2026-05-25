@@ -1,6 +1,83 @@
 # Changelog
 
-## Unreleased — TUI / UX changes
+## 0.4.0 — 2026-05-25
+
+### Code-quality + type-safety pass
+
+- `Sanitised` newtype in `util::sanitize` carries the
+  `strip_ansi` + control-byte invariant from JSONL / ps / git
+  ingestion through to TUI display. `Session.name`, `tty`,
+  `branch`, `current_tool` and every text-bearing `LogEntry`
+  variant use it; a code path that constructs one of these
+  fields from a raw `String` no longer compiles.
+- Filesystem reads now route through `util::fs::read_capped`
+  with named byte budgets (theme TOML 64 KiB, prefs.toml
+  64 KiB, config.toml 256 KiB, update\_cache.json 16 KiB, git
+  HEAD 4 KiB, lockfile PID 64 B). A sibling process or
+  dotfile-sync glitch can't OOM the cold-start path.
+- `~/.claude/{sessions,projects}/` enumeration capped at
+  10 000 entries; the cap fires a `log_warn!` so runaway state
+  surfaces in `nerve.log` rather than silently degrading the
+  dashboard.
+- `crates.io` update check post-validates stdout size on top
+  of `curl --max-filesize`.
+
+### CLI contract hardening
+
+- `--dump` now always emits valid JSON on stdout. On a serde
+  error, the payload is `[]`, the error message goes to stderr,
+  and the process exits with code 2 — so `nerve --dump | jq`
+  pipelines fail through exit codes instead of producing
+  unparseable stdout the way the prior `unwrap_or_else` did.
+- `--list` sanitises `tty` values at ingestion alongside branch
+  names (which were already filtered via `safe_refname`).
+
+### Internal: `app.rs` decomposition
+
+The main loop's god-object (1038 LOC) split into submodules
+with sibling-private (`pub(super)`) methods:
+
+- `app/input.rs` — keyboard handlers
+- `app/overlays.rs` — overlay open/start/execute actions
+- `app/discovery.rs` — worker-thread integration +
+  `PendingNotification`
+- `app.rs` — `App` struct, constructor, run loop, view ops
+
+No behaviour change; cohesion + grep-ability only.
+
+### Visibility
+
+- Crate-wide `pub` items narrowed to `pub(crate)`;
+  `#![deny(unreachable_pub)]` at the crate root prevents new
+  drift.
+- `process.rs` helpers (`build_child_map`, `find_process`,
+  `has_child_named`, `resume_session_id`, `valid_session_id`)
+  narrowed to private or `pub(super)` per their actual call
+  scope.
+
+### Operational
+
+- `prefs.toml` parse failures surface to the startup status bar
+  (matching `config.toml`) instead of vanishing into
+  `nerve.log`.
+- `SessionRegistry::mark_stale` returns `bool` — vanished
+  sessions in the 60 s grace window no longer re-fire
+  `re_disambiguate_names` and `FilteredView` invalidation on
+  every tick.
+- `Ctrl+C` matches both lowercase and uppercase `c` so Caps
+  Lock / Shift don't break the "always quits" contract.
+- Theme name fallback to `custom` (empty post-sanitise or
+  > 64 B) now logs the reason.
+
+### Testing
+
+- New `tests/cli_smoke.rs` integration suite: 4 tests exercise
+  `--dump` JSON shape and `--list` cold paths against an
+  isolated `HOME` and config dir, guarding the wire-format
+  contract scripts depend on.
+- 125 unit tests (up from 89 pre-audit) + 5 integration tests.
+
+### TUI / UX changes (pre-audit wave)
 
 **Keybindings**
 
@@ -84,7 +161,7 @@
   green, errors red, navigational notes neutral. Previously every
   message rendered as `theme.error`.
 
-## Unreleased — wire-format and API changes
+### Wire-format and API changes
 
 **`--dump` JSON schema** now emits the discovery worker's snapshot
 directly rather than a synthesised `Session` whose registry-owned
@@ -101,14 +178,14 @@ Scripts relying on `jq '.[].state'` or `.activity` need to update.
 The duration column (always `0s` because no `Instant` existed in the
 CLI path) and the sparkline column (always empty) are removed.
 
-## Unreleased — comprehensive audit remediation
+### Comprehensive audit remediation
 
 A 76-issue audit (security review + architecture review + low-level
 systems review) drove this work. The full text of the audit is in
 the project's review thread; this entry summarises what changed
 behaviourally and why.
 
-### Incident fix: orphan + 100% CPU after terminal close
+#### Incident fix: orphan + 100% CPU after terminal close
 
 The original incident: closing a Ghostty tab without typing `q`
 left `nerve-tui` running, reparented to `launchd`, spinning at
@@ -135,7 +212,7 @@ Fixed by:
   that refuses a second concurrent launch with a clear message
   naming the holder PID.
 
-### Security hardening
+#### Security hardening
 
 Every subprocess invocation audited and rewritten where it
 interpolated user-controlled values into a shell or AppleScript:
@@ -162,7 +239,7 @@ interpolated user-controlled values into a shell or AppleScript:
 - `git rev-parse` fork removed entirely; replaced by a direct
   `.git/HEAD` parser that handles worktrees and detached HEAD.
 
-### Architecture
+#### Architecture
 
 - **Discovery worker thread.** `ps -eo`, `git`, JSONL reads, and
   session-state inference all run on a named background thread
@@ -200,7 +277,7 @@ interpolated user-controlled values into a shell or AppleScript:
   `osascript` spawn no longer interleaves with in-progress
   registry writes.
 
-### Performance
+#### Performance
 
 The combined effect of mtime short-circuit on JSONL reads,
 process-scan caching, worker-thread offload, FS-event-driven
@@ -221,7 +298,7 @@ Smaller wins:
 - Inode-change detection on JSONL token-usage parsing so a log
   rotation doesn't double-count tokens.
 
-### Operational hygiene
+#### Operational hygiene
 
 - Panic hook restores the terminal before printing the panic.
 - RAII `TerminalGuard` covers every exit path including errors.
@@ -238,7 +315,7 @@ Smaller wins:
   message + log entry).
 - `NERVE_CONFIG_DIR` env override for hermetic tests.
 
-### Deferred (with explicit rationale)
+#### Deferred (with explicit rationale)
 
 Four items were evaluated and consciously not implemented:
 
@@ -262,7 +339,7 @@ they would target are already eliminated by L4 (mtime
 short-circuit), L7 (pid index), L8 (byte-line ps), and L26
 (unfocused render skip).
 
-### Test coverage
+#### Test coverage
 
 33 unit tests at the start of the audit → 89 at the end, plus
 one end-to-end integration test (`lockfile_e2e`) that spawns the
