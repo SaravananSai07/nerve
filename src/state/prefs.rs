@@ -17,6 +17,11 @@ pub struct Prefs {
     pub preview_flicker_accepted: bool,
     #[serde(default)]
     pub notifications_muted: bool,
+    /// Version string the user last dismissed the update banner for.
+    /// The banner stays suppressed while `pending_update` matches; a
+    /// newer release upstream surfaces the banner again automatically.
+    #[serde(default)]
+    pub dismissed_update_version: Option<String>,
 }
 
 impl Default for Prefs {
@@ -25,6 +30,7 @@ impl Default for Prefs {
             version: CURRENT_VERSION,
             preview_flicker_accepted: false,
             notifications_muted: false,
+            dismissed_update_version: None,
         }
     }
 }
@@ -136,6 +142,7 @@ mod tests {
             version: CURRENT_VERSION,
             preview_flicker_accepted: true,
             notifications_muted: true,
+            dismissed_update_version: Some("9.9.9".into()),
         };
         prefs.save(&paths);
         let loaded = Prefs::load(&paths);

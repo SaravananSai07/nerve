@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
+use crate::app::StatusMessage;
 use crate::state::registry::SessionRegistry;
 use crate::state::session::Session;
 use crate::tui::theme::Theme;
@@ -18,7 +19,7 @@ pub fn render(
     sessions: &[&Session],
     selected: usize,
     theme: &Theme,
-    status_message: Option<&str>,
+    status_message: Option<&StatusMessage>,
     notifications_muted: bool,
     update_banner: Option<&str>,
     search_query: Option<&str>,
@@ -284,15 +285,24 @@ fn render_status_bar(
     registry: &SessionRegistry,
     filtered_count: usize,
     theme: &Theme,
-    status_message: Option<&str>,
+    status_message: Option<&StatusMessage>,
     notifications_muted: bool,
     search_query: Option<&str>,
 ) {
-    // Action / search messages take the whole row.
+    // Action / search messages take the whole row. Colour by kind so
+    // a successful kill reads green, a failed kill reads red, and a
+    // navigational note reads in the neutral text colour. The prior
+    // design rendered every message in `theme.error`, which made
+    // "returned from 'foo'" look like a failure.
     if let Some(msg) = status_message {
+        let color = match msg.kind {
+            crate::app::StatusKind::Info => theme.text,
+            crate::app::StatusKind::Success => theme.processing,
+            crate::app::StatusKind::Error => theme.error,
+        };
         let line = Line::from(Span::styled(
-            format!(" {msg}"),
-            Style::default().fg(theme.error),
+            format!(" {}", msg.text),
+            Style::default().fg(color),
         ));
         frame.render_widget(Paragraph::new(line), area);
         return;

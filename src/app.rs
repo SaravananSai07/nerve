@@ -46,6 +46,22 @@ fn load_log_entries(
     }
 }
 
+/// Coloring intent for the status bar's message slot. The prior
+/// design coloured every message as `theme.error`, which made
+/// successful kills, search counts, and mute toggles all look like
+/// failures.
+#[derive(Clone, Copy)]
+pub enum StatusKind {
+    Info,
+    Success,
+    Error,
+}
+
+pub struct StatusMessage {
+    pub kind: StatusKind,
+    pub text: String,
+}
+
 enum Overlay {
     None,
     Help,
@@ -88,7 +104,7 @@ pub struct App {
     cols: usize,
     overlay: Overlay,
     search_query: Option<String>,
-    status_message: Option<String>,
+    status_message: Option<StatusMessage>,
     should_quit: bool,
     notifier: Notifier,
     prefs: Prefs,
@@ -134,8 +150,16 @@ impl App {
         let prefs = Prefs::load(&paths);
 
         crate::updater::maybe_check_in_background(&paths, config.updates.check_on_launch);
-        let update_banner = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"));
-        let status_message = config.load_error.clone();
+        // Suppress the update banner when the user has previously
+        // dismissed exactly this version — pressing `u` writes the
+        // banner version into prefs so the next launch stays quiet
+        // unless the upstream version moves again.
+        let update_banner = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"))
+            .filter(|v| prefs.dismissed_update_version.as_deref() != Some(v.as_str()));
+        let status_message = config
+            .load_error
+            .clone()
+            .map(|text| StatusMessage { kind: StatusKind::Error, text });
 
         let claude_installed = paths.claude_root().exists();
 
@@ -177,6 +201,18 @@ impl App {
             last_stale_sweep: std::time::Instant::now(),
             discovery_warned: false,
         }
+    }
+
+    fn set_status_info(&mut self, text: impl Into<String>) {
+        self.status_message = Some(StatusMessage { kind: StatusKind::Info, text: text.into() });
+    }
+
+    fn set_status_success(&mut self, text: impl Into<String>) {
+        self.status_message = Some(StatusMessage { kind: StatusKind::Success, text: text.into() });
+    }
+
+    fn set_status_error(&mut self, text: impl Into<String>) {
+        self.status_message = Some(StatusMessage { kind: StatusKind::Error, text: text.into() });
     }
 
     /// Floor each loop iteration to `MIN_LOOP_INTERVAL` so a runaway
@@ -267,7 +303,7 @@ impl App {
                     &visible,
                     self.selected,
                     &self.theme,
-                    self.status_message.as_deref(),
+                    self.status_message.as_ref(),
                     self.prefs.notifications_muted,
                     self.update_banner.as_deref(),
                     self.search_query.as_deref(),
@@ -352,7 +388,7 @@ impl App {
                     Event::FocusGained => {
                         self.focused = true;
                         if let Some(name) = self.visited_session.take() {
-                            self.status_message = Some(format!("returned from '{name}'"));
+                            self.set_status_info(format!("returned from '{name}'"));
                         }
                         // If we started with NoOp (TERM_PROGRAM
                         // wasn't recognised at launch) but the user
@@ -509,14 +545,24 @@ impl App {
             KeyCode::Char('x') => {
                 self.start_kill();
             }
+            KeyCode::Char('u') => {
+                // Dismiss the update banner for *this version only*.
+                // The next upstream release flips `pending_update`'s
+                // value and the banner returns.
+                if let Some(version) = self.update_banner.take() {
+                    self.prefs.dismissed_update_version = Some(version);
+                    self.prefs.save(&self.paths);
+                }
+            }
             KeyCode::Char('m') => {
                 self.prefs.notifications_muted = !self.prefs.notifications_muted;
                 self.prefs.save(&self.paths);
-                self.status_message = Some(if self.prefs.notifications_muted {
-                    "notifications muted".into()
+                let msg = if self.prefs.notifications_muted {
+                    "notifications muted"
                 } else {
-                    "notifications unmuted".into()
-                });
+                    "notifications unmuted"
+                };
+                self.set_status_info(msg);
             }
             KeyCode::Char('/') => {
                 self.search_query.get_or_insert_with(String::new);
@@ -663,7 +709,7 @@ impl App {
             return;
         };
         if session.state().is_terminal() {
-            self.status_message = Some("session is already gone or dormant".into());
+            self.set_status_error("session is already gone or dormant");
             return;
         }
         let name = session.name().to_string();
@@ -677,10 +723,10 @@ impl App {
         // the kill.
         match claude::kill_by_session_id(id) {
             Ok(pid) => {
-                self.status_message = Some(format!("sent SIGTERM to '{name}' (pid {pid})"));
+                self.set_status_success(format!("sent SIGTERM to '{name}' (pid {pid})"));
             }
             Err(e) => {
-                self.status_message = Some(format!("'{name}': {e}"));
+                self.set_status_error(format!("'{name}': {e}"));
             }
         }
     }
@@ -733,7 +779,7 @@ impl App {
                 match self.search_query.as_deref() {
                     Some(q) if !q.is_empty() => {
                         let count = self.num_filtered();
-                        self.status_message = Some(format!("search: /{q}  ({count})"));
+                        self.set_status_info(format!("search: /{q}  ({count})"));
                     }
                     _ => self.search_query = None,
                 }
@@ -763,7 +809,7 @@ impl App {
         };
         let id = session.id.clone();
         if self.registry.name_taken(&new_name, id.as_str()) {
-            self.status_message = Some(format!("name '{}' is already taken", new_name));
+            self.set_status_error(format!("name '{}' is already taken", new_name));
             return;
         }
         if let Some(session) = self.registry.get_mut(id.as_str()) {
@@ -801,7 +847,7 @@ impl App {
 
         match self.bridge.go_to_session(&target) {
             Ok(()) => self.visited_session = Some(target.name),
-            Err(e) => self.status_message = Some(e.to_string()),
+            Err(e) => self.set_status_error(e.to_string()),
         }
     }
 
@@ -848,8 +894,7 @@ impl App {
             && !self.discovery_warned
             && self.status_message.is_none()
         {
-            self.status_message =
-                Some("discovery worker stopped — see ~/.config/nerve/nerve.log".into());
+            self.set_status_error("discovery worker stopped — see ~/.config/nerve/nerve.log");
             self.discovery_warned = true;
         }
         self.apply_filter();

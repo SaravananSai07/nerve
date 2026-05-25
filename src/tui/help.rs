@@ -25,6 +25,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ("/", "Search (fuzzy, case-insensitive)"),
     ("Esc", "Clear search filter"),
     ("m", "Toggle notification mute"),
+    ("u", "Dismiss update banner (until next version)"),
     ("", "─ preview overlay ─"),
     ("j/k  ↑/↓", "Scroll line"),
     ("PgUp/PgDn", "Scroll page"),
