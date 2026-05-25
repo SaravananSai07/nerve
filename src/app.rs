@@ -94,6 +94,13 @@ pub struct App {
     prefs: Prefs,
     visited_session: Option<String>,
     update_banner: Option<String>,
+    /// Eviction sweep cadence — `remove_stale` only does work once
+    /// per minute (the grace window), so running it every tick at
+    /// 200 sessions was clear waste.
+    last_stale_sweep: std::time::Instant,
+    /// Set once after surfacing the "discovery worker stopped" banner
+    /// so we don't re-overwrite a fresh status message on every tick.
+    discovery_warned: bool,
 }
 
 /// Notification queued by the discovery phase, dispatched after
@@ -167,6 +174,8 @@ impl App {
             prefs,
             visited_session: None,
             update_banner,
+            last_stale_sweep: std::time::Instant::now(),
+            discovery_warned: false,
         }
     }
 
@@ -759,7 +768,22 @@ impl App {
 
     fn tick(&mut self) {
         self.refresh_sessions();
-        self.registry.remove_stale(60);
+        // The eviction sweep only does anything once per minute (the
+        // grace window), so polling it at the inner-loop cadence
+        // (~50–250 ms) was clones-and-hashes for no result. Cap to
+        // ~5 s and never miss a grace expiry by more than that.
+        const STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+        if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
+            self.registry.remove_stale(60);
+            self.last_stale_sweep = std::time::Instant::now();
+        }
+        // Surface a banner if the worker thread died on us. Without
+        // this, a frozen worker is indistinguishable from a quiet one.
+        if !self.discovery.is_alive() && !self.discovery_warned {
+            self.status_message =
+                Some("discovery worker stopped — see ~/.config/nerve/nerve.log".into());
+            self.discovery_warned = true;
+        }
         self.apply_filter();
 
         // Keep the log-preview content fresh while the overlay is open
