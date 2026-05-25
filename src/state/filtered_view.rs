@@ -83,7 +83,7 @@ mod tests {
 
     fn make_session(id: &str, name: &str) -> Session {
         let mut s = Session::new(SessionId::new(id), PathBuf::from(format!("/tmp/{name}")));
-        s.name = name.to_string();
+        s.set_auto_name(name.to_string());
         s
     }
 
@@ -158,9 +158,9 @@ mod tests {
         view.refresh(&reg, None);
 
         let first = view.get(&reg, 0).expect("first session");
-        assert!(first.name == "alpha" || first.name == "bravo");
+        assert!(first.name() == "alpha" || first.name() == "bravo");
 
-        let names: Vec<_> = view.iter(&reg).map(|s| s.name.clone()).collect();
+        let names: Vec<_> = view.iter(&reg).map(|s| s.name().to_string()).collect();
         assert_eq!(names.len(), 2);
 
         assert!(view.get(&reg, 99).is_none());

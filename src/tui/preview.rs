@@ -45,7 +45,7 @@ pub fn render(
     let indicator = theme.state_indicator(session.state());
     let title = format!(
         " {} {} {} | {} | {} ",
-        session.name,
+        session.name(),
         indicator,
         session.state().label(),
         session.format_duration(),

@@ -560,7 +560,7 @@ impl App {
 
         let target = SessionTarget {
             cwd: session.cwd.to_string_lossy().into_owned(),
-            name: session.name.clone(),
+            name: session.name().to_string(),
             dir_name: session
                 .cwd
                 .file_name()
@@ -608,7 +608,7 @@ impl App {
             self.status_message = Some("session is already gone or dormant".into());
             return;
         }
-        let name = session.name.clone();
+        let name = session.name().to_string();
         let id = session.id.clone();
         self.overlay = Overlay::ConfirmKill { name, id };
     }
@@ -631,7 +631,7 @@ impl App {
         let Some(session) = self.nth_filtered(self.selected) else {
             return;
         };
-        self.overlay = Overlay::Rename(session.name.clone());
+        self.overlay = Overlay::Rename(session.name().to_string());
     }
 
     fn handle_rename_key(&mut self, code: KeyCode) {
@@ -727,7 +727,7 @@ impl App {
 
         let target = SessionTarget {
             cwd: session.cwd.to_string_lossy().into_owned(),
-            name: session.name.clone(),
+            name: session.name().to_string(),
             dir_name: session
                 .cwd
                 .file_name()
@@ -874,11 +874,11 @@ impl App {
                     any_transition = true;
                     if let Some(state) = existing.take_pending_notification() {
                         pending.push(PendingNotification {
-                            name: existing.name.clone(),
+                            name: existing.name().to_string(),
                             state,
                             target: SessionTarget {
                                 cwd: existing.cwd.to_string_lossy().into_owned(),
-                                name: existing.name.clone(),
+                                name: existing.name().to_string(),
                                 dir_name: existing
                                     .cwd
                                     .file_name()

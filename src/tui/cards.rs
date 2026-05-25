@@ -187,7 +187,7 @@ fn render_card(
     };
 
     let title_left = Span::styled(
-        format!(" {} {} {} ", session.name, indicator, session.state().label()),
+        format!(" {} {} {} ", session.name(), indicator, session.state().label()),
         if is_selected {
             Style::default().fg(text_fg).bg(card_bg).add_modifier(Modifier::BOLD)
         } else {

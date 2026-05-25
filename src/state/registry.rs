@@ -97,11 +97,11 @@ impl SessionRegistry {
                     a.state()
                         .sort_priority()
                         .cmp(&b.state().sort_priority())
-                        .then(a.name.cmp(&b.name))
+                        .then(a.name().cmp(b.name()))
                 });
             }
             SortMode::Name => {
-                sessions.sort_by(|a, b| a.name.cmp(&b.name));
+                sessions.sort_by(|a, b| a.name().cmp(b.name()));
             }
             SortMode::Age => {
                 // One `Instant::now()` outside the comparator so all
@@ -203,7 +203,7 @@ impl SessionRegistry {
             .sessions
             .values()
             .filter(|s| s.is_renamed())
-            .map(|s| s.name.clone())
+            .map(|s| s.name().to_string())
             .collect();
 
         let mut base_to_ids: HashMap<String, Vec<SessionId>> = HashMap::new();
@@ -211,7 +211,7 @@ impl SessionRegistry {
             if session.is_renamed() {
                 continue;
             }
-            let base = strip_disambiguation_suffix(&session.name);
+            let base = strip_disambiguation_suffix(session.name());
             base_to_ids.entry(base).or_default().push(id.clone());
         }
 
@@ -219,8 +219,8 @@ impl SessionRegistry {
         for (base, mut ids) in base_to_ids {
             if ids.len() <= 1 && !reserved.contains(&base) {
                 if let Some(session) = self.sessions.get_mut(&ids[0]) {
-                    if session.name != base {
-                        session.name = base;
+                    if session.name() != base {
+                        session.set_auto_name(base);
                         any_renamed = true;
                     }
                 }
@@ -237,8 +237,8 @@ impl SessionRegistry {
                     }
                 };
                 if let Some(session) = self.sessions.get_mut(id) {
-                    if session.name != candidate {
-                        session.name = candidate;
+                    if session.name() != candidate {
+                        session.set_auto_name(candidate);
                         any_renamed = true;
                     }
                 }
@@ -252,7 +252,7 @@ impl SessionRegistry {
     pub fn name_taken(&self, name: &str, exclude_id: &str) -> bool {
         self.sessions
             .iter()
-            .any(|(id, s)| s.name == name && id.as_str() != exclude_id)
+            .any(|(id, s)| s.name() == name && id.as_str() != exclude_id)
     }
 
     pub fn ids(&self) -> &[SessionId] {

@@ -4,7 +4,6 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::state::state_machine::StateMachine;
-#[cfg(test)]
 use crate::util::sanitize::strip_ansi;
 
 /// Consecutive `propose_state` calls required before the visible
@@ -156,15 +155,25 @@ pub struct DiscoverySnapshot {
     pub jsonl_age_secs: Option<f64>,
 }
 
-#[derive(Clone)]
+// Clone is test-only. A Session carries registry-owned mutable state
+// — `state_machine`'s confirmation counter, `last_notified_state` for
+// notification dedup, `activity` ring — so a production clone inserted
+// alongside the original would silently double-count. Tests need Clone
+// to set up fixtures; production paths only ever hand around &Session
+// references.
+#[cfg_attr(test, derive(Clone))]
 pub struct Session {
     pub id: SessionId,
     pub cwd: PathBuf,
-    pub name: String,
+    name: String,
     state_changed_at: Instant,
     pub tty: Option<String>,
     pub branch: Option<String>,
     pub cpu_percent: f32,
+    /// Last tool the session was running. Sticks past the
+    /// `ToolRunning` state into `Idle` so users can see what the
+    /// session was last doing when it goes quiet — only `merge_snapshot`
+    /// updates it (and only when the snapshot has a tool to give).
     pub current_tool: Option<String>,
     activity: ActivityHistory,
     pub jsonl_path: Option<PathBuf>,
@@ -282,14 +291,17 @@ impl Session {
     /// Returns the current state as a fresh notification target if it
     /// differs from the last state we notified for, otherwise None.
     /// Callers no longer need to clone the current state speculatively
-    /// before checking — they pay one clone only on the positive path.
+    /// before checking. One clone on the positive path: the value is
+    /// cloned once, then split between the stored last-notified slot
+    /// and the returned outgoing-notification value.
     pub fn take_pending_notification(&mut self) -> Option<SessionState> {
         let current = self.state_machine.current();
         if self.last_notified_state.as_ref() == Some(current) {
             return None;
         }
-        self.last_notified_state = Some(current.clone());
-        self.last_notified_state.clone()
+        let cloned = current.clone();
+        self.last_notified_state = Some(cloned.clone());
+        Some(cloned)
     }
 
     /// Apply a fresh observation from the discovery worker. The state
@@ -343,12 +355,33 @@ impl Session {
         self.activity.sparkline()
     }
 
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// User-driven rename. Sets the custom name and flags the session
-    /// so future discovery snapshots don't overwrite it from the cwd
-    /// basename / config override.
-    pub fn rename_to(&mut self, new_name: String) {
-        self.name = new_name;
+    /// so future discovery snapshots / disambiguation don't overwrite
+    /// it. Sanitises at the boundary — the rename overlay is the only
+    /// name-ingestion point that doesn't go through the snapshot
+    /// pipeline, so the same `strip_ansi` + control-char filter runs
+    /// here for parity.
+    pub fn rename_to(&mut self, raw: String) {
+        self.name = strip_ansi(&raw)
+            .into_owned()
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
         self.renamed = true;
+    }
+
+    /// Automatic display name. The registry's disambiguation pass
+    /// calls this to apply `(N)` suffixes when multiple sessions
+    /// share a base; user renames are protected.
+    pub fn set_auto_name(&mut self, name: String) {
+        if self.renamed {
+            return;
+        }
+        self.name = name;
     }
 
     pub fn is_renamed(&self) -> bool {

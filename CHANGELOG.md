@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — wire-format and API changes
+
+**`--dump` JSON schema** now emits the discovery worker's snapshot
+directly rather than a synthesised `Session` whose registry-owned
+fields were always zeros:
+
+- `state` renamed to `detected_state` — the CLI was always emitting
+  the detected (pre-confirmation) state anyway.
+- `activity` removed — was always the empty sparkline buckets.
+- `renamed` removed — was always `false` for a one-shot CLI invocation.
+
+Scripts relying on `jq '.[].state'` or `.activity` need to update.
+
+**`--list` columns** are now `name | state | tty | branch | tokens`.
+The duration column (always `0s` because no `Instant` existed in the
+CLI path) and the sparkline column (always empty) are removed.
+
 ## Unreleased — comprehensive audit remediation
 
 A 76-issue audit (security review + architecture review + low-level
