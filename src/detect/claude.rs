@@ -386,11 +386,15 @@ fn parse_jsonl_state(line: &str) -> Option<SessionState> {
         if let Some(content) = msg.content.as_ref() {
             for item in content {
                 if item.item_type.as_deref() == Some("tool_use") {
-                    let name = item.name.as_deref().unwrap_or("unknown");
+                    let raw_name = item.name.as_deref().unwrap_or("unknown");
+                    // JSONL is attacker-influenced; sanitise before any
+                    // comparison so a name like "AskUserQuestion\x1b[2J"
+                    // doesn't fall through with the escape attached.
+                    let name = strip_ansi(raw_name).into_owned();
                     if name == "AskUserQuestion" || name == "ExitPlanMode" {
                         return Some(SessionState::WaitingForInput);
                     }
-                    return Some(SessionState::ToolRunning(name.to_string()));
+                    return Some(SessionState::ToolRunning(name));
                 }
             }
         }
@@ -561,10 +565,19 @@ fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
             }
             let (rate_in, rate_out, rate_cache_read, rate_cache_create) = last_rate;
 
-            usage.input_tokens += input;
-            usage.output_tokens += output;
-            usage.cache_read_tokens += cache_read;
-            usage.cache_creation_tokens += cache_creation;
+            // JSONL is untrusted: cap any single row's token claim so an
+            // adversarial line claiming `u64::MAX` can't panic in debug or
+            // produce `inf`/`NaN` cost in release.
+            const PER_ROW_TOKEN_CAP: u64 = 10_000_000;
+            let input = input.min(PER_ROW_TOKEN_CAP);
+            let output = output.min(PER_ROW_TOKEN_CAP);
+            let cache_read = cache_read.min(PER_ROW_TOKEN_CAP);
+            let cache_creation = cache_creation.min(PER_ROW_TOKEN_CAP);
+
+            usage.input_tokens = usage.input_tokens.saturating_add(input);
+            usage.output_tokens = usage.output_tokens.saturating_add(output);
+            usage.cache_read_tokens = usage.cache_read_tokens.saturating_add(cache_read);
+            usage.cache_creation_tokens = usage.cache_creation_tokens.saturating_add(cache_creation);
             usage.cost_usd += (input as f64 * rate_in
                 + output as f64 * rate_out
                 + cache_read as f64 * rate_cache_read
@@ -813,4 +826,34 @@ fn deduplicate_sessions(sessions: Vec<Session>) -> Vec<Session> {
     }
 
     by_tty.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_name_with_ansi_is_sanitised_before_storage() {
+        // A `tool_use` row whose name carries an OSC-52 clipboard write
+        // would propagate raw into the cards view on every tick without
+        // sanitisation. The JSON source uses `` so serde_json
+        // (which rejects raw control bytes) decodes it cleanly.
+        let line = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\\u001b]52;c;ZXZpbA==\\u0007after\"}]}}";
+        match parse_jsonl_state(line).expect("parses") {
+            SessionState::ToolRunning(name) => assert_eq!(name, "Bashafter"),
+            other => panic!("expected ToolRunning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_name_ansi_smuggled_keyword_routes_to_correct_state() {
+        // `AskUserQuestion<ESC>[2J` — without sanitisation would fall
+        // through to ToolRunning with the escape attached; with it, the
+        // sanitised name matches the WaitingForInput keyword.
+        let line = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\\u001b[2J\"}]}}";
+        assert!(matches!(
+            parse_jsonl_state(line),
+            Some(SessionState::WaitingForInput)
+        ));
+    }
 }

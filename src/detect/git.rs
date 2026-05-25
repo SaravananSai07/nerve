@@ -48,17 +48,34 @@ fn parse_head_contents(contents: &str) -> Option<String> {
     if let Some(rest) = contents.strip_prefix("ref:") {
         let refname = rest.trim();
         if let Some(branch) = refname.strip_prefix("refs/heads/") {
-            return Some(branch.to_string());
+            return safe_refname(branch).map(str::to_string);
         }
         // Symbolic ref to something other than a local branch — return the
         // tail of the ref so the UI still shows something informative.
-        return refname.rsplit('/').next().map(|s| s.to_string());
+        return refname
+            .rsplit('/')
+            .next()
+            .and_then(safe_refname)
+            .map(str::to_string);
     }
     // Detached HEAD: 40-byte (or 64-byte SHA-256) hex string.
     if is_hex_sha(contents) {
         return Some("(detached)".to_string());
     }
     None
+}
+
+/// Refuse refnames containing ASCII control bytes — git itself forbids them
+/// (`git check-ref-format`), and an attacker-planted `.git/HEAD` reading
+/// `ref: refs/heads/\x1b[2Jpwned` would otherwise paint the cards view.
+fn safe_refname(name: &str) -> Option<&str> {
+    if name.is_empty() {
+        return None;
+    }
+    if name.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return None;
+    }
+    Some(name)
 }
 
 fn is_hex_sha(s: &str) -> bool {
@@ -147,5 +164,13 @@ mod tests {
     fn malformed_head_returns_none() {
         assert_eq!(parse_head_contents("garbage"), None);
         assert_eq!(parse_head_contents(""), None);
+    }
+
+    #[test]
+    fn refname_with_control_byte_rejected() {
+        // Attacker-planted .git/HEAD trying to smuggle ANSI through the
+        // branch display path.
+        assert_eq!(parse_head_contents("ref: refs/heads/\x1b[2Jpwned"), None);
+        assert_eq!(parse_head_contents("ref: refs/heads/main\x07"), None);
     }
 }

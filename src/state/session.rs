@@ -4,6 +4,7 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::state::state_machine::StateMachine;
+use crate::util::sanitize::strip_ansi;
 
 /// Consecutive `propose_state` calls required before the visible
 /// state actually changes. Defends against flicker in upstream
@@ -165,9 +166,12 @@ pub struct Session {
 
 impl Session {
     pub fn new(id: SessionId, cwd: PathBuf) -> Self {
+        // cwd basename is attacker-influenceable (mkdir $'\x1b[2Jpwned'),
+        // and the name renders raw on every tick of the always-on cards
+        // view — sanitise at ingestion so it can't repaint the host.
         let name = cwd
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|n| strip_ansi(&n.to_string_lossy()).into_owned())
             .unwrap_or_else(|| "unknown".into());
         Self {
             id,

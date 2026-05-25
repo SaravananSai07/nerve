@@ -118,42 +118,31 @@ pub fn resume_session_id(args: &str) -> Option<&str> {
     // Claude Code rewrites the per-PID session file's sessionId after a
     // --resume, but the actual transcript JSONL keeps the original id. The
     // command line is the only place that still names it correctly.
+    //
+    // The extracted value is used later as a filename component
+    // (`{id}.jsonl`), so reject anything that isn't a plausible session id.
+    // `is_safe_id_char` already excludes `/` and `.` is fine on its own but
+    // we further forbid `..` to close path-traversal entirely.
     let mut tokens = args.split_whitespace();
     while let Some(tok) = tokens.next() {
         if tok == "--resume" || tok == "-r" {
-            return tokens.next().filter(|v| !v.is_empty());
+            return tokens.next().and_then(valid_session_id);
         }
         if let Some(rest) = tok.strip_prefix("--resume=") {
-            return Some(rest).filter(|v| !v.is_empty());
+            return valid_session_id(rest);
         }
     }
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resume_session_id_handles_all_forms() {
-        assert_eq!(resume_session_id("claude --resume abc-123 --foo"), Some("abc-123"));
-        assert_eq!(resume_session_id("claude -r abc-123"), Some("abc-123"));
-        assert_eq!(resume_session_id("claude --resume=abc-123"), Some("abc-123"));
-        assert_eq!(resume_session_id("claude --foo"), None);
-        assert_eq!(resume_session_id("claude --resume"), None);
-        assert_eq!(resume_session_id("claude --resume="), None);
+fn valid_session_id(raw: &str) -> Option<&str> {
+    if raw.is_empty() || raw.contains("..") {
+        return None;
     }
-
-    #[test]
-    fn process_table_refreshes_once_per_ttl_window() {
-        let mut table = ProcessTable::refreshed();
-        let first_snapshot_at = table.snapshot_at;
-        table.refresh_if_stale(Duration::from_secs(60));
-        assert_eq!(table.snapshot_at, first_snapshot_at);
-        std::thread::sleep(Duration::from_millis(2));
-        table.refresh_if_stale(Duration::from_millis(0));
-        assert!(table.snapshot_at > first_snapshot_at);
+    if !raw.chars().all(crate::util::focus_arg::is_safe_id_char) {
+        return None;
     }
+    Some(raw)
 }
 
 pub fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
@@ -197,5 +186,41 @@ pub fn has_child_named(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_session_id_handles_all_forms() {
+        assert_eq!(resume_session_id("claude --resume abc-123 --foo"), Some("abc-123"));
+        assert_eq!(resume_session_id("claude -r abc-123"), Some("abc-123"));
+        assert_eq!(resume_session_id("claude --resume=abc-123"), Some("abc-123"));
+        assert_eq!(resume_session_id("claude --foo"), None);
+        assert_eq!(resume_session_id("claude --resume"), None);
+        assert_eq!(resume_session_id("claude --resume="), None);
+    }
+
+    #[test]
+    fn resume_session_id_rejects_path_traversal_and_unsafe_chars() {
+        // `..` segments would let a hostile `claude --resume` escape the
+        // projects dir; `is_safe_id_char` forbids `/` and shell metacharacters.
+        assert_eq!(resume_session_id("claude --resume ../../etc/passwd"), None);
+        assert_eq!(resume_session_id("claude --resume=foo/../bar"), None);
+        assert_eq!(resume_session_id("claude --resume foo;bar"), None);
+        assert_eq!(resume_session_id("claude --resume foo bar"), Some("foo"));
+    }
+
+    #[test]
+    fn process_table_refreshes_once_per_ttl_window() {
+        let mut table = ProcessTable::refreshed();
+        let first_snapshot_at = table.snapshot_at;
+        table.refresh_if_stale(Duration::from_secs(60));
+        assert_eq!(table.snapshot_at, first_snapshot_at);
+        std::thread::sleep(Duration::from_millis(2));
+        table.refresh_if_stale(Duration::from_millis(0));
+        assert!(table.snapshot_at > first_snapshot_at);
+    }
 }
 

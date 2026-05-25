@@ -57,17 +57,6 @@ fn inode_of_path(_path: &std::path::Path) -> Option<u64> {
     None
 }
 
-#[cfg(test)]
-mod app_tests {
-    use super::*;
-
-    #[test]
-    fn devnull_is_not_a_controlling_tty() {
-        let dev_null = std::fs::File::open("/dev/null").expect("/dev/null open");
-        assert!(!is_controlling_tty(&dev_null));
-    }
-}
-
 enum Overlay {
     None,
     Help,
@@ -972,5 +961,16 @@ impl App {
                 self.prefs.notifications_muted,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+
+    #[test]
+    fn devnull_is_not_a_controlling_tty() {
+        let dev_null = std::fs::File::open("/dev/null").expect("/dev/null open");
+        assert!(!is_controlling_tty(&dev_null));
     }
 }
