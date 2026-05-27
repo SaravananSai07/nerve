@@ -18,6 +18,8 @@ mod workers;
 
 use std::str::FromStr;
 
+use crate::util::sanitize::Sanitised;
+
 use app::App;
 use paths::Paths;
 use platform::BridgeId;
@@ -175,8 +177,8 @@ fn main() -> std::io::Result<()> {
                 "{} | {} | {} | {}{}",
                 s.name,
                 s.detected_state.label(),
-                s.tty.as_deref().unwrap_or("?"),
-                s.branch.as_deref().unwrap_or("—"),
+                s.tty.as_ref().map(Sanitised::as_str).unwrap_or("?"),
+                s.branch.as_ref().map(Sanitised::as_str).unwrap_or("—"),
                 token_info,
             );
         }

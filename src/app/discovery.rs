@@ -1,6 +1,7 @@
 use crate::platform::SessionTarget;
 use crate::state::session::{DiscoverySnapshot, Session, SessionState};
 use crate::tui::preview::PreviewSource;
+use crate::util::sanitize::Sanitised;
 
 use super::{App, Overlay};
 
@@ -9,7 +10,7 @@ use super::{App, Overlay};
 /// stages means a slow `osascript` spawn can't interleave with a
 /// mid-flight registry write.
 pub(super) struct PendingNotification {
-    pub(super) name: String,
+    pub(super) name: Sanitised,
     pub(super) state: SessionState,
     pub(super) target: SessionTarget,
 }
@@ -125,7 +126,7 @@ impl App {
                     any_transition = true;
                     if let Some(state) = existing.take_pending_notification() {
                         pending.push(PendingNotification {
-                            name: existing.name().to_string(),
+                            name: existing.name().clone(),
                             state,
                             target: SessionTarget::from(&*existing),
                         });
@@ -133,7 +134,7 @@ impl App {
                 }
             } else {
                 if let Some(over) = name_override {
-                    snap.name = over.to_string();
+                    snap.name = Sanitised::new(over);
                 }
                 // `from_snapshot` seeds the state machine with the
                 // detected state directly — no Processing-flash while
@@ -169,7 +170,7 @@ impl App {
     pub(super) fn dispatch_notifications(&self, batch: Vec<PendingNotification>) {
         for note in batch {
             self.notifier.maybe_notify(
-                &note.name,
+                note.name.as_str(),
                 &note.state,
                 &note.target,
                 &self.bridge,

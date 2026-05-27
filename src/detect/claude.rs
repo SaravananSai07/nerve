@@ -202,11 +202,12 @@ fn load_session(
         .to_string();
 
     let cwd = PathBuf::from(&sf.cwd);
-    let name = cwd
-        .file_name()
-        .map(|n| strip_ansi(&n.to_string_lossy()).into_owned())
-        .unwrap_or_else(|| "unknown".into());
-    let branch = branch_cache.read_or_refresh(&cwd);
+    let name = Sanitised::new(
+        cwd.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".into()),
+    );
+    let branch = branch_cache.read_or_refresh(&cwd).map(Sanitised::new);
 
     let jsonl_path = find_jsonl(&resolved_id, &cwd, project_dirs);
     let (detected, usage, jsonl_age_secs) = if let Some(ref jp) = jsonl_path {
@@ -230,7 +231,7 @@ fn load_session(
     };
 
     let current_tool = match &detected {
-        SessionState::ToolRunning(tool) => Some(tool.clone()),
+        SessionState::ToolRunning(tool) => Some(Sanitised::new(tool.clone())),
         _ => None,
     };
 
@@ -238,7 +239,7 @@ fn load_session(
         id: SessionId::new(resolved_id),
         cwd,
         name,
-        tty: Some(proc.tty.clone()),
+        tty: Some(Sanitised::new(proc.tty.clone())),
         branch,
         cpu_percent: proc.cpu,
         pid: Some(sf.pid),
@@ -845,7 +846,7 @@ fn deduplicate_sessions(sessions: Vec<DiscoverySnapshot>) -> Vec<DiscoverySnapsh
     let mut by_tty: HashMap<String, DiscoverySnapshot> = HashMap::new();
     for snap in pid_deduped {
         let tty = match &snap.tty {
-            Some(t) if t != "??" && t != "?" => t.clone(),
+            Some(t) if t.as_str() != "??" && t.as_str() != "?" => t.as_str().to_string(),
             _ => format!("__notty_{}", snap.id),
         };
         by_tty

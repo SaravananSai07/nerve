@@ -151,6 +151,36 @@ impl PartialEq<&str> for Sanitised {
     }
 }
 
+// `Serialize` delegates to the inner str — DiscoverySnapshot
+// transports `Sanitised` fields and `--dump` emits the same
+// JSON shape (plain strings) it did when the snapshot used
+// `String` directly. No `Deserialize`: deserialising would
+// bypass `Sanitised::new` and undo the invariant guarantee.
+// The discovery worker is the only producer, and it constructs
+// every value via `new`.
+impl serde::Serialize for Sanitised {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0)
+    }
+}
+
+// Outgoing-only `From` impls — these consume a `Sanitised` whose
+// inner string already passed `new`, so they don't widen the
+// invariant the way `From<String>`/`From<&str>` would (which is
+// why those are explicitly forbidden above). Used by `tui` /
+// `ratatui` rendering paths that take `Into<Cow<'_, str>>`.
+impl<'a> From<&'a Sanitised> for std::borrow::Cow<'a, str> {
+    fn from(s: &'a Sanitised) -> Self {
+        std::borrow::Cow::Borrowed(&s.0)
+    }
+}
+
+impl From<Sanitised> for std::borrow::Cow<'static, str> {
+    fn from(s: Sanitised) -> Self {
+        std::borrow::Cow::Owned(s.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

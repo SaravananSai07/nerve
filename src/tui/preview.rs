@@ -179,27 +179,28 @@ fn hint_bar<'a>(theme: &Theme) -> Line<'a> {
     ])
 }
 
-fn format_entry<'a>(idx: usize, entry: &LogEntry, theme: &Theme) -> Line<'a> {
+fn format_entry<'a>(idx: usize, entry: &'a LogEntry, theme: &Theme) -> Line<'a> {
     let num = format!("{:>3} ", idx + 1);
     match entry {
         LogEntry::UserText(text) => Line::from(vec![
             Span::styled(num, Style::default().fg(theme.muted)),
             Span::styled("▸ ", Style::default().fg(theme.waiting).add_modifier(Modifier::BOLD)),
-            Span::styled(text.as_str().to_string(), Style::default().fg(theme.waiting)),
+            Span::styled(text, Style::default().fg(theme.waiting)),
         ]),
         LogEntry::AssistantText(text) => Line::from(vec![
             Span::styled(num, Style::default().fg(theme.muted)),
             Span::styled("  ", Style::default().fg(theme.text)),
-            Span::styled(text.as_str().to_string(), Style::default().fg(theme.text)),
+            Span::styled(text, Style::default().fg(theme.text)),
         ]),
         LogEntry::ToolUse { name, detail } => {
             let mut spans = vec![
                 Span::styled(num, Style::default().fg(theme.muted)),
                 Span::styled("◉ ", Style::default().fg(theme.processing)),
-                Span::styled(name.as_str().to_string(), Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
+                Span::styled(name, Style::default().fg(theme.processing).add_modifier(Modifier::BOLD)),
             ];
             if !detail.is_empty() {
-                spans.push(Span::styled(format!(" {detail}"), Style::default().fg(theme.muted)));
+                spans.push(Span::styled(" ", Style::default().fg(theme.muted)));
+                spans.push(Span::styled(detail, Style::default().fg(theme.muted)));
             }
             Line::from(spans)
         }
@@ -214,9 +215,9 @@ fn format_entry<'a>(idx: usize, entry: &LogEntry, theme: &Theme) -> Line<'a> {
                 Span::styled(icon, Style::default().fg(color)),
             ];
             if snippet.is_empty() {
-                spans.push(Span::styled(status.as_str().to_string(), Style::default().fg(color)));
+                spans.push(Span::styled(status, Style::default().fg(color)));
             } else {
-                spans.push(Span::styled(snippet.as_str().to_string(), Style::default().fg(theme.muted)));
+                spans.push(Span::styled(snippet, Style::default().fg(theme.muted)));
             }
             Line::from(spans)
         }

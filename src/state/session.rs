@@ -143,13 +143,13 @@ impl SessionState {
 pub(crate) struct DiscoverySnapshot {
     pub(crate) id: SessionId,
     pub(crate) cwd: PathBuf,
-    pub(crate) name: String,
-    pub(crate) tty: Option<String>,
-    pub(crate) branch: Option<String>,
+    pub(crate) name: Sanitised,
+    pub(crate) tty: Option<Sanitised>,
+    pub(crate) branch: Option<Sanitised>,
     pub(crate) cpu_percent: f32,
     pub(crate) pid: Option<u32>,
     pub(crate) detected_state: SessionState,
-    pub(crate) current_tool: Option<String>,
+    pub(crate) current_tool: Option<Sanitised>,
     pub(crate) usage: TokenUsage,
     pub(crate) jsonl_path: Option<PathBuf>,
     pub(crate) jsonl_age_secs: Option<f64>,
@@ -211,18 +211,18 @@ impl Session {
     /// session at `Processing` for the first CONFIRM_TICKS while it
     /// confirmed its very first proposal.
     pub(crate) fn from_snapshot(snap: DiscoverySnapshot) -> Self {
-        // The cwd basename is the default name unless an override has
-        // already been applied upstream; sanitisation already happened
-        // in `discovery_snapshot_from_session_file`.
+        // Snapshot fields are already `Sanitised` — the discovery worker
+        // is the ingestion boundary, so the type guarantees the invariant
+        // by the time this code runs.
         Self {
             id: snap.id,
             cwd: snap.cwd,
-            name: Sanitised::new(snap.name),
+            name: snap.name,
             state_changed_at: Instant::now(),
-            tty: snap.tty.map(Sanitised::new),
-            branch: snap.branch.map(Sanitised::new),
+            tty: snap.tty,
+            branch: snap.branch,
             cpu_percent: snap.cpu_percent,
-            current_tool: snap.current_tool.map(Sanitised::new),
+            current_tool: snap.current_tool,
             activity: ActivityHistory::new(),
             jsonl_path: snap.jsonl_path,
             renamed: false,
@@ -312,20 +312,20 @@ impl Session {
     /// renamed-by-user case wins over both.
     pub(crate) fn merge_snapshot(&mut self, snap: DiscoverySnapshot, name_override: Option<&str>) {
         self.cpu_percent = snap.cpu_percent;
-        self.tty = snap.tty.map(Sanitised::new);
-        self.branch = snap.branch.map(Sanitised::new);
+        self.tty = snap.tty;
+        self.branch = snap.branch;
         self.pid = snap.pid;
         self.usage = snap.usage;
         if !self.renamed {
             self.name = name_override
                 .map(Sanitised::new)
-                .unwrap_or_else(|| Sanitised::new(snap.name));
+                .unwrap_or(snap.name);
         }
         if let Some(tool) = snap.current_tool {
             // current_tool sticks past the ToolRunning state so users
             // can see what the session was last doing when it goes
             // idle. Only updated when the snapshot has one to give.
-            self.current_tool = Some(Sanitised::new(tool));
+            self.current_tool = Some(tool);
         }
         if self.jsonl_path.is_none() {
             self.jsonl_path = snap.jsonl_path;
@@ -598,7 +598,7 @@ mod tests {
         let snap = DiscoverySnapshot {
             id: SessionId::new("id1"),
             cwd: PathBuf::from("/tmp/x"),
-            name: "x".into(),
+            name: Sanitised::new("x"),
             tty: None,
             branch: None,
             cpu_percent: 0.0,
@@ -641,7 +641,7 @@ mod tests {
         let snap = DiscoverySnapshot {
             id: SessionId::new("id1"),
             cwd: PathBuf::from("/tmp/x"),
-            name: "x".into(),
+            name: Sanitised::new("x"),
             tty: None,
             branch: None,
             cpu_percent: 0.0,
