@@ -4,7 +4,7 @@ use crossterm::event::{self, Event};
 use ratatui::DefaultTerminal;
 
 use crate::config::Config;
-use crate::detect::claude;
+use crate::detect::jsonl;
 use crate::log_info;
 use crate::notify::Notifier;
 use crate::paths::Paths;
@@ -41,7 +41,7 @@ fn load_log_entries(
     jsonl_path: &Option<std::path::PathBuf>,
 ) -> Vec<crate::state::log_entry::LogEntry> {
     match jsonl_path {
-        Some(jp) => claude::read_tail_entries(jp, 50),
+        Some(jp) => jsonl::read_tail_entries(jp, 50),
         None => Vec::new(),
     }
 }
