@@ -2,7 +2,7 @@
 name = "nerve-tui"
 version = "0.4.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "TUI for monitoring AI coding sessions across terminal tabs"
 license = "MIT"
 repository = "https://github.com/SaravananSai07/nerve"

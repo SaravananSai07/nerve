@@ -386,7 +386,7 @@ fn find_terminal_for_session<'a>(
             || t_canonical.starts_with(session_for_match)
         {
             let common = common_prefix_len(session_for_match, t_canonical);
-            if best.map_or(true, |(best_len, _)| common > best_len) {
+            if best.is_none_or(|(best_len, _)| common > best_len) {
                 best = Some((common, t));
             }
         }

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# A push that supersedes itself (force-push, rapid follow-ups) cancels
+# in-flight jobs so the queue can't grow unboundedly under heavy work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Stable toolchain on both supported hosts. nerve gates Ghostty behind
+  # cfg(target_os = "macos"), so the macOS leg is the only one that
+  # exercises the AppleScript bridge end-to-end.
+  build:
+    name: build / clippy / test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --verbose
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+
+  # Compile against the declared MSRV so a future contributor who reaches
+  # for a feature stabilised after 1.85 sees the failure on the PR, not
+  # months later when a downstream tries to build against the documented
+  # floor.
+  msrv:
+    name: msrv (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version=$(grep -E '^rust-version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets

@@ -779,7 +779,7 @@ pub(crate) fn kill_by_session_id(session_id: &str) -> Result<u32, String> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e == "json") {
+        if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
         let sf = match read_session_file(&path) {

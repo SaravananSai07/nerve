@@ -11,7 +11,7 @@ cargo run -- --dump      # JSON dump of discovered sessions
 cargo run -- --list      # one-line-per-session listing
 ```
 
-Minimum Rust version: 1.75
+Minimum Rust version: 1.85
 
 ## Architecture
 
