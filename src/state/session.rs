@@ -3,7 +3,9 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+use crate::state::activity::ActivityHistory;
 use crate::state::state_machine::StateMachine;
+use crate::state::token_usage::TokenUsage;
 use crate::util::sanitize::Sanitised;
 
 /// Consecutive `propose_state` calls required before the visible
@@ -55,30 +57,6 @@ impl From<String> for SessionId {
 impl From<&str> for SessionId {
     fn from(s: &str) -> Self {
         Self(s.to_string())
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub(crate) struct TokenUsage {
-    pub(crate) input_tokens: u64,
-    pub(crate) output_tokens: u64,
-    pub(crate) cache_read_tokens: u64,
-    pub(crate) cache_creation_tokens: u64,
-    pub(crate) cost_usd: f64,
-}
-
-impl TokenUsage {
-    pub(crate) fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_creation_tokens
-    }
-
-    pub(crate) fn compact_display(&self) -> String {
-        let total_k = self.total_tokens() as f64 / 1000.0;
-        if self.cost_usd >= 0.01 {
-            format!("{:.0}k/${:.2}", total_k, self.cost_usd)
-        } else {
-            format!("{:.0}k", total_k)
-        }
     }
 }
 
@@ -443,51 +421,6 @@ impl Session {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ActivityHistory {
-    buckets: [bool; 10],
-    #[serde(skip)]
-    last_update: Instant,
-}
-
-impl ActivityHistory {
-    pub(crate) fn new() -> Self {
-        Self {
-            buckets: [false; 10],
-            last_update: Instant::now(),
-        }
-    }
-
-    pub(crate) fn record_activity(&mut self) {
-        self.shift_if_needed();
-        self.buckets[9] = true;
-        self.last_update = Instant::now();
-    }
-
-    pub(crate) fn shift_if_needed(&mut self) {
-        let elapsed = self.last_update.elapsed().as_secs();
-        let shifts = (elapsed / 30).min(10) as usize;
-        if shifts > 0 {
-            self.buckets.rotate_left(shifts);
-            for b in &mut self.buckets[(10 - shifts)..] {
-                *b = false;
-            }
-            self.last_update = Instant::now();
-        }
-    }
-
-    pub(crate) fn sparkline(&self) -> String {
-        // U+2588 FULL BLOCK + U+2581 LOWER ONE-EIGHTH BLOCK reads as
-        // a binary timeline on every monospace font. The prior ▓░
-        // pair rendered with unevenly-spaced cells on Apple Terminal;
-        // the middle-dot interim sat mid-line and broke the timeline's
-        // baseline. `▁` sits flush at the baseline at the same width.
-        self.buckets
-            .iter()
-            .map(|&active| if active { '█' } else { '▁' })
-            .collect()
-    }
-}
 
 #[cfg(test)]
 mod tests {

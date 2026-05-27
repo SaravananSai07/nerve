@@ -10,7 +10,8 @@ use serde::Deserialize;
 use crate::detect::git::BranchCache;
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::{jsonl, process};
-use crate::state::session::{DiscoverySnapshot, SessionId, SessionState, TokenUsage};
+use crate::state::session::{DiscoverySnapshot, SessionId, SessionState};
+use crate::state::token_usage::TokenUsage;
 use crate::util::sanitize::Sanitised;
 
 /// Cap on the size of a per-pid session JSON file. The format is small

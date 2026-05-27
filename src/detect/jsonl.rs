@@ -6,7 +6,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::state::log_entry::LogEntry;
-use crate::state::session::{SessionState, TokenUsage};
+use crate::state::session::SessionState;
+use crate::state::token_usage::TokenUsage;
 use crate::util::sanitize::{Sanitised, strip_ansi};
 
 /// Open a JSONL transcript file with `O_NOFOLLOW`. Defends against

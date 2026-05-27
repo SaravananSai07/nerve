@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::state::session::{SessionState, TokenUsage};
+use crate::state::session::SessionState;
+use crate::state::token_usage::TokenUsage;
 
 /// Per-JSONL hot-path cache. Stores the tail-parse state result and the
 /// cumulative `TokenUsage` keyed by `(mtime, len, inode)`. On a tick
