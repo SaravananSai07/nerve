@@ -455,7 +455,7 @@ end tell
     None
 }
 
-pub(crate) fn focus_terminal(terminal_id: &str) -> anyhow::Result<()> {
+pub(super) fn focus_terminal(terminal_id: &str) -> anyhow::Result<()> {
     const SCRIPT: &str = r#"on run argv
     set tid to item 1 of argv
     tell application "Ghostty"

@@ -128,17 +128,18 @@ fn list_project_dirs() -> Vec<PathBuf> {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
-    let mut result: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .take(MAX_PROJECT_ENTRIES + 1)
-        .collect();
-    if result.len() > MAX_PROJECT_ENTRIES {
-        crate::log_warn!(
-            "discovery: projects dir exceeded {MAX_PROJECT_ENTRIES} entries; truncating"
-        );
-        result.truncate(MAX_PROJECT_ENTRIES);
+    let mut result: Vec<PathBuf> = Vec::new();
+    for (i, entry) in entries.enumerate() {
+        if i >= MAX_PROJECT_ENTRIES {
+            crate::log_warn!(
+                "discovery: projects dir exceeded {MAX_PROJECT_ENTRIES} entries; stopping enumeration"
+            );
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            result.push(entry.path());
+        }
     }
     result
 }

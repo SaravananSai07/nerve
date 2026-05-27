@@ -86,7 +86,7 @@ impl TmuxBridge {
     }
 }
 
-pub(crate) fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
+pub(super) fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["select-pane", "-t", pane_id])
         .status()?;
