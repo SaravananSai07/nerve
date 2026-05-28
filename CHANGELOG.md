@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.4.1 — 2026-05-28
+
+Post-`0.4.0` cleanup pass — no observable runtime change.
+
+### Operational
+
+- New `.github/workflows/ci.yml` — `cargo build`, `cargo clippy
+  --all-targets -- -D warnings`, and `cargo test` on `ubuntu-latest`
+  + `macos-latest`, plus a job pinned to the declared MSRV. The
+  `#![deny(unreachable_pub)]` lint and the 130-test trunk now
+  actually enforce on PRs.
+- `rust-version` bumped from `1.75` to `1.85`. The code didn't
+  need anything 1.85-specific, but pretending to support a
+  2.5-year-old toolchain was misleading; the MSRV CI job keeps
+  the declaration honest.
+
+### Sanitised type-wall closure
+
+- `impl Serialize for Sanitised` (delegates to the inner `&str`),
+  so `DiscoverySnapshot` can carry `Sanitised` fields without
+  changing the `--dump` JSON shape.
+- `DiscoverySnapshot.{name, tty, branch, current_tool}` lifted
+  from `String` / `Option<String>` to `Sanitised` /
+  `Option<Sanitised>`. The discovery worker is the ingestion
+  boundary; `Session::from_snapshot` and `merge_snapshot` no
+  longer re-wrap.
+- Outgoing `From<&Sanitised> for Cow<'_, str>` lets the preview
+  overlay borrow text directly into `Span::styled` instead of
+  cloning — five allocations per visible log line per frame
+  removed.
+- `PendingNotification.name` lifted to `Sanitised`.
+
+### Decomposition
+
+- `detect/claude.rs` (922 LOC) split: JSONL transcript parsing
+  (`read_tail_state`, `parse_token_usage`, `read_tail_entries`,
+  `extract_tool_result_snippet`, plus their helper structs and
+  tests) moved into a new sibling `detect/jsonl.rs`. `claude.rs`
+  now 425 LOC focused on session JSON + discovery orchestration.
+- `state/session.rs` (659 LOC) split: `TokenUsage` and
+  `ActivityHistory` moved to sibling files `state/token_usage.rs`
+  and `state/activity.rs`. `session.rs` now 592 LOC.
+
+### Polish
+
+- `list_project_dirs` switched to the same `enumerate+break+warn`
+  pattern as the sessions-dir enumeration (was
+  `take(MAX+1)+truncate`). Both `read_dir` caps now read
+  identically.
+- `platform::ghostty::focus_terminal` and `platform::tmux::focus_pane`
+  narrowed from `pub(crate)` to `pub(super)` (only consumer is
+  `platform::mod::BridgeId::focus`).
+
 ## 0.4.0 — 2026-05-25
 
 ### Code-quality + type-safety pass
