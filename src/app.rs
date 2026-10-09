@@ -31,8 +31,19 @@ fn is_controlling_tty<F: std::os::fd::AsFd>(fd: F) -> bool {
     nix::unistd::tcgetpgrp(fd.as_fd()).is_ok()
 }
 
-fn stdin_is_controlling_tty() -> bool {
-    is_controlling_tty(std::io::stdin())
+/// True once the far side of the pty has closed. When a tmux server or
+/// terminal dies abruptly, macOS keeps the slave as our controlling tty
+/// (`tcgetpgrp` still succeeds) but `poll` reports the hang-up.
+fn is_hung_up<F: std::os::fd::AsFd>(fd: F) -> bool {
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+    poll(&mut fds, PollTimeout::ZERO).is_ok()
+        && fds[0].revents().is_some_and(|r| r.contains(PollFlags::POLLHUP))
+}
+
+fn stdin_tty_alive() -> bool {
+    let stdin = std::io::stdin();
+    is_controlling_tty(&stdin) && !is_hung_up(&stdin)
 }
 
 /// How long the main loop gets to notice a lost tty on its own before the
@@ -56,7 +67,7 @@ fn spawn_tty_watchdog() {
             let mut lost_since: Option<std::time::Instant> = None;
             loop {
                 std::thread::sleep(Duration::from_millis(500));
-                if stdin_is_controlling_tty() {
+                if stdin_tty_alive() {
                     lost_since = None;
                     continue;
                 }
@@ -131,8 +142,11 @@ enum Overlay {
         scroll: usize,
         source: PreviewSource,
     },
-    ConfirmKill { name: String, id: SessionId, kind: SessionKind },
+    ConfirmKill { name: String, id: SessionId, kind: SessionKind, root: std::path::PathBuf },
     ConfirmPreview,
+    /// Full details of one session, read live each frame. Held by id so a
+    /// re-sort can't swap in another session under the user.
+    Details { id: SessionId },
 }
 
 mod discovery;
@@ -348,7 +362,7 @@ impl App {
             self.dispatch_notifications(pending);
         }
 
-        while !self.should_quit && !self.shutdown.requested() && stdin_is_controlling_tty() {
+        while !self.should_quit && !self.shutdown.requested() && stdin_tty_alive() {
             let loop_start = std::time::Instant::now();
             // Hoist preview scroll so the draw closure can take `&mut`
             // without conflicting with the `&self.overlay` borrow it
@@ -465,6 +479,11 @@ impl App {
                     Overlay::ConfirmPreview => {
                         confirm_preview::render(frame, &self.theme);
                     }
+                    Overlay::Details { id } => {
+                        if let Some(session) = visible.iter().find(|s| s.id == *id) {
+                            crate::tui::details::render(frame, &self.theme, session);
+                        }
+                    }
                     Overlay::None => {}
                 }
             })?;
@@ -514,7 +533,7 @@ impl App {
             self.floor_iteration(loop_start);
         }
 
-        if !stdin_is_controlling_tty() {
+        if !stdin_tty_alive() {
             log_info!("app: lost controlling tty; exiting cleanly");
         } else if self.shutdown.requested() {
             log_info!("app: shutdown signal received; exiting cleanly");
@@ -552,8 +571,8 @@ impl App {
                 }
             }
             SessionKind::Background => {
-                let id = session.id.clone();
-                self.attach_background(id.as_str());
+                let (id, root) = (session.id.clone(), session.claude_root.clone());
+                self.attach_background(id.as_str(), &root);
             }
         }
     }
@@ -561,13 +580,14 @@ impl App {
     /// Background sessions have no tab to jump to: open `claude attach`
     /// in a split where the terminal allows it, else hand the user the
     /// command on the clipboard.
-    fn attach_background(&mut self, session_id: &str) {
-        let argv = crate::detect::claude::attach_argv(session_id);
-        let job = argv[2];
-        match self.bridge.open_command(&argv) {
+    fn attach_background(&mut self, session_id: &str, root: &std::path::Path) {
+        // One shell-quoted string: tmux hands a single argument to the
+        // shell, and the same text is what the user would paste.
+        let cmd = crate::detect::claude::attach_command(session_id, root);
+        let job = crate::detect::claude::job_id(session_id);
+        match self.bridge.open_command(&[&cmd]) {
             Ok(true) => self.set_status_info(format!("attached to background job {job}")),
             Ok(false) => {
-                let cmd = argv.join(" ");
                 if copy_to_clipboard(&cmd) {
                     self.set_status_info(format!("copied `{cmd}` — paste it in any terminal"));
                 } else {
@@ -670,6 +690,23 @@ mod app_tests {
         assert!(!is_controlling_tty(&dev_null));
     }
 
+    // Regression: SIGKILLing a tmux server orphaned nerve at 100% CPU.
+    // The slave stayed nerve's controlling tty, so the watchdog's
+    // `tcgetpgrp` check never fired; only `poll` sees the hang-up.
+    #[test]
+    fn closed_pty_master_reads_as_hung_up() {
+        use nix::fcntl::OFlag;
+        use nix::pty::{grantpt, posix_openpt, ptsname, unlockpt};
+        let master = posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY).unwrap();
+        grantpt(&master).unwrap();
+        unlockpt(&master).unwrap();
+        let slave_path = unsafe { ptsname(&master) }.unwrap();
+        let slave = std::fs::OpenOptions::new().read(true).write(true).open(slave_path).unwrap();
+        assert!(!is_hung_up(&slave));
+        drop(master);
+        assert!(is_hung_up(&slave));
+    }
+
     // Killing the desktop app's embedded claude from outside leaves the
     // app showing a dead session; nerve must refuse before any dialog.
     #[test]
@@ -740,5 +777,47 @@ mod app_tests {
         );
         let heuristic = snap("s1", SessionKind::Terminal, SessionState::WaitingForInput);
         assert!(app.apply_discovery(vec![heuristic]).is_empty());
+    }
+
+    // A job blocked for days shows as Dormant but still exists in the
+    // daemon; `x` must still stop it. A dormant terminal session can't.
+    #[test]
+    fn dormant_background_job_can_still_be_stopped() {
+        let mut app = App::for_test(Bridge::NoOp, vec![snap("b1", SessionKind::Background, SessionState::Dormant)]);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(matches!(app.overlay, Overlay::ConfirmKill { .. }));
+
+        let mut app = App::for_test(Bridge::NoOp, vec![snap("t1", SessionKind::Terminal, SessionState::Dormant)]);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    // Regression: details was keyed by list index, so a re-sort swapped
+    // in another session and `c` / Enter acted on it.
+    #[test]
+    fn details_follow_their_session_across_resorts() {
+        let idle = |id| {
+            let mut s = snap(id, SessionKind::Terminal, SessionState::Idle);
+            s.state_authoritative = true;
+            s
+        };
+        let mut app = App::for_test(Bridge::NoOp, vec![idle("s1"), idle("s2")]);
+        let shown = app.nth_filtered(app.selected).unwrap().id.clone();
+        press(&mut app, KeyCode::Char('i'));
+        assert!(matches!(&app.overlay, Overlay::Details { id } if *id == shown));
+
+        // The other session starts waiting and sorts above ours.
+        let other = if shown.as_str() == "s1" { "s2" } else { "s1" };
+        let mut waiting = idle(other);
+        waiting.detected_state = SessionState::WaitingForInput;
+        let mine = idle(shown.as_str());
+        app.apply_discovery(vec![waiting, mine]);
+        app.follow_details_session();
+        assert_eq!(app.nth_filtered(app.selected).unwrap().id, shown);
+
+        // Gone from the list: the overlay closes rather than swallowing keys.
+        app.overlay = Overlay::Details { id: SessionId::new("nope".to_string()) };
+        app.follow_details_session();
+        assert!(matches!(app.overlay, Overlay::None));
     }
 }

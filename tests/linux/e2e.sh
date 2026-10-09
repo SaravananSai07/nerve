@@ -100,7 +100,10 @@ tmux -L t send-keys -t main:nerve / ; sleep 0.3; tmux -L t send-keys -t main:ner
 tmux -L t send-keys -t main:nerve Enter; sleep 1
 CLIP=$(xclip -selection clipboard -o 2>/dev/null)
 echo "clipboard: $CLIP"
-check "clipboard via xclip" "[ \"\$CLIP\" = 'claude attach abcd1234' ]"
+check "clipboard holds the root-pinned attach" "[ \"\$CLIP\" = \"CLAUDE_CONFIG_DIR='$ALT' claude attach abcd1234\" ]"
+tmux -L t send-keys -t main:nerve i; sleep 0.8
+check "details name the folder and job" "screen | grep -q '/work/bgjob' && screen | grep -q 'job id *abcd1234'"
+tmux -L t send-keys -t main:nerve Escape; sleep 0.3
 tmux -L t send-keys -t main:nerve Escape; sleep 0.3
 
 # x / y on gamma sends SIGTERM to the right pid.

@@ -56,7 +56,7 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, ctx: RenderContext<'_>) {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(3));
-    constraints.push(Constraint::Length(1));
+    constraints.push(Constraint::Length(status_rows(&ctx, inner.width)));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -75,6 +75,25 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, ctx: RenderContext<'_>) {
     let now = Instant::now();
     render_cards(frame, card_area, ctx.sessions, ctx.selected, ctx.theme, now);
     render_status_bar(frame, status_area, &ctx);
+}
+
+/// Most rows a status message may take; beyond that it's clipped.
+const STATUS_MAX_ROWS: u16 = 3;
+
+/// Rows the status bar needs. A message (e.g. a CLI error) wraps rather
+/// than being cut off at the terminal edge, borrowing up to
+/// `STATUS_MAX_ROWS` from the card area; the summary line is always one.
+fn status_rows(ctx: &RenderContext<'_>, width: u16) -> u16 {
+    ctx.status_message.map_or(1, |msg| message_rows(&msg.text, width))
+}
+
+/// Word wrap moves a word that straddles the edge to the next line, so
+/// count with a word wrap, not `width / cols`. One column goes to the
+/// leading space the renderer adds; erring a row high only borrows a row.
+fn message_rows(text: &str, width: u16) -> u16 {
+    let cols = (width as usize).saturating_sub(1).max(1);
+    let needed = crate::util::text::wrap_words(text, cols).len();
+    (needed.min(STATUS_MAX_ROWS as usize) as u16).max(1)
 }
 
 fn render_update_banner(frame: &mut Frame, area: Rect, theme: &Theme, version: &str) {
@@ -251,13 +270,16 @@ fn render_card(
     let tty_str = session.kind.location(session.tty.as_ref());
     let branch_str = session.branch.as_ref().map(|s| s.as_str()).unwrap_or("—");
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(tty_str, Style::default().fg(secondary_fg)),
-            Span::styled("  ⎇ ", Style::default().fg(border_color)),
-            Span::styled(branch_str, Style::default().fg(text_fg)),
-        ]),
-    ];
+    let mut where_spans = vec![Span::styled(tty_str, Style::default().fg(secondary_fg))];
+    if let Some(project) = session.project() {
+        where_spans.push(Span::styled(" · ", Style::default().fg(border_color)));
+        // Capped so a long repo name doesn't push the branch off the card.
+        let project = crate::util::text::truncate_width(project.as_str(), 24);
+        where_spans.push(Span::styled(project, Style::default().fg(text_fg)));
+    }
+    where_spans.push(Span::styled("  ⎇ ", Style::default().fg(border_color)));
+    where_spans.push(Span::styled(branch_str, Style::default().fg(text_fg)));
+    let mut lines = vec![Line::from(where_spans)];
 
     // While waiting, Claude's reason ("permission prompt", a background
     // job's open questions) is what the user needs; otherwise the last tool.
@@ -321,7 +343,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, ctx: &RenderContext<'_>) {
             format!(" {}", msg.text),
             Style::default().fg(msg.color(theme)),
         ));
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(
+            Paragraph::new(line).wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
         return;
     }
 
@@ -493,4 +518,61 @@ fn render_search_empty(frame: &mut Frame, area: Rect, theme: &Theme, query: &str
     .alignment(ratatui::layout::Alignment::Center);
 
     frame.render_widget(text, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::registry::SessionRegistry;
+    use crate::state::session::{DiscoverySnapshot, Session, SessionState};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    // Regression: long action errors were clipped at the terminal edge
+    // ("couldn't confirm 78240abc was stopped — th"). They now wrap.
+    #[test]
+    fn long_status_message_wraps_instead_of_clipping() {
+        let mut registry = SessionRegistry::new();
+        registry.upsert(Session::from_snapshot(DiscoverySnapshot::for_test("s1", SessionState::Idle)));
+        let theme = crate::tui::theme::Theme::catalog(None).remove(0);
+        let text = "'Analyze repository overview and state': couldn't confirm 78240abc was \
+                    stopped — the background service didn't answer in time; try again";
+        let msg = StatusMessage::error(text);
+        let sessions: Vec<&Session> = registry.sorted_sessions();
+        let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        term.draw(|f| {
+            render(
+                f,
+                f.area(),
+                RenderContext {
+                    registry: &registry,
+                    sessions: &sessions,
+                    selected: 0,
+                    theme: &theme,
+                    status_message: Some(&msg),
+                    notifications_muted: false,
+                    update_banner: None,
+                    search_query: None,
+                    claude_installed: true,
+                },
+            )
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let screen: String = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let squashed = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squashed.contains("try again"), "message was clipped:\n{screen}");
+    }
+
+    // A word straddling the edge wraps whole, so width / cols undercounts.
+    #[test]
+    fn message_rows_count_word_wrapped_lines() {
+        let text = format!("{} bbbb {}", "a".repeat(37), "c".repeat(36));
+        assert_eq!(message_rows(&text, 40), 3);
+        assert_eq!(message_rows("short", 40), 1);
+        assert_eq!(message_rows(&"x ".repeat(200), 40), STATUS_MAX_ROWS);
+    }
 }

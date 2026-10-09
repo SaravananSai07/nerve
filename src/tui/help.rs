@@ -22,6 +22,7 @@ const BINDINGS: &[HelpLine] = &[
     HelpLine::Entry { key: "1-9", desc: "Jump to nth session" },
     HelpLine::Header("actions"),
     HelpLine::Entry { key: "Enter", desc: "Go to session (tab / app / attach)" },
+    HelpLine::Entry { key: "i", desc: "Details: folder, ids, full reason, how to reach" },
     HelpLine::Entry { key: "p", desc: "Preview log / job timeline" },
     HelpLine::Entry { key: "Shift+P", desc: "Preview live output" },
     HelpLine::Entry { key: "n", desc: "Rename session" },
