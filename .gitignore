@@ -1,2 +1,7 @@
 /target
 .DS_Store
+
+# cargo install --root bookkeeping, if ever pointed at the repo
+/.crates.toml
+/.crates2.json
+/bin/

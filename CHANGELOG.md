@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2 — 2026-10-09
+
+- Repackage of 0.5.1 without stray build artifacts (cargo-install
+  bookkeeping and a compiled binary) that were accidentally committed and
+  published with it. No code change; 0.5.1 is yanked.
+
 ## 0.5.1 — 2026-10-09
 
 ### Fixed
