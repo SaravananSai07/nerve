@@ -149,8 +149,8 @@ fn focus_command(bridge: &Bridge, target: &SessionTarget) -> Option<String> {
     let exe_str = exe.to_str()?;
     Some(format!(
         "{} --focus {}",
-        shell_quote(exe_str),
-        shell_quote(&id_str)
+        crate::util::text::shell_quote(exe_str),
+        crate::util::text::shell_quote(&id_str)
     ))
 }
 
@@ -164,21 +164,6 @@ fn is_safe_bridge_id(s: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-#[cfg(target_os = "macos")]
 fn terminal_bundle_id(app: &str) -> Option<&'static str> {
     match app {
         "Ghostty" => Some("com.mitchellh.ghostty"),
@@ -188,26 +173,5 @@ fn terminal_bundle_id(app: &str) -> Option<&'static str> {
         "kitty" => Some("net.kovidgoyal.kitty"),
         "WezTerm" => Some("com.github.wez.wezterm"),
         _ => None,
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::shell_quote;
-
-    #[test]
-    fn shell_quote_wraps_simple_path() {
-        assert_eq!(shell_quote("/usr/local/bin/nerve"), "'/usr/local/bin/nerve'");
-    }
-
-    #[test]
-    fn shell_quote_handles_embedded_quote() {
-        // bash idiom: 'foo'\''bar' is the safe single-quoted form of foo'bar
-        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-    }
-
-    #[test]
-    fn shell_quote_preserves_spaces() {
-        assert_eq!(shell_quote("/Users/jane doe/bin/nerve"), "'/Users/jane doe/bin/nerve'");
     }
 }

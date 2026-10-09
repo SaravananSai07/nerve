@@ -24,6 +24,7 @@ Press `?` inside nerve for the live, in-app version.
 | `h/l` `←/→` | Navigate columns |
 | `1-9` | Jump to nth session |
 | `Enter` | Go to the session: terminal tab, Claude app, or `claude attach` for background jobs (a tmux split, else copied to the clipboard) |
+| `i` | Details: folder, full waiting reason, last activity, ids, Claude data dir, and how to reach the session (`c` copies a background job's attach command, else the folder; `Enter` goes there) |
 | `p` | Preview session log (a background job's timeline when it has no transcript) |
 | `Shift+P` | Preview live terminal capture (Ghostty/tmux; other sessions show the log) |
 | `n` | Rename session |

@@ -2,6 +2,8 @@
 name = "nerve-tui"
 version = "0.5.2"
 edition = "2021"
+# Two binaries since the `nerve-tui` alias; keep plain `cargo run` working.
+default-run = "nerve"
 rust-version = "1.85"
 description = "TUI for monitoring AI coding sessions across terminal tabs"
 license = "MIT"
@@ -28,7 +30,7 @@ crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-nix = { version = "0.29", features = ["signal", "process", "term", "fs"] }
+nix = { version = "0.29", features = ["signal", "process", "term", "fs", "poll"] }
 dirs = "6"
 anyhow = "1.0.102"
 signal-hook = "0.4.4"

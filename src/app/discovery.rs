@@ -82,6 +82,18 @@ impl App {
         if count > 0 && self.selected >= count {
             self.selected = count - 1;
         }
+        self.follow_details_session();
+    }
+
+    /// Keep the details view's session selected as the list re-sorts, so
+    /// Enter and `c` act on what's shown; close it once it's gone.
+    pub(super) fn follow_details_session(&mut self) {
+        if let Overlay::Details { id } = &self.overlay {
+            match self.filtered.iter(&self.registry).position(|s| s.id == *id) {
+                Some(index) => self.selected = index,
+                None => self.overlay = Overlay::None,
+            }
+        }
     }
 
     /// Stage 2 — pure registry mutation. Returns the batch of

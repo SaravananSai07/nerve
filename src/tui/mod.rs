@@ -3,6 +3,7 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 pub(crate) mod cards;
 pub(crate) mod confirm_kill;
 pub(crate) mod confirm_preview;
+pub(crate) mod details;
 pub(crate) mod help;
 pub(crate) mod preview;
 pub(crate) mod rename;

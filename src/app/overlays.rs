@@ -73,7 +73,12 @@ impl App {
         let Some(session) = self.nth_filtered(self.selected) else {
             return;
         };
-        if session.state().is_terminal() {
+        let root = session.claude_root.clone();
+        // A job parked for days reads as Dormant but still exists in the
+        // daemon, and that's exactly the one worth stopping.
+        let parked_job = session.kind == SessionKind::Background
+            && *session.state() == crate::state::session::SessionState::Dormant;
+        if session.state().is_terminal() && !parked_job {
             self.set_status_error("session is already gone or dormant");
             return;
         }
@@ -84,10 +89,10 @@ impl App {
         let name = session.name().to_string();
         let id = session.id.clone();
         let kind = session.kind;
-        self.overlay = Overlay::ConfirmKill { name, id, kind };
+        self.overlay = Overlay::ConfirmKill { name, id, kind, root };
     }
 
-    pub(super) fn execute_kill(&mut self, name: &str, id: &str, kind: SessionKind) {
+    pub(super) fn execute_kill(&mut self, name: &str, id: &str, kind: SessionKind, root: std::path::PathBuf) {
         // Both paths shell out (`claude stop`, or a fresh `ps` to
         // re-validate the pid), so they run off the UI thread.
         let (name, id) = (name.to_string(), id.to_string());
@@ -97,13 +102,25 @@ impl App {
         };
         match kind {
             SessionKind::Background => self.run_action("stopping…".into(), move || {
-                outcome(claude::stop_background_job(&id))
+                outcome(claude::stop_background_job(&id, &root))
             }),
             SessionKind::Terminal => self.run_action("sending SIGTERM…".into(), move || {
                 outcome(claude::kill_by_session_id(&id).map(|pid| format!("sent SIGTERM (pid {pid})")))
             }),
             // `start_kill` never opens the dialog for these.
             SessionKind::Desktop => {}
+        }
+    }
+
+    pub(super) fn copy_selected_details_target(&mut self) {
+        let Some(session) = self.nth_filtered(self.selected) else {
+            return;
+        };
+        let (what, text) = crate::tui::details::copy_target(session);
+        if super::copy_to_clipboard(&text) {
+            self.set_status_info(format!("copied {what}"));
+        } else {
+            self.set_status_error(format!("no clipboard tool found; {what}: {text}"));
         }
     }
 

@@ -167,11 +167,16 @@ pub(crate) struct DiscoverySnapshot {
     pub(crate) current_tool: Option<Sanitised>,
     pub(crate) usage: TokenUsage,
     pub(crate) jsonl_path: Option<PathBuf>,
-    pub(crate) jsonl_age_secs: Option<f64>,
+    /// Seconds since the session last wrote anything: its transcript, or
+    /// for a parked background job its state file.
+    pub(crate) activity_age_secs: Option<f64>,
     pub(crate) kind: SessionKind,
     /// Claude's own reason for `WaitingForInput`, e.g. "permission prompt".
     pub(crate) waiting_for: Option<Sanitised>,
     pub(crate) official: Option<OfficialUsage>,
+    /// Claude config dir the session belongs to (`~/.claude` or
+    /// `$CLAUDE_CONFIG_DIR`). The `claude` CLI must run against it.
+    pub(crate) claude_root: PathBuf,
     /// True when `detected_state` came from Claude's own status field
     /// rather than transcript heuristics, so it needs no debouncing.
     #[serde(skip)]
@@ -193,10 +198,11 @@ impl DiscoverySnapshot {
             current_tool: None,
             usage: TokenUsage::default(),
             jsonl_path: None,
-            jsonl_age_secs: None,
+            activity_age_secs: None,
             kind: SessionKind::Terminal,
             waiting_for: None,
             official: None,
+            claude_root: PathBuf::new(),
             state_authoritative: false,
         }
     }
@@ -232,10 +238,11 @@ pub(crate) struct Session {
     renamed: bool,
     pub(crate) usage: TokenUsage,
     pub(crate) pid: Option<u32>,
-    pub(crate) jsonl_age_secs: Option<f64>,
+    pub(crate) activity_age_secs: Option<f64>,
     pub(crate) kind: SessionKind,
     pub(crate) waiting_for: Option<Sanitised>,
     pub(crate) official: Option<OfficialUsage>,
+    pub(crate) claude_root: PathBuf,
     last_notified_state: Option<SessionState>,
     state_machine: StateMachine<SessionState>,
 }
@@ -278,10 +285,11 @@ impl Session {
             renamed: false,
             usage: snap.usage,
             pid: snap.pid,
-            jsonl_age_secs: snap.jsonl_age_secs,
+            activity_age_secs: snap.activity_age_secs,
             kind: snap.kind,
             waiting_for: snap.waiting_for,
             official: snap.official,
+            claude_root: snap.claude_root,
             last_notified_state: None,
             state_machine: StateMachine::new(snap.detected_state, CONFIRM_TICKS),
         }
@@ -311,10 +319,11 @@ impl Session {
             renamed: false,
             usage: TokenUsage::default(),
             pid: None,
-            jsonl_age_secs: None,
+            activity_age_secs: None,
             kind: SessionKind::Terminal,
             waiting_for: None,
             official: None,
+            claude_root: PathBuf::new(),
             last_notified_state: None,
             state_machine: StateMachine::new(SessionState::Processing, CONFIRM_TICKS),
         }
@@ -390,6 +399,7 @@ impl Session {
         self.pid = snap.pid;
         self.usage = snap.usage;
         self.kind = snap.kind;
+        self.claude_root = snap.claude_root;
         self.waiting_for = snap.waiting_for;
         if snap.official.is_some() {
             self.official = snap.official;
@@ -408,8 +418,8 @@ impl Session {
         if self.jsonl_path.is_none() {
             self.jsonl_path = snap.jsonl_path;
         }
-        if let Some(age) = snap.jsonl_age_secs {
-            self.jsonl_age_secs = Some(age);
+        if let Some(age) = snap.activity_age_secs {
+            self.activity_age_secs = Some(age);
         }
     }
 
@@ -436,6 +446,22 @@ impl Session {
 
     pub(crate) fn name(&self) -> &Sanitised {
         &self.name
+    }
+
+    /// The project folder, when the name doesn't already say it. Claude's
+    /// session names ("Analyze repository overview") don't say which repo.
+    /// Claude's worktrees (`<repo>/.claude/worktrees/<name>`) report the
+    /// repo, since the branch already identifies the worktree.
+    pub(crate) fn project(&self) -> Option<Sanitised> {
+        let parts: Vec<_> = self.cwd.components().map(|c| c.as_os_str()).collect();
+        let dir = match parts.as_slice() {
+            [.., repo, dot_claude, worktrees, _]
+                if *dot_claude == ".claude" && *worktrees == "worktrees" => repo,
+            [.., last] => last,
+            [] => return None,
+        }
+        .to_string_lossy();
+        (!self.name.as_str().starts_with(dir.as_ref())).then(|| Sanitised::new(dir.into_owned()))
     }
 
     /// Claude's reported cost when the statusline hook supplies it, else
@@ -682,6 +708,18 @@ mod tests {
         let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
         assert!(!s.observe_state(SessionState::Idle, false));
         assert_eq!(s.state(), &SessionState::Processing);
+    }
+
+    // Cards show the repo next to Claude's session name, which doesn't
+    // say which repo it is. Worktrees name the repo, not the worktree.
+    #[test]
+    fn project_names_the_repo_unless_the_name_does() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/home/u/ape"));
+        assert!(s.project().is_none(), "default name is already the folder");
+        s.rename_to("Analyze repository".into());
+        assert_eq!(s.project().unwrap(), "ape");
+        s.cwd = PathBuf::from("/home/u/nyan/.claude/worktrees/design-files-09cbde");
+        assert_eq!(s.project().unwrap(), "nyan");
     }
 
     #[test]

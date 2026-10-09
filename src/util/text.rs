@@ -51,9 +51,88 @@ pub(crate) fn truncate_width(s: &str, max_cols: usize) -> String {
     out
 }
 
+/// Single-quote for a POSIX shell. Safe for any input: an embedded `'`
+/// closes the quote, emits an escaped quote, and reopens.
+pub(crate) fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Coarse "how long ago": one unit, largest first. For ages that can run
+/// to months, where "2904h 05m" would be unreadable.
+pub(crate) fn format_age(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        0..60 => "just now".to_string(),
+        60..3600 => format!("{}m ago", s / 60),
+        3600..86_400 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// Greedy word wrap to `cols` display columns. Words wider than a line
+/// (paths, ids) are split between grapheme clusters.
+pub(crate) fn wrap_words(text: &str, cols: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let w = word.width();
+        if used > 0 && used + 1 + w > cols {
+            lines.push(String::new());
+            used = 0;
+        }
+        if used > 0 {
+            lines.last_mut().unwrap().push(' ');
+            used += 1;
+        }
+        for g in word.graphemes(true) {
+            let gw = g.width();
+            if used + gw > cols && used > 0 {
+                lines.push(String::new());
+                used = 0;
+            }
+            lines.last_mut().unwrap().push_str(g);
+            used += gw;
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_breaks_on_words_and_splits_long_ones() {
+        assert_eq!(wrap_words("stay silent to hear reply", 12), ["stay silent", "to hear", "reply"]);
+        assert_eq!(wrap_words("/a/very/long/path", 8), ["/a/very/", "long/pat", "h"]);
+        assert_eq!(wrap_words("", 8), [""]);
+    }
+
+    #[test]
+    fn age_uses_one_coarse_unit() {
+        assert_eq!(format_age(5.0), "just now");
+        assert_eq!(format_age(150.0), "2m ago");
+        assert_eq!(format_age(7300.0), "2h ago");
+        assert_eq!(format_age(127.0 * 86_400.0), "127d ago");
+        assert_eq!(format_age(-1.0), "just now");
+    }
+
+    #[test]
+    fn shell_quote_wraps_and_escapes() {
+        assert_eq!(shell_quote("/usr/local/bin/nerve"), "'/usr/local/bin/nerve'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("/Users/jane doe/bin"), "'/Users/jane doe/bin'");
+    }
 
     #[test]
     fn width_truncation_counts_wide_clusters_twice() {

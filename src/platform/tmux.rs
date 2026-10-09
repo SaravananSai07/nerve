@@ -97,7 +97,8 @@ pub(super) fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run `argv` in a new pane split beside the current one.
+/// Run `argv` in a new pane split beside the current one. A single
+/// element is a shell command line, which tmux hands to the shell.
 pub(super) fn open_split(argv: &[&str]) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["split-window", "-h"])

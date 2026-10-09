@@ -72,9 +72,34 @@ pub(crate) fn job_id(session_id: &str) -> &str {
     session_id.get(..8).unwrap_or(session_id)
 }
 
-/// argv that attaches a terminal to a background job.
-pub(crate) fn attach_argv(session_id: &str) -> [&str; 3] {
-    ["claude", "attach", job_id(session_id)]
+/// The `claude` CLI scoped to one config root. A job only exists in the
+/// root it was started from, and nerve's own `$CLAUDE_CONFIG_DIR` (inherited
+/// from the user's shell) may point elsewhere — e.g. desktop-app jobs live
+/// in `~/.claude` while the CLI uses a relocated dir. Without this, `claude
+/// stop` reports it "couldn't confirm" a job it can't see.
+fn claude_cli(root: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("claude");
+    cmd.env("CLAUDE_CONFIG_DIR", root);
+    cmd
+}
+
+/// Shell command that attaches a terminal to a background job, scoped to
+/// its config root. A command line rather than argv: a tmux split runs it
+/// through the user's shell, and it's what gets pasted otherwise.
+pub(crate) fn attach_command(session_id: &str, root: &Path) -> String {
+    use crate::util::text::shell_quote;
+    // Ids are charset-checked, but that set allows `$`, which a shell
+    // would expand. Plain ids stay unquoted so the command reads cleanly.
+    let job = job_id(session_id);
+    let job = if job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        job.to_string()
+    } else {
+        shell_quote(job)
+    };
+    format!(
+        "CLAUDE_CONFIG_DIR={} claude attach {job}",
+        shell_quote(Sanitised::new(root.to_string_lossy()).as_str()),
+    )
 }
 
 /// `<root>/jobs/<id>/state.json` for a `claude --bg` session. Parked jobs
@@ -368,7 +393,7 @@ fn load_session(
     let branch = caches.branch.read_or_refresh(&cwd).map(Sanitised::new);
     let jsonl_path = find_jsonl(&resolved_id, &cwd, root);
 
-    let (tail_state, usage, jsonl_age_secs) = match &jsonl_path {
+    let (tail_state, usage, activity_age_secs) = match &jsonl_path {
         Some(jp) => {
             let (tail, usage) = caches.jsonl.read_or_refresh(
                 jp,
@@ -435,10 +460,11 @@ fn load_session(
         current_tool,
         usage,
         jsonl_path,
-        jsonl_age_secs,
+        activity_age_secs,
         kind,
         waiting_for,
         official,
+        claude_root: root.path.clone(),
         state_authoritative,
     })
 }
@@ -535,7 +561,7 @@ fn load_parked_job(
     if !matches!(job.state.as_str(), "blocked" | "working") {
         return None;
     }
-    let detected = state_from_job(&job.state, None)?;
+    let mut detected = state_from_job(&job.state, None)?;
     let cwd = PathBuf::from(&job.cwd);
     let name = display_name(job.name.as_deref(), &cwd);
     let waiting_for = (detected == SessionState::WaitingForInput)
@@ -545,7 +571,7 @@ fn load_parked_job(
         .map(Sanitised::new);
 
     let jsonl_path = find_jsonl(&id, &cwd, root);
-    let (usage, jsonl_age_secs) = match &jsonl_path {
+    let (usage, transcript_age) = match &jsonl_path {
         Some(jp) => {
             let (_, usage) = caches.jsonl.read_or_refresh(
                 jp,
@@ -556,6 +582,22 @@ fn load_parked_job(
         }
         None => (TokenUsage::default(), None),
     };
+    // The job file is rewritten on every state change, so it dates the
+    // last activity even when the transcript can't be found.
+    // An unreadable or future mtime reads as f64::MAX; don't let that alone
+    // make the job look months old.
+    let job_age = Some(file_age_secs(path)).filter(|age| *age < f64::MAX);
+    let activity_age_secs = match (transcript_age, job_age) {
+        (Some(t), Some(j)) => Some(t.min(j)),
+        (t, j) => t.or(j),
+    };
+    // Blocked for days: the user has moved on. Same 48 h rule as an
+    // interactive session waiting at a prompt.
+    if detected == SessionState::WaitingForInput
+        && activity_age_secs.is_some_and(|age| age > DORMANT_AFTER_SECS)
+    {
+        detected = SessionState::Dormant;
+    }
     let official = caches.statusline.read(&id);
 
     Some(DiscoverySnapshot {
@@ -570,10 +612,11 @@ fn load_parked_job(
         current_tool: None,
         usage,
         jsonl_path,
-        jsonl_age_secs,
+        activity_age_secs,
         kind: SessionKind::Background,
         waiting_for,
         official,
+        claude_root: root.path.clone(),
         state_authoritative: true,
     })
 }
@@ -702,9 +745,9 @@ fn file_age_secs(path: &Path) -> f64 {
 
 /// `claude stop` a background job; its conversation stays resumable.
 /// Blocks on the CLI, so callers keep it off the UI thread.
-pub(crate) fn stop_background_job(session_id: &str) -> Result<String, String> {
+pub(crate) fn stop_background_job(session_id: &str, root: &Path) -> Result<String, String> {
     let job = job_id(session_id);
-    let out = std::process::Command::new("claude")
+    let out = claude_cli(root)
         .args(["stop", job])
         .stdin(std::process::Stdio::null())
         .output()
@@ -712,8 +755,16 @@ pub(crate) fn stop_background_job(session_id: &str) -> Result<String, String> {
     if out.status.success() {
         Ok(format!("stopped background job {job}"))
     } else {
-        let msg = String::from_utf8_lossy(&out.stderr);
-        Err(Sanitised::new(msg.trim().to_string()).to_string())
+        // The CLI may report on either stream, across several lines; the
+        // status bar shows one message.
+        let raw = [out.stderr, out.stdout].concat();
+        let msg = String::from_utf8_lossy(&raw);
+        let msg = msg.split_whitespace().collect::<Vec<_>>().join(" ");
+        Err(if msg.is_empty() {
+            format!("claude stop {job} failed ({})", out.status)
+        } else {
+            Sanitised::new(msg).to_string()
+        })
     }
 }
 
@@ -869,6 +920,34 @@ mod tests {
         assert_eq!(job_id("abcdefgé-x"), "abcdefgé-x");
     }
 
+    // Regression: nerve inherits the shell's $CLAUDE_CONFIG_DIR, but a job
+    // under the other root is invisible to a CLI pointed there, so
+    // `claude stop` failed with "couldn't confirm … was stopped".
+    #[test]
+    fn cli_calls_target_the_sessions_own_root() {
+        let root = Path::new("/home/u/.claude");
+        let cmd = claude_cli(root);
+        let env: Vec<_> = cmd.get_envs().collect();
+        assert_eq!(env, [(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"), Some(root.as_os_str()))]);
+        assert_eq!(
+            attach_command("78240abc-845e", root),
+            "CLAUDE_CONFIG_DIR='/home/u/.claude' claude attach 78240abc"
+        );
+        // `$` passes the id charset but must not reach the shell bare.
+        assert_eq!(
+            attach_command("$HOME-ab-1", root),
+            "CLAUDE_CONFIG_DIR='/home/u/.claude' claude attach '$HOME-ab'"
+        );
+    }
+
+    #[test]
+    fn discovered_sessions_record_their_root() {
+        let session = r#"{"pid":4242,"sessionId":"abcd1234-0000","cwd":"/x","status":"busy","kind":"bg"}"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let snaps = discover_fixture_in(&tmp, session, None);
+        assert_eq!(snaps[0].claude_root, tmp.path());
+    }
+
     #[test]
     fn job_state_mapping() {
         // Regression: a live bg session whose pid file says "shell" must
@@ -924,7 +1003,14 @@ mod tests {
     /// Lay out a Claude root with one session file (and optional job
     /// state) and run discovery against a fixture process table.
     fn discover_fixture(session_json: &str, job_state: Option<&str>) -> Vec<DiscoverySnapshot> {
-        let tmp = tempfile::tempdir().unwrap();
+        discover_fixture_in(&tempfile::tempdir().unwrap(), session_json, job_state)
+    }
+
+    fn discover_fixture_in(
+        tmp: &tempfile::TempDir,
+        session_json: &str,
+        job_state: Option<&str>,
+    ) -> Vec<DiscoverySnapshot> {
         let root = tmp.path().to_path_buf();
         std::fs::create_dir_all(root.join("sessions")).unwrap();
         std::fs::write(root.join("sessions/4242.json"), session_json).unwrap();
@@ -997,5 +1083,30 @@ mod tests {
         assert_eq!(snap.detected_state, SessionState::WaitingForInput);
         assert_eq!(snap.waiting_for.as_ref().map(Sanitised::as_str), Some("Answer 3 questions"));
         assert!(load_parked_job(&write("done"), &root, &mut caches, &known).is_none());
+    }
+
+    // Regression: a job blocked since months ago showed as "Waiting 3m"
+    // because there was no transcript to date it. The job file's own
+    // mtime ages it, and past 48 h it's Dormant like any stale prompt.
+    #[test]
+    fn long_blocked_parked_job_is_dormant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Root { path: tmp.path().to_path_buf(), project_dirs: Vec::new() };
+        let p = tmp.path().join("state.json");
+        std::fs::write(&p, r#"{"state":"blocked","sessionId":"abb1a2d1-x","cwd":"/a/p","needs":"reply"}"#)
+            .unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+
+        let snap = load_parked_job(&p, &root, &mut ScanCaches::new(None), &HashSet::new()).unwrap();
+        assert_eq!(snap.detected_state, SessionState::Dormant);
+        assert!(snap.activity_age_secs.unwrap() > DORMANT_AFTER_SECS);
+
+        // A future mtime (clock skew) can't be dated; it mustn't read as ancient.
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&p).unwrap().set_modified(future).unwrap();
+        let snap = load_parked_job(&p, &root, &mut ScanCaches::new(None), &HashSet::new()).unwrap();
+        assert_eq!(snap.detected_state, SessionState::WaitingForInput);
+        assert_eq!(snap.activity_age_secs, None);
     }
 }

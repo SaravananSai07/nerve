@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Stopping or attaching to a background job failed when it lived under
+  the other Claude config dir.** nerve watches both `~/.claude` and
+  `$CLAUDE_CONFIG_DIR`, but ran `claude stop` / `claude attach` with
+  whichever one it inherited, so the CLI couldn't see the job ("couldn't
+  confirm … was stopped"). Every CLI call now targets the session's own
+  config dir.
+- **Long status messages were clipped at the screen edge.** They now wrap
+  over up to three lines.
+- **nerve still pinned a CPU core when its tmux server was killed.** The
+  pty stays nerve's controlling tty in that case, so the 0.5.0 watchdog
+  never fired. It now also checks the tty for a hang-up.
+- **Background jobs blocked for months showed as "Waiting 3m".** With no
+  transcript, nothing dated them; the job file now does, and after 48 h
+  they show as Dormant like any stale prompt.
+- Plain `cargo run` works again (it broke when the `nerve-tui` alias
+  binary was added).
+
+### New
+
+- **Cards name the repo** when Claude's session name doesn't
+  (`background · ape`). For Claude worktrees it's the repo, not the
+  worktree folder.
+- **`i` opens a details view** for the selected session: the folder, the
+  full waiting reason, when it was last active, its ids, the Claude data
+  dir, and how to reach it. `c` copies the attach command for a
+  background job (the folder for other sessions) and `Enter` goes to the
+  session.
+- **Background jobs blocked for days can still be stopped** with `x`,
+  though they show as Dormant.
+
 ## 0.5.2 — 2026-10-09
 
 - Repackage of 0.5.1 without stray build artifacts (cargo-install

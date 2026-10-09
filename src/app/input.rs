@@ -39,10 +39,10 @@ impl App {
             Overlay::ConfirmKill { .. } => {
                 match code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        if let Overlay::ConfirmKill { name, id, kind } =
+                        if let Overlay::ConfirmKill { name, id, kind, root } =
                             std::mem::replace(&mut self.overlay, Overlay::None)
                         {
-                            self.execute_kill(&name, id.as_str(), kind);
+                            self.execute_kill(&name, id.as_str(), kind, root);
                         }
                     }
                     // Enter / n / Esc / q all cancel — kill is
@@ -59,6 +59,20 @@ impl App {
             }
             Overlay::ConfirmPreview => {
                 self.handle_confirm_preview_key(code);
+                return;
+            }
+            Overlay::Details { .. } => {
+                match code {
+                    KeyCode::Enter => {
+                        self.overlay = Overlay::None;
+                        self.go_to_selected_tab();
+                    }
+                    KeyCode::Char('c') => self.copy_selected_details_target(),
+                    KeyCode::Char('i') | KeyCode::Char('q') | KeyCode::Esc => {
+                        self.overlay = Overlay::None;
+                    }
+                    _ => {}
+                }
                 return;
             }
             Overlay::None => {}
@@ -130,6 +144,11 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.start_kill();
+            }
+            KeyCode::Char('i') => {
+                if let Some(session) = self.nth_filtered(self.selected) {
+                    self.overlay = Overlay::Details { id: session.id.clone() };
+                }
             }
             KeyCode::Char('u') => {
                 // Dismiss the update banner for *this version only*.

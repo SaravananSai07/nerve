@@ -33,9 +33,12 @@ It checks:
   dropping daemon-spawned `claude` processes;
 - new sessions appearing within 2 s via inotify in both roots;
 - notifications carrying the waiting reason;
-- the clipboard fallback and `claude attach` in a tmux split;
+- the clipboard fallback (with the job's `CLAUDE_CONFIG_DIR` pinned) and
+  `claude attach` in a tmux split;
+- the `i` details view naming a background job's folder and job id;
 - SIGTERM reaching only the targeted session;
-- nerve exiting after its tty dies (the watchdog).
+- nerve exiting after its tty dies (the watchdog), including when the
+  tmux server is killed outright.
 
 To iterate faster, keep the build and crate caches between runs:
 
@@ -103,7 +106,9 @@ cd $T/bg && claude --bg --model haiku --permission-mode bypassPermissions \
 | Find its card | Kind `background`, state `Processing` / `Tool: Bash` (cross-check `claude agents --json`) |
 | A job that asks a question | `Waiting (<its question>)`, matching `claude agents` state `blocked` |
 | `Enter` in tmux | A split opens running `claude attach <job>`, attached to the job |
-| `Enter` outside tmux | Status: ``copied `claude attach <job>` — paste it in any terminal``; the command is on the clipboard |
+| `Enter` outside tmux | Status: ``copied `CLAUDE_CONFIG_DIR=… claude attach <job>` — paste it in any terminal``; the command is on the clipboard |
+| `i` | Details show the job's folder, full question, last activity, job id, Claude data dir and the attach command; `c` copies it |
+| Start nerve with the *other* `CLAUDE_CONFIG_DIR`, then `x` and `y` | Still stops the job: CLI calls target the job's own config dir |
 | `p` | The transcript, or a `TIMELINE` of state changes if there is none |
 | `x` and `y` | `stopping…`, then `stopped background job <job>`; `claude agents --json --all` shows `stopped` |
 
