@@ -16,12 +16,12 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 export CARGO_TARGET_DIR=/target
 echo "== build / clippy / tests on Linux, Rust $(rustc --version | cut -d' ' -f2) (MSRV)"
 cargo build --locked --release -q 2>&1 | tail -3
-check "release build" "test -x /target/release/nerve-tui"
+check "release build" "test -x /target/release/nerve"
 cargo clippy --locked -q --all-targets -- -D warnings >/tmp/clippy.log 2>&1; check "clippy -D warnings" "[ $? -eq 0 ]"
 cargo test --locked -q --all-targets >/tmp/test.log 2>&1; R=$?
 grep -E "^test result" /tmp/test.log
 check "cargo test" "[ $R -eq 0 ]"
-NERVE=/target/release/nerve-tui
+NERVE=/target/release/nerve
 
 # Two Claude roots, as with CLAUDE_CONFIG_DIR + ~/.claude.
 export HOME=/root
@@ -71,7 +71,7 @@ tmux -L t new-window -d -n nerve "env -u TMUX TERM_PROGRAM= PATH=/tmp/fakebin:\$
 sleep 2
 screen() { tmux -L t capture-pane -p -t main:nerve; }
 check "TUI shows both sessions" "screen | grep -q alpha && screen | grep -q beta"
-NP=$(pgrep -x nerve-tui)
+NP=$(pgrep -x nerve)
 WD=$(cat /proc/$NP/fdinfo/* 2>/dev/null | grep -c 'inotify wd')
 check "inotify watches on both sessions dirs ($WD)" "[ $WD -eq 2 ]"
 
@@ -114,7 +114,7 @@ echo "== tmux attach split for background job"
 cp /fake/claude-cli /usr/local/bin/claude
 tmux -L t kill-window -t main:nerve
 # Single-instance lock: wait for the old nerve to exit before starting another.
-for _ in $(seq 1 50); do pgrep -x nerve-tui >/dev/null || break; sleep 0.1; done
+for _ in $(seq 1 50); do pgrep -x nerve >/dev/null || break; sleep 0.1; done
 tmux -L t new-window -d -n nerve2 "PATH=/tmp/fakebin:\$PATH HOME=$HOME CLAUDE_CONFIG_DIR=$ALT NERVE_CONFIG_DIR=/tmp/nervecfg $NERVE"
 sleep 2
 tmux -L t send-keys -t main:nerve2 / ; sleep 0.3; tmux -L t send-keys -t main:nerve2 "bg job" Enter; sleep 0.8
@@ -122,7 +122,7 @@ tmux -L t send-keys -t main:nerve2 Enter; sleep 1.5
 check "Enter ran 'claude attach abcd1234' in a split" "grep -q 'attach abcd1234' /tmp/claude-cli.log 2>/dev/null"
 
 echo "== orphan watchdog (Linux pty hangup)"
-NP=$(pgrep -x nerve-tui)
+NP=$(pgrep -x nerve)
 tmux -L t kill-server; sleep 3.5
 check "nerve exits after its tty dies" "! kill -0 $NP 2>/dev/null"
 

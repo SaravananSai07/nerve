@@ -59,7 +59,7 @@ touches your real sessions or settings:
 
 ```bash
 T=$(mktemp -d); mkdir -p $T/cfg $T/wait $T/bg $T/bin
-cargo build --release; NERVE=$PWD/target/release/nerve-tui
+cargo build --release; NERVE=$PWD/target/release/nerve
 # Record notifications instead of showing them:
 printf '#!/bin/sh\necho "$*" >> %s/notifications.log\n' $T > $T/bin/terminal-notifier
 chmod +x $T/bin/terminal-notifier
@@ -72,7 +72,7 @@ Claude only runs in trusted folders: start `claude` once in each of
 `CLAUDE_CONFIG_DIR` if you set one.
 
 Only one nerve can run at a time (it holds a lock): quit your normal
-instance first, and after `pkill -x nerve-tui` wait for it to exit before
+instance first, and after `pkill -x nerve` wait for it to exit before
 starting another.
 
 ### Terminal session (tmux)
@@ -130,7 +130,7 @@ session ask a question (tea or coffee, as above), then focus nerve.
 | Step | Expect |
 |---|---|
 | `Enter` on the Claude card | Focus moves to the Claude split |
-| The waiting notification | Its `-execute` is `nerve-tui --focus 'ghostty:<id>'`; running that command focuses the split |
+| The waiting notification | Its `-execute` is `nerve --focus 'ghostty:<id>'`; running that command focuses the split |
 | `P`, accept the prompt | A `LIVE` preview of the Claude screen (the question is visible); focus returns to nerve |
 | `p` | A `LOG` preview showing your prompt |
 | `x` and `y` | SIGTERM; the Claude process exits |

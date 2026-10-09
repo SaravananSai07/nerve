@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 — 2026-10-09
+
+### Fixed
+
+- **`cargo install nerve-tui` installed the command as `nerve-tui`**, so
+  `nerve` (as the README and `nerve update` assume) was "command not
+  found". Only `install.sh` renamed it. The binary is now `nerve` for every
+  install method.
+- `nerve-tui` remains as an alias that runs `nerve`. Without it, a
+  `cargo install` upgrade would leave the old `nerve-tui` binary behind,
+  since cargo doesn't remove binaries a package stops providing.
+
 ## 0.5.0 — 2026-10-09
 
 Catches nerve up with Claude Code 2.1.x and fixes a CPU runaway.

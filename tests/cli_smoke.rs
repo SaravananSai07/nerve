@@ -11,7 +11,7 @@ use std::time::Duration;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn run_cli(args: &[&str], home: &std::path::Path, config: &std::path::Path) -> (i32, String, String) {
-    let bin = env!("CARGO_BIN_EXE_nerve-tui");
+    let bin = env!("CARGO_BIN_EXE_nerve");
     let mut child = Command::new(bin)
         .args(args)
         .env("HOME", home)

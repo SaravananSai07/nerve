@@ -35,7 +35,7 @@ fn second_instance_refuses_to_start() {
     writeln!(*held, "{}", std::process::id()).unwrap();
     held.sync_data().ok();
 
-    let bin = env!("CARGO_BIN_EXE_nerve-tui");
+    let bin = env!("CARGO_BIN_EXE_nerve");
     let output = Command::new(bin)
         .env("NERVE_CONFIG_DIR", &config_dir)
         .stdin(Stdio::null())

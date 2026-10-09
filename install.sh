@@ -63,7 +63,7 @@ mkdir -p "$INSTALL_DIR"
 if [[ -f "Cargo.toml" ]] && grep -q '^name = "nerve-tui"' Cargo.toml 2>/dev/null; then
     printf "\n${BOLD}Building nerve from source...${RESET}\n"
     cargo build --release
-    SRC_BINARY="$(pwd)/target/release/nerve-tui"
+    SRC_BINARY="$(pwd)/target/release/nerve"
     if [[ ! -f "$SRC_BINARY" ]]; then
         err "Build failed — binary not found at $SRC_BINARY"
         exit 1
@@ -74,7 +74,7 @@ else
     TMP_ROOT="$(mktemp -d)"
     trap 'rm -rf "$TMP_ROOT"' EXIT
     cargo install nerve-tui --locked --root "$TMP_ROOT" --quiet
-    cp "$TMP_ROOT/bin/nerve-tui" "$INSTALL_DIR/nerve"
+    cp "$TMP_ROOT/bin/nerve" "$INSTALL_DIR/nerve"
 fi
 
 info "Installed to $INSTALL_DIR/nerve"

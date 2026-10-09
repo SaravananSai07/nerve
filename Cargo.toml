@@ -1,6 +1,6 @@
 [package]
 name = "nerve-tui"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.85"
 description = "TUI for monitoring AI coding sessions across terminal tabs"
@@ -10,6 +10,17 @@ authors = ["Sai Saravanan"]
 readme = "README.md"
 keywords = ["tui", "claude", "ai", "terminal", "monitoring"]
 categories = ["command-line-utilities", "development-tools"]
+
+# The crate is `nerve-tui` on crates.io (`nerve` was taken), but the
+# command is `nerve` however it's installed.
+[[bin]]
+name = "nerve"
+path = "src/main.rs"
+
+# Pre-0.5.1 command name, kept so cargo upgrades replace it; execs `nerve`.
+[[bin]]
+name = "nerve-tui"
+path = "src/bin/nerve_tui_alias.rs"
 
 [dependencies]
 ratatui = "0.29"
