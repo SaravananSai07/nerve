@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-10-09
 
 Catches nerve up with Claude Code 2.1.x and fixes a CPU runaway.
 
