@@ -81,6 +81,7 @@ impl TmuxBridge {
         focus_pane(&pane.id)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn resolve_pane_id(&self, target: &SessionTarget) -> Option<String> {
         self.find_pane(target).map(|p| p.id)
     }
@@ -92,6 +93,18 @@ pub(super) fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux select-pane failed for {pane_id}");
+    }
+    Ok(())
+}
+
+/// Run `argv` in a new pane split beside the current one.
+pub(super) fn open_split(argv: &[&str]) -> anyhow::Result<()> {
+    let status = Command::new("tmux")
+        .args(["split-window", "-h"])
+        .args(argv)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("tmux split-window failed");
     }
     Ok(())
 }

@@ -39,10 +39,10 @@ impl App {
             Overlay::ConfirmKill { .. } => {
                 match code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        if let Overlay::ConfirmKill { name, id } =
+                        if let Overlay::ConfirmKill { name, id, kind } =
                             std::mem::replace(&mut self.overlay, Overlay::None)
                         {
-                            self.execute_kill(&name, id.as_str());
+                            self.execute_kill(&name, id.as_str(), kind);
                         }
                     }
                     // Enter / n / Esc / q all cancel — kill is

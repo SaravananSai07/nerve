@@ -151,7 +151,7 @@ mod tests {
         // Lean on the Paths fields directly by constructing a temp config dir.
         // This keeps tests hermetic and independent of the user's real config.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = Paths::for_test(tmp.path().join("config"), tmp.path().join("home"));
+        let paths = Paths::for_test(tmp.path().join("config"));
         std::fs::create_dir_all(paths.config_dir()).unwrap();
         (tmp, paths)
     }

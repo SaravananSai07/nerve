@@ -2,6 +2,8 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::state::session::Session;
+#[cfg(target_os = "macos")]
+use crate::state::session::SessionKind;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod ghostty;
@@ -10,8 +12,13 @@ pub(crate) mod tmux;
 pub(crate) struct SessionTarget {
     pub(crate) cwd: String,
     pub(crate) name: String,
+    #[cfg(target_os = "macos")]
     pub(crate) dir_name: String,
     pub(crate) tty: Option<String>,
+    /// Only `Terminal` targets live in a tab/pane. Read by macOS
+    /// click-to-focus, which must not resolve a pane for the others.
+    #[cfg(target_os = "macos")]
+    pub(crate) kind: SessionKind,
 }
 
 impl From<&Session> for SessionTarget {
@@ -19,12 +26,15 @@ impl From<&Session> for SessionTarget {
         Self {
             cwd: s.cwd.to_string_lossy().into_owned(),
             name: s.name().to_string(),
+            #[cfg(target_os = "macos")]
             dir_name: s
                 .cwd
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             tty: s.tty.as_ref().map(|t| t.as_str().to_string()),
+            #[cfg(target_os = "macos")]
+            kind: s.kind,
         }
     }
 }
@@ -78,6 +88,8 @@ impl Bridge {
         }
     }
 
+    /// Only macOS notifications support click-to-focus.
+    #[cfg(target_os = "macos")]
     pub(crate) fn resolve_id(&self, target: &SessionTarget) -> Option<BridgeId> {
         match self {
             #[cfg(target_os = "macos")]
@@ -87,9 +99,36 @@ impl Bridge {
         }
     }
 
+    /// Run a command in a new pane beside nerve. Returns `Ok(false)` when
+    /// the host terminal has no scriptable way to do that.
+    pub(crate) fn open_command(&self, argv: &[&str]) -> anyhow::Result<bool> {
+        match self {
+            Self::Tmux(_) => tmux::open_split(argv).map(|()| true),
+            _ => Ok(false),
+        }
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         !matches!(self, Self::NoOp)
     }
+}
+
+/// Bring the Claude desktop app forward. There's no API to select a
+/// specific session inside it.
+pub(crate) fn focus_desktop_app() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .args(["-a", "Claude"])
+            .stdin(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("could not open the Claude app");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    anyhow::bail!("desktop sessions can only be focused on macOS")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

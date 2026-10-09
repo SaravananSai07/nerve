@@ -1,4 +1,5 @@
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Truncate `s` to at most `max_graphemes` grapheme clusters, appending
 /// `…` when truncation occurred. Operates on graphemes rather than
@@ -24,9 +25,46 @@ pub(crate) fn truncate_graphemes(s: &str, max_graphemes: usize) -> String {
     out
 }
 
+/// Truncate `s` to at most `max_cols` terminal columns, appending `…`
+/// when truncation occurred. Like `truncate_graphemes` it never splits a
+/// cluster, but it budgets by display width: a CJK or emoji cluster takes
+/// two columns, so a grapheme count would overrun the space.
+pub(crate) fn truncate_width(s: &str, max_cols: usize) -> String {
+    if s.width() <= max_cols {
+        return s.to_string();
+    }
+    if max_cols == 0 {
+        return String::new();
+    }
+    let budget = max_cols - 1; // room for the ellipsis
+    let mut out = String::new();
+    let mut used = 0;
+    for g in s.graphemes(true) {
+        let w = g.width();
+        if used + w > budget {
+            break;
+        }
+        out.push_str(g);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn width_truncation_counts_wide_clusters_twice() {
+        // 5 CJK chars = 10 columns; a grapheme budget of 6 would keep all.
+        let s = "漢字漢字漢";
+        let t = truncate_width(s, 6);
+        assert_eq!(t, "漢字…");
+        assert!(t.width() <= 6);
+        assert_eq!(truncate_width("short", 10), "short");
+        assert_eq!(truncate_width("abc", 0), "");
+    }
 
     #[test]
     fn returns_input_when_within_cap() {

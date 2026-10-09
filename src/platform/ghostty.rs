@@ -80,19 +80,14 @@ impl GhosttyBridge {
     delay 0.15
     tell application "System Events"
         tell process "Ghostty"
-            set w to window 1
-            set g to group 1 of w
-            set g2 to group 1 of g
-            set topGroups to every group of g2
+            -- Each terminal surface is a text area, in the tab's terminal
+            -- order. Match by role rather than a fixed group path: the
+            -- nesting depth differs across Ghostty versions (1.3 puts them
+            -- three groups deep, which the old fixed path missed).
             set allAreas to {}
-            repeat with tg in topGroups
-                set midGroups to every group of tg
-                repeat with mg in midGroups
-                    try
-                        set ta to text area 1 of scroll area 1 of mg
-                        set end of allAreas to ta
-                    end try
-                end repeat
+            set uiItems to entire contents of window 1
+            repeat with el in uiItems
+                if class of el is text area then set end of allAreas to contents of el
             end repeat
             if (count of allAreas) >= termIdx then
                 set ta to item termIdx of allAreas

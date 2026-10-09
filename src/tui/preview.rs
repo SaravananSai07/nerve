@@ -15,6 +15,9 @@ use super::theme::Theme;
 pub(crate) enum PreviewSource {
     /// Captured terminal scrollback from Ghostty's screen capture.
     TerminalCapture(Vec<String>),
+    /// A background job's state history (`jobs/<id>/timeline.jsonl`),
+    /// shown when there's no live output or transcript to read.
+    JobTimeline(Vec<String>),
     /// Parsed JSONL entries from the session transcript.
     LogEntries(Vec<LogEntry>),
 }
@@ -23,6 +26,7 @@ impl PreviewSource {
     fn label(&self) -> &'static str {
         match self {
             Self::TerminalCapture(_) => "LIVE",
+            Self::JobTimeline(_) => "TIMELINE",
             Self::LogEntries(_) => "LOG",
         }
     }
@@ -32,7 +36,7 @@ impl PreviewSource {
     /// number of `k` presses to recover.
     pub(crate) fn line_count(&self) -> usize {
         match self {
-            Self::TerminalCapture(lines) => lines.len(),
+            Self::TerminalCapture(lines) | Self::JobTimeline(lines) => lines.len(),
             Self::LogEntries(entries) => entries.len(),
         }
     }
@@ -75,7 +79,7 @@ pub(crate) fn render(
     frame.render_widget(block, area);
 
     match source {
-        PreviewSource::TerminalCapture(lines) => {
+        PreviewSource::TerminalCapture(lines) | PreviewSource::JobTimeline(lines) => {
             render_terminal_buffer(frame, inner, theme, lines, scroll);
         }
         PreviewSource::LogEntries(entries) => {

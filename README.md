@@ -4,14 +4,15 @@ TUI dashboard for monitoring and switching between Claude Code sessions across t
 
 ## What it does
 
-- Discovers all active Claude Code sessions on your machine via `~/.claude/sessions/`
-- Shows state (processing, tool running, waiting, idle, error), git branch, CPU, token usage, cost, and activity sparkline
-- Jump to any session's terminal tab with one keypress (Ghostty and tmux)
+- Discovers every Claude Code session on your machine: terminal CLI sessions, Claude desktop-app sessions, and `claude --bg` background jobs (including parked ones waiting on you)
+- Reads Claude's own `~/.claude` and `$CLAUDE_CONFIG_DIR` (both, if they differ)
+- Shows state (processing, tool running, waiting, idle, error) straight from Claude's session status, plus *why* a session is waiting (e.g. "permission prompt", a background job's open questions)
+- Shows git branch, CPU, activity sparkline, and cost — Claude's own cost and context-window % when the statusline hook is set up, otherwise an estimate from the transcript
+- Jump to a session with one keypress: its terminal tab (Ghostty, tmux), the Claude app, or `claude attach` for a background job
 - Preview session logs or capture terminal screen content
-- Kill sessions with confirmation
+- Kill terminal sessions / stop background jobs with confirmation
 - Desktop notifications when sessions need input or hit errors
-- Filters out daemon-spawned background processes — only shows real interactive sessions
-- Deduplicates by PID and TTY to prevent ghost cards
+- Filters out daemon-spawned helper processes and deduplicates by PID and TTY to prevent ghost cards
 
 ## Keybindings
 
@@ -22,11 +23,11 @@ Press `?` inside nerve for the live, in-app version.
 | `j/k` `↑/↓` | Navigate rows |
 | `h/l` `←/→` | Navigate columns |
 | `1-9` | Jump to nth session |
-| `Enter` | Switch to session's terminal tab |
-| `p` | Preview session log |
-| `Shift+P` | Preview live terminal capture (Ghostty) |
+| `Enter` | Go to the session: terminal tab, Claude app, or `claude attach` for background jobs (a tmux split, else copied to the clipboard) |
+| `p` | Preview session log (a background job's timeline when it has no transcript) |
+| `Shift+P` | Preview live terminal capture (Ghostty/tmux; other sessions show the log) |
 | `n` | Rename session |
-| `x` | Kill session (Enter / Esc cancel; `y` confirms) |
+| `x` | Kill a terminal session / `claude stop` a background job (Enter / Esc cancel; `y` confirms) |
 | `s` | Cycle sort: stable → state → name → age |
 | `t` | Cycle theme |
 | `/` | Search (fuzzy, case-insensitive) |
@@ -48,7 +49,7 @@ Press `?` inside nerve for the live, in-app version.
 
 ## Notifications
 
-Nerve sends desktop notifications when a session transitions to **Waiting for input** or **Error**. On macOS, if [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) is installed, clicking the notification activates your terminal app directly.
+Nerve sends desktop notifications when a session transitions to **Waiting for input** or **Error**. When Claude reports why it's waiting, the notification says so ("my-app: permission prompt"). On macOS, if [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) is installed, clicking the notification activates your terminal app directly.
 
 ```toml
 # ~/.config/nerve/config.toml
@@ -130,6 +131,28 @@ message; defaults fill in for any missing field. The schema-
 versioned `prefs.toml` (mute state, "don't ask again" flags) is
 migrated automatically across upgrades.
 
+## Exact cost and context %
+
+Claude Code hands its own figures (cost, context-window fill, model) to
+its statusline command. Point the statusline at nerve and the cards show
+those instead of estimates — context % turns amber at 80%:
+
+```jsonc
+// ~/.claude/settings.json (or $CLAUDE_CONFIG_DIR/settings.json)
+"statusLine": { "type": "command", "command": "nerve statusline" }
+```
+
+Already have a statusline? Wrap it — nerve records the payload and
+passes it through, so your line is unchanged:
+
+```jsonc
+"statusLine": { "type": "command", "command": "nerve statusline -- ~/.claude/statusline.sh" }
+```
+
+Without a wrapped command, `nerve statusline` prints a compact
+`model · ctx 42% · $1.23` line. Records live in
+`~/.config/nerve/statusline/` and are pruned after 7 days.
+
 ## Files and lifecycle
 
 | Path | Purpose |
@@ -140,7 +163,8 @@ migrated automatically across upgrades.
 | `~/.config/nerve/nerve.log` | Rolling warn/error log (~1 MiB max, rotated to `nerve.log.1`) |
 | `~/.config/nerve/nerve.lock` | Exclusive `flock(2)` — a second `nerve` invocation refuses to start |
 | `~/.config/nerve/update_cache.json` | Throttled update-check state |
-| `~/.claude/sessions/`, `~/.claude/projects/` | Read-only — Claude Code's own data |
+| `~/.config/nerve/statusline/` | Claude's statusline payloads, written by `nerve statusline` |
+| `~/.claude/{sessions,projects,jobs}/` | Read-only — Claude Code's own data (also under `$CLAUDE_CONFIG_DIR`) |
 
 Override the config directory via the `NERVE_CONFIG_DIR`
 environment variable (intended for tests and unusual layouts).
@@ -153,15 +177,17 @@ environment variable (intended for tests and unusual layouts).
   iteration and exits within ≤ 1 s.
 - Host terminal tab closed without `q`: a `tcgetpgrp(stdin)`
   canary in the main loop detects the lost controlling tty and
-  exits cleanly even when Ghostty fails to deliver `SIGHUP`.
+  exits cleanly even when Ghostty fails to deliver `SIGHUP`. A
+  watchdog thread force-exits within ~2.5 s if the main loop is
+  stuck in crossterm's read (which spins on a hung-up tty).
 - Panic: a panic hook restores cooked mode + leaves the alt-screen
   before printing the panic, so the user's terminal is never left
   in a frozen state.
 
 ## Watched files
 
-`~/.claude/sessions/` is watched via FSEvents (macOS) / inotify
-(Linux). Idle nerve sleeps until either a session file changes
+Each Claude `sessions/` dir (`~/.claude` and `$CLAUDE_CONFIG_DIR`)
+is watched via FSEvents (macOS) / inotify (Linux). Idle nerve sleeps until either a session file changes
 or the fallback 1 Hz heartbeat fires — CPU usage on a quiet
 machine is near zero.
 
@@ -174,8 +200,8 @@ curl -fsSL https://raw.githubusercontent.com/SaravananSai07/nerve/master/install
 # From a cloned repo (builds from source)
 ./install.sh
 
-# Or manually via cargo
-cargo install nerve-tui
+# Or manually via cargo (--locked keeps dependencies on the tested versions)
+cargo install nerve-tui --locked
 ```
 
 The install script places the binary at `~/.cargo/bin/nerve` and, on macOS, offers to install optional extras like `terminal-notifier`. First-time install takes a few minutes (Rust toolchain if missing, plus crate compilation).
@@ -183,8 +209,8 @@ The install script places the binary at `~/.cargo/bin/nerve` and, on macOS, offe
 ### Updating
 
 ```bash
-nerve update                    # in-app: re-runs cargo install nerve-tui --force
-cargo install nerve-tui --force # equivalent, manual form
+nerve update                             # in-app: re-runs cargo install nerve-tui --locked --force
+cargo install nerve-tui --locked --force # equivalent, manual form
 ```
 
 By default, nerve checks crates.io once a day and shows a quiet banner at the top of the TUI when a newer version is available. The installer prompts to opt out; or set `check_on_launch = false` under `[updates]` in `~/.config/nerve/config.toml`.
@@ -196,9 +222,24 @@ nerve          # launch TUI
 nerve update   # upgrade to the latest crates.io release
 nerve --list   # print sessions to stdout
 nerve --dump   # JSON dump of all sessions
+nerve statusline [-- <cmd>]   # Claude statusLine hook (see above)
 ```
 
 ## Supported terminals
 
 - **Ghostty** — tab switching, screen capture
-- **tmux** — pane switching
+- **tmux** — pane switching, screen capture, `claude attach` in a split
+- **Claude desktop app** — sessions are shown; Enter brings the app forward (macOS)
+
+## Development
+
+```bash
+cargo run                                   # launch the TUI from source
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+```
+
+[`docs/TESTING.md`](docs/TESTING.md) covers the Linux end-to-end suite
+(Docker) and the manual checks against real Claude sessions, Ghostty and
+the desktop app. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) describes
+how discovery and the UI fit together.

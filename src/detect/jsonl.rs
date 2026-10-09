@@ -1,6 +1,4 @@
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -10,34 +8,18 @@ use crate::state::session::SessionState;
 use crate::state::token_usage::TokenUsage;
 use crate::util::sanitize::{Sanitised, strip_ansi};
 
-/// Open a JSONL transcript file with `O_NOFOLLOW`. Defends against
-/// an attacker swapping a final-component symlink between our
-/// `exists()` check in `find_jsonl` and the actual open. Multi-
-/// component directory-level traversal is out of scope —
-/// `~/.claude/projects/` is user-owned, so any cross-user attack
-/// already presupposes a prior compromise.
+/// Open a JSONL transcript with `O_NOFOLLOW` (see `util::fs`).
 fn open_jsonl(path: &Path) -> std::io::Result<std::fs::File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(path)
+    crate::util::fs::open_nofollow(path)
 }
 
 pub(super) fn read_tail_state(path: &Path) -> Option<SessionState> {
-    let mut file = open_jsonl(path).ok()?;
-    let len = file.metadata().ok()?.len();
-
     // Claude Code 2.x writes large entries that we skip past:
     // - file-history-snapshot: ~22KB each
     // - assistant entries with extended thinking: 50–100KB+
     // The tail window has to step past at least one of each, so we read a
     // generous slice rather than try to parse the whole file.
-    let seek_pos = len.saturating_sub(262_144);
-    file.seek(SeekFrom::Start(seek_pos)).ok()?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
-
+    let buf = crate::util::fs::read_tail_nofollow(path, 262_144).ok()?;
     buf.lines()
         .rev()
         .filter(|l| !l.trim().is_empty())
@@ -344,23 +326,30 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
     crate::util::text::truncate_graphemes(&cleaned, 80)
 }
 
+/// Initial and maximum tail window for the log preview. Claude writes
+/// large `attachment` records (often 100 KB+ at session start) that yield
+/// no entries, so a fixed 64 KB window can show nothing for a session
+/// that has a prompt. Double until we have enough entries.
+const ENTRIES_WINDOW_START: u64 = 64 * 1024;
+const ENTRIES_WINDOW_MAX: u64 = 4 * 1024 * 1024;
+
 pub(crate) fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
-    let mut file = match open_jsonl(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-
-    let seek_pos = len.saturating_sub(65536);
-    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
-        return Vec::new();
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut window = ENTRIES_WINDOW_START;
+    loop {
+        let Ok(buf) = crate::util::fs::read_tail_nofollow(path, window) else {
+            return Vec::new();
+        };
+        let entries = parse_entries(&buf);
+        if entries.len() >= max_entries || window >= len || window >= ENTRIES_WINDOW_MAX {
+            let skip = entries.len().saturating_sub(max_entries);
+            return entries.into_iter().skip(skip).collect();
+        }
+        window *= 2;
     }
+}
 
-    let mut buf = String::new();
-    if file.read_to_string(&mut buf).is_err() {
-        return Vec::new();
-    }
-
+fn parse_entries(buf: &str) -> Vec<LogEntry> {
     let mut entries = Vec::new();
     for line in buf.lines() {
         let trimmed = line.trim();
@@ -389,7 +378,16 @@ pub(crate) fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry
             .and_then(|r| r.as_str())
             .unwrap_or("");
 
-        if let Some(content) = val.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+        let content = val.get("message").and_then(|m| m.get("content"));
+        // A typed prompt is stored as a bare string, not a content array.
+        if let Some(raw) = content.and_then(|c| c.as_str()) {
+            if role == "user" && !raw.is_empty() {
+                entries.push(LogEntry::UserText(Sanitised::new(raw)));
+            }
+            continue;
+        }
+
+        if let Some(content) = content.and_then(|c| c.as_array()) {
             for item in content {
                 let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match item_type {
@@ -446,13 +444,49 @@ pub(crate) fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry
         }
     }
 
-    let skip = entries.len().saturating_sub(max_entries);
-    entries.into_iter().skip(skip).collect()
+    entries
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: a fresh session's transcript is mostly large attachment
+    // rows; the prompt must still be found beyond the first 64 KB window.
+    #[test]
+    fn entries_found_behind_large_attachment_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let mut body = String::from(r#"{"type":"user","message":{"role":"user","content":"hello"}}"#);
+        body.push('\n');
+        let pad = "x".repeat(20_000);
+        for _ in 0..10 {
+            body.push_str(&format!(r#"{{"type":"attachment","data":"{pad}"}}"#));
+            body.push('\n');
+        }
+        std::fs::write(&path, body).unwrap();
+        let entries = read_tail_entries(&path, 50);
+        assert!(matches!(entries.as_slice(), [LogEntry::UserText(t)] if t.as_str() == "hello"));
+    }
+
+    // Regression: Claude 2.1.x writes a typed prompt as a plain string;
+    // the preview showed "No log entries" for a session that had one.
+    #[test]
+    fn string_content_user_prompt_is_an_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"attachment"}"#, "\n",
+                r#"{"type":"user","message":{"role":"user","content":"ask me tea or coffee"}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let entries = read_tail_entries(&path, 50);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0], LogEntry::UserText(t) if t.as_str() == "ask me tea or coffee"));
+    }
 
     #[test]
     fn tool_name_with_ansi_is_sanitised_before_storage() {

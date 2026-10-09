@@ -129,7 +129,7 @@ mod tests {
 
     fn fixture_paths() -> (tempfile::TempDir, Paths) {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = Paths::for_test(tmp.path().join("config"), tmp.path().join("home"));
+        let paths = Paths::for_test(tmp.path().join("config"));
         std::fs::create_dir_all(paths.config_dir()).unwrap();
         (tmp, paths)
     }

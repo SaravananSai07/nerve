@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::detect::claude::discover_sessions_with;
-use crate::detect::git::BranchCache;
-use crate::detect::jsonl_cache::JsonlCache;
+use crate::detect::claude::{discover_sessions_with, ScanCaches};
 use crate::detect::process::ProcessTable;
 use crate::signals::ShutdownFlag;
 use crate::state::session::DiscoverySnapshot;
@@ -24,7 +22,7 @@ pub(crate) struct DiscoveryWorker {
     /// Sender for the wake-channel. Kept alive so the worker's
     /// `recv_timeout(refresh_interval)` keeps timing out instead of
     /// hitting `Disconnected` and exiting. The FS watcher clones this
-    /// sender and pushes to it on every event under `sessions_dir`.
+    /// sender and pushes to it on every event under a sessions dir.
     _wake: Sender<()>,
     /// Held so the watcher's background thread stays alive for
     /// the worker's lifetime. `None` when the directory didn't
@@ -51,7 +49,8 @@ pub(crate) struct DiscoveryWorker {
 pub(crate) fn spawn(
     refresh_interval: Duration,
     process_scan_interval: Duration,
-    sessions_dir: PathBuf,
+    watch_dirs: Vec<PathBuf>,
+    statusline_dir: PathBuf,
     shutdown: ShutdownFlag,
 ) -> std::io::Result<DiscoveryWorker> {
     let (tx, rx) = channel();
@@ -60,7 +59,7 @@ pub(crate) fn spawn(
     // Best-effort FS watcher. If the directory doesn't exist yet
     // (first-time setup) or the platform watcher refuses to start, we
     // fall back to pure-polling at `refresh_interval`.
-    let watcher = install_fs_watcher(&sessions_dir, wake_tx.clone());
+    let watcher = install_fs_watcher(&watch_dirs, wake_tx.clone());
 
     let alive = Arc::new(AtomicBool::new(true));
     let alive_for_thread = alive.clone();
@@ -74,8 +73,8 @@ pub(crate) fn spawn(
             // channel.
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(move || {
                 let mut table = ProcessTable::refreshed();
-                let mut cache = JsonlCache::new();
-                let mut branch_cache = BranchCache::new();
+                let mut caches = ScanCaches::new(Some(statusline_dir));
+                let mut dead_pids = std::collections::HashSet::new();
                 loop {
                     if shutdown.requested() {
                         return;
@@ -83,7 +82,19 @@ pub(crate) fn spawn(
 
                     table.refresh_if_stale(process_scan_interval);
                     let scan_start = std::time::Instant::now();
-                    let sessions = discover_sessions_with(&table, &mut cache, &mut branch_cache);
+                    let mut scan = discover_sessions_with(&table, &mut caches);
+                    // A session that started after the table was cached is
+                    // invisible until the next process scan (up to
+                    // `process_scan_interval`). Re-scan once when a pid shows
+                    // up that wasn't already known-missing; stale files of
+                    // dead processes stay in `dead_pids` so they can't make
+                    // every scan fork `ps`.
+                    if !scan.unseen_pids.is_subset(&dead_pids) {
+                        table = ProcessTable::refreshed();
+                        scan = discover_sessions_with(&table, &mut caches);
+                        dead_pids = scan.unseen_pids.clone();
+                    }
+                    let sessions = scan.sessions;
                     let scan_elapsed = scan_start.elapsed();
                     // A full scan should take ~10-50 ms on local disk;
                     // persistent overruns indicate disk or network-
@@ -160,20 +171,21 @@ fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-/// Watch `sessions_dir` for changes and forward every relevant event
-/// to `wake`. Returns `None` if the directory doesn't exist or the
-/// watcher can't be created — the worker just falls back to its
-/// timer-driven poll in that case.
+/// Watch every Claude sessions dir for changes and forward each relevant
+/// event to `wake`. Dirs that don't exist yet are skipped. Returns `None`
+/// if none could be watched — the worker then falls back to its
+/// timer-driven poll.
 fn install_fs_watcher(
-    sessions_dir: &std::path::Path,
+    dirs: &[PathBuf],
     wake: Sender<()>,
 ) -> Option<RecommendedWatcher> {
-    if !sessions_dir.exists() {
+    let present: Vec<&PathBuf> = dirs.iter().filter(|d| d.exists()).collect();
+    if present.is_empty() {
         return None;
     }
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
         if let Ok(event) = res {
-            // Coalesce: any create/remove/modify under ~/.claude/sessions/
+            // Coalesce: any create/remove/modify under a sessions dir
             // is interesting. Access-only events are ignored.
             let interesting = matches!(
                 event.kind,
@@ -191,17 +203,35 @@ fn install_fs_watcher(
         }
     };
 
-    if let Err(e) = watcher.watch(sessions_dir, RecursiveMode::NonRecursive) {
-        log_warn!(
-            "discovery: cannot watch {}: {e}; falling back to poll",
-            sessions_dir.display()
-        );
-        return None;
+    let mut watching = 0;
+    for dir in present {
+        match watcher.watch(dir, RecursiveMode::NonRecursive) {
+            Ok(()) => watching += 1,
+            Err(e) => log_warn!(
+                "discovery: cannot watch {}: {e}; relying on poll for it",
+                dir.display()
+            ),
+        }
     }
-    Some(watcher)
+    (watching > 0).then_some(watcher)
 }
 
 impl DiscoveryWorker {
+    /// Worker with no thread behind it, for UI tests that feed snapshots
+    /// through `App::apply_discovery` directly.
+    #[cfg(test)]
+    pub(crate) fn idle() -> Self {
+        let (_tx, rx) = channel();
+        let (wake, _) = channel();
+        Self {
+            rx,
+            _wake: wake,
+            _watcher: None,
+            _join: None,
+            alive: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     /// Drain all queued snapshots and return the most recent (the
     /// intermediate ones would only ever be displayed for one frame
     /// each, so coalescing to "latest wins" is correct). Returns

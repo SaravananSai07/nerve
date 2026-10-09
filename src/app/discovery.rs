@@ -12,12 +12,14 @@ use super::{App, Overlay};
 pub(super) struct PendingNotification {
     pub(super) name: Sanitised,
     pub(super) state: SessionState,
+    pub(super) waiting_for: Option<Sanitised>,
     pub(super) target: SessionTarget,
 }
 
 impl App {
     pub(super) fn tick(&mut self) {
         self.refresh_sessions();
+        self.drain_action_results();
         // The eviction sweep only does anything once per minute (the
         // grace window), so polling it at the inner-loop cadence
         // (~50–250 ms) was clones-and-hashes for no result. Cap to
@@ -111,6 +113,7 @@ impl App {
 
         for mut snap in discovered {
             let detected_state = snap.detected_state.clone();
+            let authoritative = snap.state_authoritative;
             let id = snap.id.clone();
             let cwd_str = snap.cwd.to_string_lossy().into_owned();
             let name_override = self
@@ -122,11 +125,12 @@ impl App {
                 existing.merge_snapshot(snap, name_override);
                 existing.record_activity_if_busy(&detected_state);
 
-                if existing.propose_state(detected_state) {
+                if existing.observe_state(detected_state, authoritative) {
                     any_transition = true;
                     if let Some(state) = existing.take_pending_notification() {
                         pending.push(PendingNotification {
                             name: existing.name().clone(),
+                            waiting_for: existing.waiting_for.clone(),
                             state,
                             target: SessionTarget::from(&*existing),
                         });
@@ -172,6 +176,7 @@ impl App {
             self.notifier.maybe_notify(
                 note.name.as_str(),
                 &note.state,
+                note.waiting_for.as_ref().map(Sanitised::as_str),
                 &note.target,
                 &self.bridge,
                 self.prefs.notifications_muted,

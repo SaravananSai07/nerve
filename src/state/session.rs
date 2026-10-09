@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::state::activity::ActivityHistory;
 use crate::state::state_machine::StateMachine;
-use crate::state::token_usage::TokenUsage;
+use crate::state::token_usage::{OfficialUsage, TokenUsage};
 use crate::util::sanitize::Sanitised;
 
 /// Consecutive `propose_state` calls required before the visible
@@ -111,6 +111,43 @@ impl SessionState {
     }
 }
 
+/// Where a session runs, which decides how nerve can reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionKind {
+    /// CLI in a terminal tab / pane: focus via the terminal bridge.
+    #[default]
+    Terminal,
+    /// Embedded in the Claude desktop app: no tty, focus the app.
+    Desktop,
+    /// `claude --bg` session managed by the daemon: reach it through
+    /// `claude attach|stop <job id>`. May have no live process while parked.
+    Background,
+}
+
+impl SessionKind {
+    /// Where to find the session: its tty, or the kind's badge for
+    /// sessions without one.
+    pub(crate) fn location(self, tty: Option<&Sanitised>) -> &str {
+        tty.map(Sanitised::as_str).or(self.badge()).unwrap_or("?")
+    }
+
+    /// Card badge shown in place of the tty for sessions without one.
+    pub(crate) fn badge(self) -> Option<&'static str> {
+        match self {
+            Self::Terminal => None,
+            Self::Desktop => Some("desktop"),
+            Self::Background => Some("background"),
+        }
+    }
+}
+
+/// Claude's own cost when known, else nerve's estimate. Shared by the
+/// cards, the totals, and `--list` so they can't disagree.
+pub(crate) fn effective_cost(official: Option<&OfficialUsage>, usage: &TokenUsage) -> f64 {
+    official.and_then(|o| o.cost_usd).unwrap_or(usage.cost_usd)
+}
+
 /// Plain snapshot of everything the discovery worker can know about a
 /// session at a point in time. Decoupling this from `Session` means
 /// the worker never constructs registry-owned state (StateMachine,
@@ -131,6 +168,38 @@ pub(crate) struct DiscoverySnapshot {
     pub(crate) usage: TokenUsage,
     pub(crate) jsonl_path: Option<PathBuf>,
     pub(crate) jsonl_age_secs: Option<f64>,
+    pub(crate) kind: SessionKind,
+    /// Claude's own reason for `WaitingForInput`, e.g. "permission prompt".
+    pub(crate) waiting_for: Option<Sanitised>,
+    pub(crate) official: Option<OfficialUsage>,
+    /// True when `detected_state` came from Claude's own status field
+    /// rather than transcript heuristics, so it needs no debouncing.
+    #[serde(skip)]
+    pub(crate) state_authoritative: bool,
+}
+
+#[cfg(test)]
+impl DiscoverySnapshot {
+    pub(crate) fn for_test(id: &str, state: SessionState) -> Self {
+        Self {
+            id: SessionId::new(id),
+            cwd: PathBuf::from("/tmp/x"),
+            name: Sanitised::new("x"),
+            tty: None,
+            branch: None,
+            cpu_percent: 0.0,
+            pid: None,
+            detected_state: state,
+            current_tool: None,
+            usage: TokenUsage::default(),
+            jsonl_path: None,
+            jsonl_age_secs: None,
+            kind: SessionKind::Terminal,
+            waiting_for: None,
+            official: None,
+            state_authoritative: false,
+        }
+    }
 }
 
 // Clone is test-only. A Session carries registry-owned mutable state
@@ -164,6 +233,9 @@ pub(crate) struct Session {
     pub(crate) usage: TokenUsage,
     pub(crate) pid: Option<u32>,
     pub(crate) jsonl_age_secs: Option<f64>,
+    pub(crate) kind: SessionKind,
+    pub(crate) waiting_for: Option<Sanitised>,
+    pub(crate) official: Option<OfficialUsage>,
     last_notified_state: Option<SessionState>,
     state_machine: StateMachine<SessionState>,
 }
@@ -207,6 +279,9 @@ impl Session {
             usage: snap.usage,
             pid: snap.pid,
             jsonl_age_secs: snap.jsonl_age_secs,
+            kind: snap.kind,
+            waiting_for: snap.waiting_for,
+            official: snap.official,
             last_notified_state: None,
             state_machine: StateMachine::new(snap.detected_state, CONFIRM_TICKS),
         }
@@ -237,6 +312,9 @@ impl Session {
             usage: TokenUsage::default(),
             pid: None,
             jsonl_age_secs: None,
+            kind: SessionKind::Terminal,
+            waiting_for: None,
+            official: None,
             last_notified_state: None,
             state_machine: StateMachine::new(SessionState::Processing, CONFIRM_TICKS),
         }
@@ -255,6 +333,23 @@ impl Session {
         } else {
             false
         }
+    }
+
+    /// Feed one discovery observation. Claude's own status is already
+    /// debounced at the source, so an authoritative observation commits
+    /// immediately; heuristic ones go through `propose_state`. Returns true
+    /// when the visible state changed.
+    pub(crate) fn observe_state(&mut self, new_state: SessionState, authoritative: bool) -> bool {
+        if !authoritative {
+            return self.propose_state(new_state);
+        }
+        if self.state() == &new_state {
+            // Same state: just drop any half-confirmed heuristic proposal.
+            self.state_machine.set(new_state);
+            return false;
+        }
+        self.set_state(new_state);
+        true
     }
 
     /// Force a transition without confirmations. For when authority
@@ -294,6 +389,11 @@ impl Session {
         self.branch = snap.branch;
         self.pid = snap.pid;
         self.usage = snap.usage;
+        self.kind = snap.kind;
+        self.waiting_for = snap.waiting_for;
+        if snap.official.is_some() {
+            self.official = snap.official;
+        }
         if !self.renamed {
             self.name = name_override
                 .map(Sanitised::new)
@@ -336,6 +436,12 @@ impl Session {
 
     pub(crate) fn name(&self) -> &Sanitised {
         &self.name
+    }
+
+    /// Claude's reported cost when the statusline hook supplies it, else
+    /// nerve's transcript-based estimate.
+    pub(crate) fn cost_usd(&self) -> f64 {
+        effective_cost(self.official.as_ref(), &self.usage)
     }
 
     /// User-driven rename. Sets the custom name and flags the session
@@ -528,20 +634,7 @@ mod tests {
         // A session first observed as Idle should report Idle
         // immediately — not Processing for the first 3 ticks while the
         // confirmation counter climbs from the StateMachine default.
-        let snap = DiscoverySnapshot {
-            id: SessionId::new("id1"),
-            cwd: PathBuf::from("/tmp/x"),
-            name: Sanitised::new("x"),
-            tty: None,
-            branch: None,
-            cpu_percent: 0.0,
-            pid: None,
-            detected_state: SessionState::Idle,
-            current_tool: None,
-            usage: TokenUsage::default(),
-            jsonl_path: None,
-            jsonl_age_secs: None,
-        };
+        let snap = DiscoverySnapshot::for_test("id1", SessionState::Idle);
         let session = Session::from_snapshot(snap);
         assert_eq!(session.state(), &SessionState::Idle);
     }
@@ -571,22 +664,32 @@ mod tests {
     fn merge_snapshot_skips_name_when_renamed() {
         let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
         s.rename_to("custom".into());
-        let snap = DiscoverySnapshot {
-            id: SessionId::new("id1"),
-            cwd: PathBuf::from("/tmp/x"),
-            name: Sanitised::new("x"),
-            tty: None,
-            branch: None,
-            cpu_percent: 0.0,
-            pid: None,
-            detected_state: SessionState::Idle,
-            current_tool: None,
-            usage: TokenUsage::default(),
-            jsonl_path: None,
-            jsonl_age_secs: None,
-        };
-        s.merge_snapshot(snap, None);
+        s.merge_snapshot(DiscoverySnapshot::for_test("id1", SessionState::Idle), None);
         // Rename wins over snapshot name.
         assert_eq!(s.name, "custom");
+    }
+
+    #[test]
+    fn authoritative_observation_commits_immediately() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
+        assert!(s.observe_state(SessionState::WaitingForInput, true));
+        assert_eq!(s.state(), &SessionState::WaitingForInput);
+        assert!(!s.observe_state(SessionState::WaitingForInput, true));
+    }
+
+    #[test]
+    fn heuristic_observation_is_debounced() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
+        assert!(!s.observe_state(SessionState::Idle, false));
+        assert_eq!(s.state(), &SessionState::Processing);
+    }
+
+    #[test]
+    fn cost_prefers_official_figure() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
+        s.usage.cost_usd = 3.0;
+        assert_eq!(s.cost_usd(), 3.0);
+        s.official = Some(OfficialUsage { cost_usd: Some(2.5), ..Default::default() });
+        assert_eq!(s.cost_usd(), 2.5);
     }
 }

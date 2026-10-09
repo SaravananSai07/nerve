@@ -73,7 +73,7 @@ else
     printf "\n${BOLD}Installing nerve from crates.io...${RESET}\n"
     TMP_ROOT="$(mktemp -d)"
     trap 'rm -rf "$TMP_ROOT"' EXIT
-    cargo install nerve-tui --root "$TMP_ROOT" --quiet
+    cargo install nerve-tui --locked --root "$TMP_ROOT" --quiet
     cp "$TMP_ROOT/bin/nerve-tui" "$INSTALL_DIR/nerve"
 fi
 

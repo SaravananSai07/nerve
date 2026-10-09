@@ -56,3 +56,15 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets
+
+  # Runs the real binary against Linux procps, inotify, tmux and X11
+  # clipboard inside a container pinned to the MSRV. Catches what unit
+  # tests can't: ps column parsing, watcher wake-ups, SIGTERM targeting,
+  # the tty-loss watchdog. See docs/TESTING.md.
+  linux-e2e:
+    name: linux e2e (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t nerve-linux-e2e tests/linux
+      - run: docker run --rm -v "$PWD":/src:ro nerve-linux-e2e bash /e2e.sh

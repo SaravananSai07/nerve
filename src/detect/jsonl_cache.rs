@@ -216,7 +216,10 @@ mod tests {
         );
         assert_eq!(u1.input_tokens, 100);
 
-        std::fs::remove_file(&path).unwrap();
+        // Move the old file aside instead of deleting it: Linux readily
+        // reuses a freed inode number for the next file, which would make
+        // the replacement indistinguishable by (inode, len, mtime).
+        std::fs::rename(&path, path.with_extension("old")).unwrap();
         write_file(&path, "second");
 
         let (_s, u2) = cache.read_or_refresh(

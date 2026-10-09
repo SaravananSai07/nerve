@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use unicode_width::UnicodeWidthStr;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -191,8 +193,16 @@ fn render_card(
         )
     };
 
+    let duration = session.format_duration_at(now);
+    let label = session.state().label();
+    // Claude's session names are sentences; clip the name so the left
+    // title never runs into (and visually truncates) the right-hand
+    // duration. Fixed parts: 2 borders, spaces, indicator, label, duration.
+    let fixed = 2 + 4 + 1 + label.width() + duration.width() + 2;
+    let name_room = (area.width as usize).saturating_sub(fixed).max(4);
+    let name = crate::util::text::truncate_width(session.name().as_str(), name_room);
     let title_left = Span::styled(
-        format!(" {} {} {} ", session.name(), indicator, session.state().label()),
+        format!(" {} {} {} ", name, indicator, label),
         if is_selected {
             Style::default().fg(text_fg).bg(card_bg).add_modifier(Modifier::BOLD)
         } else {
@@ -201,7 +211,7 @@ fn render_card(
     );
 
     let title_right = Span::styled(
-        format!(" {} ", session.format_duration_at(now)),
+        format!(" {duration} "),
         if is_selected {
             Style::default().fg(state_color).add_modifier(Modifier::BOLD)
         } else {
@@ -238,7 +248,7 @@ fn render_card(
         }
     }
 
-    let tty_str = session.tty.as_ref().map(|s| s.as_str()).unwrap_or("?");
+    let tty_str = session.kind.location(session.tty.as_ref());
     let branch_str = session.branch.as_ref().map(|s| s.as_str()).unwrap_or("—");
 
     let mut lines = vec![
@@ -249,7 +259,14 @@ fn render_card(
         ]),
     ];
 
-    if let Some(ref tool) = session.current_tool {
+    // While waiting, Claude's reason ("permission prompt", a background
+    // job's open questions) is what the user needs; otherwise the last tool.
+    if let Some(ref why) = session.waiting_for {
+        lines.push(Line::from(vec![
+            Span::styled("  ? ", Style::default().fg(theme.waiting)),
+            Span::styled(why.as_str(), Style::default().fg(text_fg)),
+        ]));
+    } else if let Some(ref tool) = session.current_tool {
         lines.push(Line::from(vec![
             Span::styled("  ◉ ", Style::default().fg(theme.processing)),
             Span::styled(tool.as_str(), Style::default().fg(text_fg)),
@@ -263,11 +280,23 @@ fn render_card(
             Style::default().fg(secondary_fg),
         ),
     ];
-    if session.usage.total_tokens() > 0 {
-        sparkline_spans.push(Span::styled(
+    let official = session.official.as_ref();
+    if let Some(pct) = official.and_then(|o| o.context_pct) {
+        // Context fill is the number that predicts trouble (compaction,
+        // degraded answers), so it turns to the warning colour near full.
+        let color = if pct >= 80.0 { theme.waiting } else { secondary_fg };
+        sparkline_spans.push(Span::styled(format!("  ctx {pct:.0}%"), Style::default().fg(color)));
+    }
+    match official.and_then(|o| o.cost_usd) {
+        Some(cost) => sparkline_spans.push(Span::styled(
+            format!("  ${cost:.2}"),
+            Style::default().fg(secondary_fg),
+        )),
+        None if session.usage.total_tokens() > 0 => sparkline_spans.push(Span::styled(
             format!("  {}", session.usage.compact_display()),
             Style::default().fg(secondary_fg),
-        ));
+        )),
+        None => {}
     }
     lines.push(Line::from(sparkline_spans));
 
@@ -401,7 +430,7 @@ fn render_empty(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(text, inner);
 }
 
-/// Shown when `~/.claude/` is missing entirely (first-time
+/// Shown when no Claude config dir exists at all (first-time
 /// setup). Distinct from `render_empty` so the user gets a clear
 /// "install Claude Code" message rather than the confusing "no
 /// sessions detected" when the cause is that Claude Code itself
@@ -421,7 +450,7 @@ fn render_setup_hint(frame: &mut Frame, area: Rect, theme: &Theme) {
     let text = Paragraph::new(vec![
         Line::raw(""),
         Line::styled(
-            "Claude Code isn't installed (no ~/.claude directory).",
+            "Claude Code isn't installed (no ~/.claude or $CLAUDE_CONFIG_DIR).",
             Style::default().fg(theme.waiting),
         ),
         Line::raw(""),

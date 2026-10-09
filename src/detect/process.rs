@@ -26,7 +26,10 @@ pub(crate) struct ProcessTable {
 
 impl ProcessTable {
     pub(crate) fn refreshed() -> Self {
-        let procs = scan_processes();
+        Self::from_procs(scan_processes())
+    }
+
+    pub(crate) fn from_procs(procs: Vec<ProcessInfo>) -> Self {
         let pid_index: PidIndex = procs
             .iter()
             .enumerate()
@@ -64,7 +67,11 @@ impl ProcessTable {
 
 pub(crate) fn scan_processes() -> Vec<ProcessInfo> {
     let output = match std::process::Command::new("ps")
-        .args(["-eo", "pid,ppid,tty,comm,%cpu,args"])
+        // `ucomm` (bare name) rather than `comm` (full exec path): the
+        // desktop app's claude lives under ".../Application Support/...",
+        // and a space in that column shifts every field after it. The names
+        // we match on (claude, shells, caffeinate) never contain spaces.
+        .args(["-eo", "pid,ppid,tty,ucomm,%cpu,args"])
         .stderr(std::process::Stdio::null())
         .output()
     {
@@ -118,6 +125,12 @@ fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
         cpu,
         args,
     })
+}
+
+/// Bare process name. `ps -o ucomm` already gives one; the `rsplit`
+/// keeps callers correct if a full exec path ever reaches here.
+pub(crate) fn comm_name(comm: &str) -> &str {
+    comm.rsplit('/').next().unwrap_or(comm)
 }
 
 pub(super) fn resume_session_id(args: &str) -> Option<&str> {
@@ -182,8 +195,7 @@ pub(super) fn has_child_named(
         if let Some(children) = child_map.get(&pid) {
             for &child_pid in children {
                 if let Some(child) = find_process(procs, child_pid) {
-                    let comm_name = child.comm.rsplit('/').next().unwrap_or(&child.comm);
-                    if comm_name == name {
+                    if comm_name(&child.comm) == name {
                         return true;
                     }
                 }

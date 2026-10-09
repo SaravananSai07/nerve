@@ -18,6 +18,7 @@ mod workers;
 
 use std::str::FromStr;
 
+use crate::state::session::effective_cost;
 use crate::util::sanitize::Sanitised;
 
 use app::App;
@@ -85,34 +86,39 @@ fn accept_focus_arg(s: String) -> Option<String> {
 }
 
 fn handle_focus(s: &str) {
-    let focused = BridgeId::from_str(s).and_then(|id| id.focus());
-    if focused.is_ok() {
-        return;
-    }
-
-    // Stale id (closed tab) or parse error: fall back to plain Ghostty activation
-    // so a notification click is never a silent no-op. Linux/non-Ghostty: nothing
-    // useful to do — exit quietly.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"Ghostty\" to activate"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+    if BridgeId::from_str(s).and_then(|id| id.focus()).is_err() {
+        activate_terminal_fallback();
     }
 }
 
+/// Stale id (closed tab) or parse error: fall back to plain Ghostty
+/// activation so a notification click is never a silent no-op.
+#[cfg(target_os = "macos")]
+fn activate_terminal_fallback() {
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", "tell application \"Ghostty\" to activate"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Linux / non-Ghostty: nothing useful to do — exit quietly.
+#[cfg(not(target_os = "macos"))]
+fn activate_terminal_fallback() {}
+
 fn handle_update() -> std::io::Result<()> {
-    println!("Updating nerve via cargo install nerve-tui --force");
+    // `--locked` builds against the published Cargo.lock. Without it cargo
+    // resolves the newest dependencies, which can need a newer rustc than
+    // the declared MSRV (instability/darling did).
+    println!("Updating nerve via cargo install nerve-tui --locked --force");
     let status = std::process::Command::new("cargo")
-        .args(["install", "nerve-tui", "--force"])
+        .args(["install", "nerve-tui", "--locked", "--force"])
         .status()?;
     if status.success() {
         println!("\nnerve updated. Restart any running instance to use the new version.");
     } else {
-        eprintln!("\nUpdate failed. Run `cargo install nerve-tui --force` directly to see errors.");
+        eprintln!("\nUpdate failed. Run `cargo install nerve-tui --locked --force` directly to see errors.");
     }
     Ok(())
 }
@@ -133,6 +139,17 @@ fn main() -> std::io::Result<()> {
     // the soft limit early; failures are logged but non-fatal.
     raise_fd_limit();
 
+    // Checked first, and only as argv[1]: everything after `--` belongs
+    // to the wrapped command and must not be read as nerve flags.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("statusline") {
+        let wrapped = match argv.iter().position(|a| a == "--") {
+            Some(i) => &argv[i + 1..],
+            None => &[][..],
+        };
+        return detect::statusline::run(&paths.statusline_dir(), wrapped);
+    }
+
     if let Some(arg) = parse_focus_arg() {
         handle_focus(&arg);
         return Ok(());
@@ -143,7 +160,7 @@ fn main() -> std::io::Result<()> {
     }
 
     if std::env::args().any(|a| a == "--dump") {
-        let sessions = detect::claude::discover_sessions();
+        let sessions = detect::claude::discover_sessions(Some(paths.statusline_dir()));
         match serde_json::to_string_pretty(&sessions) {
             Ok(rendered) => println!("{rendered}"),
             Err(e) => {
@@ -161,23 +178,35 @@ fn main() -> std::io::Result<()> {
     }
 
     if std::env::args().any(|a| a == "--list") {
-        let sessions = detect::claude::discover_sessions();
+        let sessions = detect::claude::discover_sessions(Some(paths.statusline_dir()));
         if sessions.is_empty() {
             println!("No active sessions found.");
         }
         // CLI doesn't carry registry-owned state, so we don't print
         // duration or sparkline — both would always read as zero.
         for s in &sessions {
-            let token_info = if s.usage.total_tokens() > 0 {
-                format!(" | {}", s.usage.compact_display())
-            } else {
-                String::new()
+            let official = s.official.as_ref();
+            let token_info = match official.and_then(|o| o.cost_usd) {
+                Some(_) => {
+                    let cost = effective_cost(official, &s.usage);
+                    match official.and_then(|o| o.context_pct) {
+                        Some(pct) => format!(" | ctx {pct:.0}% | ${cost:.2}"),
+                        None => format!(" | ${cost:.2}"),
+                    }
+                }
+                None if s.usage.total_tokens() > 0 => format!(" | {}", s.usage.compact_display()),
+                None => String::new(),
             };
+            let state = match &s.waiting_for {
+                Some(why) => format!("{} ({why})", s.detected_state.label()),
+                None => s.detected_state.label(),
+            };
+            let location = s.kind.location(s.tty.as_ref());
             println!(
                 "{} | {} | {} | {}{}",
                 s.name,
-                s.detected_state.label(),
-                s.tty.as_ref().map(Sanitised::as_str).unwrap_or("?"),
+                state,
+                location,
                 s.branch.as_ref().map(Sanitised::as_str).unwrap_or("—"),
                 token_info,
             );

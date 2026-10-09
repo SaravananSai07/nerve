@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::util::sanitize::Sanitised;
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct TokenUsage {
     pub(crate) input_tokens: u64,
@@ -22,4 +24,14 @@ impl TokenUsage {
             format!("{:.0}k", total_k)
         }
     }
+}
+
+/// Figures Claude Code reports about itself through the statusline hook
+/// (see `detect::statusline`). Unlike `TokenUsage` these aren't estimates:
+/// the cost reflects Claude Code's own pricing, including org overrides.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub(crate) struct OfficialUsage {
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) context_pct: Option<f64>,
+    pub(crate) model: Option<Sanitised>,
 }

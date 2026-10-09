@@ -130,7 +130,7 @@ impl SessionRegistry {
     }
 
     pub(crate) fn total_cost_usd(&self) -> f64 {
-        self.sessions.values().map(|s| s.usage.cost_usd).sum()
+        self.sessions.values().map(Session::cost_usd).sum()
     }
 
     pub(crate) fn count_by_state(&self) -> StateCount {

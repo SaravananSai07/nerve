@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub(crate) struct Paths {
     config_dir: PathBuf,
-    home_dir: PathBuf,
 }
 
 impl Paths {
@@ -16,10 +15,10 @@ impl Paths {
             Ok(p) if !p.is_empty() => PathBuf::from(p),
             _ => dirs::config_dir()?.join("nerve"),
         };
-        Some(Self {
-            config_dir,
-            home_dir: dirs::home_dir()?,
-        })
+        // Nothing works without a home dir (Claude's config lives there),
+        // so refuse to start rather than half-run.
+        dirs::home_dir()?;
+        Some(Self { config_dir })
     }
 
     pub(crate) fn config_dir(&self) -> &Path {
@@ -50,12 +49,9 @@ impl Paths {
         self.config_dir.join("themes")
     }
 
-    pub(crate) fn claude_root(&self) -> PathBuf {
-        self.home_dir.join(".claude")
-    }
-
-    pub(crate) fn sessions_dir(&self) -> PathBuf {
-        self.claude_root().join("sessions")
+    /// Per-session JSON written by `nerve statusline`, keyed by session id.
+    pub(crate) fn statusline_dir(&self) -> PathBuf {
+        self.config_dir.join("statusline")
     }
 
     pub(crate) fn ensure_config_dir(&self) -> std::io::Result<()> {
@@ -63,10 +59,7 @@ impl Paths {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(config_dir: PathBuf, home_dir: PathBuf) -> Self {
-        Self {
-            config_dir,
-            home_dir,
-        }
+    pub(crate) fn for_test(config_dir: PathBuf) -> Self {
+        Self { config_dir }
     }
 }

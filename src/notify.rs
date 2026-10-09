@@ -4,6 +4,7 @@ use crate::state::session::SessionState;
 
 pub(crate) struct Notifier {
     config: NotificationConfig,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     terminal_app: Option<String>,
 }
 
@@ -16,6 +17,7 @@ impl Notifier {
         &self,
         session_name: &str,
         state: &SessionState,
+        waiting_for: Option<&str>,
         target: &SessionTarget,
         bridge: &Bridge,
         muted: bool,
@@ -27,9 +29,10 @@ impl Notifier {
             SessionState::Idle if self.config.on_complete => {
                 format!("{session_name} is done")
             }
-            SessionState::WaitingForInput if self.config.on_waiting => {
-                format!("{session_name} needs input")
-            }
+            SessionState::WaitingForInput if self.config.on_waiting => match waiting_for {
+                Some(why) => format!("{session_name}: {why}"),
+                None => format!("{session_name} needs input"),
+            },
             SessionState::Error if self.config.on_error => {
                 format!("{session_name} hit an error")
             }
@@ -125,6 +128,11 @@ end run"#;
 
 #[cfg(target_os = "macos")]
 fn focus_command(bridge: &Bridge, target: &SessionTarget) -> Option<String> {
+    // Desktop and background sessions have no tab: the bridge's cwd
+    // fallback would resolve an unrelated pane in the same directory.
+    if target.kind != crate::state::session::SessionKind::Terminal {
+        return None;
+    }
     let id = bridge.resolve_id(target)?;
     let id_str = id.to_string();
     // Defence in depth: validate the bridge id against a strict charset

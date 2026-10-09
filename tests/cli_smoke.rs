@@ -16,6 +16,9 @@ fn run_cli(args: &[&str], home: &std::path::Path, config: &std::path::Path) -> (
         .args(args)
         .env("HOME", home)
         .env("NERVE_CONFIG_DIR", config)
+        // nerve also scans $CLAUDE_CONFIG_DIR; don't let the developer's
+        // real sessions leak into the fixture.
+        .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

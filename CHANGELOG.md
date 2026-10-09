@@ -1,5 +1,63 @@
 # Changelog
 
+## Unreleased
+
+Catches nerve up with Claude Code 2.1.x and fixes a CPU runaway.
+
+### Fixed
+
+- **Orphaned nerve pinned a CPU core forever.** When the terminal
+  went away (tab closed, tmux killed, SSH dropped), crossterm's
+  `try_read` spun on `read() == 0` and never returned, so the lost-tty
+  and SIGHUP checks never ran. A watchdog thread now force-exits
+  ~2.5 s after the tty is lost.
+- **`$CLAUDE_CONFIG_DIR` was ignored.** nerve only read `~/.claude`,
+  so users who relocate Claude's config saw no sessions at all. Both
+  roots are now scanned (absolute paths only, matching Claude ≥ 2.1.284).
+- **Claude desktop-app sessions were invisible.** Their binary path
+  contains a space, which broke `ps -o comm` parsing; switched to
+  `ucomm`.
+- Background sessions with a live process showed as Idle forever: their
+  pid file reports `status: "shell"` for the job's whole life. Their state
+  now comes from the job's `state.json`, the same source `claude agents`
+  uses.
+- **Didn't build on the declared MSRV (1.85), and CI has been red since
+  0.4.1.** `instability` 0.3.12 / `darling` 0.23 need rustc 1.88; pinned
+  `instability` to 0.3.9 in Cargo.lock, and `nerve update` / `install.sh`
+  now pass `--locked` so installs use it. Linux clippy also failed on
+  macOS-only items that were never gated, and one test flaked on Linux
+  inode reuse.
+- A newly started session could take up to `process_scan_interval_ms`
+  (5 s) to appear: its pid wasn't in the cached process table yet. The
+  worker now re-scans processes when a session file names an unseen pid.
+- Ghostty live preview (`P`) returned nothing on Ghostty 1.3: the screen
+  capture walked a fixed accessibility path that's one level shallower
+  than 1.3's layout. It now finds terminal text areas by class.
+- The log preview showed "No log entries" for fresh sessions: typed
+  prompts are stored as a plain string (not a content array), and large
+  `attachment` rows could fill the 64 KB tail window. Both handled.
+- Transcript lookup used `/`→`-` encoding; Claude encodes every
+  non-alphanumeric character, so worktree sessions always fell back to
+  the slow scan.
+
+### Added
+
+- State comes from Claude's own `status` (`busy` / `waiting` / `idle`)
+  in the session file when present, committed without the 3-tick
+  debounce. The transcript heuristics remain for older Claude versions.
+- Waiting reason (`waitingFor`, or a background job's open questions)
+  shown on the card, in `--list`, and in notifications.
+- Session names from Claude (`/rename`, auto-titles) instead of the
+  cwd's last component.
+- Desktop and `claude --bg` sessions, including parked jobs that are
+  blocked on you with no live process. Enter on a background job runs
+  `claude attach` in a tmux split (clipboard elsewhere), `x` runs
+  `claude stop`, and previews show the transcript or, for parked jobs
+  with none, the job's state timeline.
+- `nerve statusline [-- <cmd>]`: a Claude `statusLine` hook that
+  records Claude's own cost, context-window % and model. Cards and
+  totals prefer these over the transcript estimate.
+
 ## 0.4.1 — 2026-05-28
 
 Post-`0.4.0` cleanup pass — no observable runtime change.

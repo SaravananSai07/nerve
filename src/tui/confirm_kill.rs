@@ -4,15 +4,23 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
+use crate::state::session::SessionKind;
 
-pub(crate) fn render(frame: &mut Frame, theme: &Theme, name: &str) {
+/// Background jobs are stopped with `claude stop` (resumable) rather than
+/// SIGTERM, and the dialog says so.
+pub(crate) fn render(frame: &mut Frame, theme: &Theme, name: &str, kind: SessionKind) {
+    let (title, verb, key_label) = if kind == SessionKind::Background {
+        (" stop background job ", "Stop", " stop  ")
+    } else {
+        (" kill session ", "Kill", " kill  ")
+    };
     let area = super::centered(frame.area(), 48, 5);
 
     frame.render_widget(Clear, area);
 
     let block = Block::default()
         .title(Span::styled(
-            " kill session ",
+            title,
             Style::default()
                 .fg(theme.error)
                 .add_modifier(Modifier::BOLD),
@@ -29,7 +37,7 @@ pub(crate) fn render(frame: &mut Frame, theme: &Theme, name: &str) {
     let display_name = crate::util::text::truncate_graphemes(name, 35);
     let lines = vec![
         Line::from(Span::styled(
-            format!(" Kill '{display_name}'?"),
+            format!(" {verb} '{display_name}'?"),
             Style::default().fg(theme.text),
         )),
         Line::raw(""),
@@ -38,7 +46,7 @@ pub(crate) fn render(frame: &mut Frame, theme: &Theme, name: &str) {
         // a "punch-through-with-Enter" reflex resolves to no-op.
         Line::from(vec![
             Span::styled(" [y]", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
-            Span::styled(" kill  ", Style::default().fg(theme.muted)),
+            Span::styled(key_label, Style::default().fg(theme.muted)),
             Span::styled(
                 "[Enter/Esc/n]",
                 Style::default().fg(theme.processing).add_modifier(Modifier::BOLD),

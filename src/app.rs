@@ -11,7 +11,7 @@ use crate::paths::Paths;
 use crate::platform::{Bridge, SessionTarget};
 use crate::signals::ShutdownFlag;
 use crate::state::filtered_view::FilteredView;
-use crate::state::session::{Session, SessionId};
+use crate::state::session::{Session, SessionId, SessionKind};
 use crate::state::prefs::Prefs;
 use crate::state::registry::SessionRegistry;
 use crate::tui::preview::PreviewSource;
@@ -35,6 +35,75 @@ fn stdin_is_controlling_tty() -> bool {
     is_controlling_tty(std::io::stdin())
 }
 
+/// How long the main loop gets to notice a lost tty on its own before the
+/// watchdog force-exits.
+const WATCHDOG_GRACE: Duration = Duration::from_secs(2);
+
+/// Exit the process when the tty goes away even if the main loop is stuck.
+///
+/// crossterm 0.28/0.29 `try_read` spins forever when `read(2)` on a hung-up
+/// tty returns `Ok(0)`, so `event::poll` never returns and the loop's own
+/// tty check is never reached — the orphaned process (reparented to
+/// launchd) pins a core indefinitely. This thread doesn't depend on
+/// crossterm returning. It acts only on tty loss: with the tty gone there's
+/// no terminal state worth restoring, whereas exiting on a mere shutdown
+/// signal could leave a live terminal in raw mode. The flock is released by
+/// the kernel on exit.
+fn spawn_tty_watchdog() {
+    let spawned = std::thread::Builder::new()
+        .name("nerve-tty-watchdog".into())
+        .spawn(|| {
+            let mut lost_since: Option<std::time::Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                if stdin_is_controlling_tty() {
+                    lost_since = None;
+                    continue;
+                }
+                let since = *lost_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= WATCHDOG_GRACE {
+                    log_info!("app: main loop unresponsive after losing tty; forcing exit");
+                    std::process::exit(0);
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        crate::log_warn!("app: tty watchdog failed to start: {e}");
+    }
+}
+
+/// Best-effort clipboard write. Tries each platform tool in turn
+/// (Wayland, then X11 on Linux) and returns false if none worked.
+fn copy_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    const TOOLS: &[&[&str]] = &[&["pbcopy"]];
+    #[cfg(not(target_os = "macos"))]
+    const TOOLS: &[&[&str]] = &[
+        &["wl-copy"],
+        &["xclip", "-selection", "clipboard"],
+        &["xsel", "--clipboard", "--input"],
+    ];
+    TOOLS.iter().any(|argv| pipe_to(argv, text))
+}
+
+fn pipe_to(argv: &[&str], text: &str) -> bool {
+    use std::io::Write;
+    let Ok(mut child) = std::process::Command::new(argv[0])
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    child.wait().is_ok_and(|s| s.success()) && wrote
+}
+
 /// Free function so preview-overlay constructors don't have to
 /// borrow `&mut self` just to read a transcript tail.
 fn load_log_entries(
@@ -47,6 +116,8 @@ fn load_log_entries(
 }
 
 use crate::tui::status::StatusMessage;
+#[cfg(test)]
+use crate::util::sanitize::Sanitised;
 
 enum Overlay {
     None,
@@ -60,7 +131,7 @@ enum Overlay {
         scroll: usize,
         source: PreviewSource,
     },
-    ConfirmKill { name: String, id: SessionId },
+    ConfirmKill { name: String, id: SessionId, kind: SessionKind },
     ConfirmPreview,
 }
 
@@ -107,6 +178,10 @@ pub(crate) struct App {
     /// Set once after surfacing the "discovery worker stopped" banner
     /// so we don't re-overwrite a fresh status message on every tick.
     discovery_warned: bool,
+    /// Outcomes of slow external actions (`claude stop`, SIGTERM via a
+    /// fresh `ps`) run off the UI thread; drained into the status bar.
+    action_tx: std::sync::mpsc::Sender<StatusMessage>,
+    action_rx: std::sync::mpsc::Receiver<StatusMessage>,
 }
 
 impl App {
@@ -152,7 +227,9 @@ impl App {
             Some(StatusMessage::error(load_errors.join(" | ")))
         };
 
-        let claude_installed = paths.claude_root().exists();
+        let (action_tx, action_rx) = std::sync::mpsc::channel();
+        let claude_roots = crate::detect::claude_roots();
+        let claude_installed = claude_roots.iter().any(|r| r.exists());
 
         let refresh_interval =
             Duration::from_millis(config.general.refresh_interval_ms);
@@ -161,7 +238,8 @@ impl App {
         let discovery = crate::workers::discovery::spawn(
             refresh_interval,
             process_scan_interval,
-            paths.sessions_dir(),
+            claude_roots.iter().map(|r| r.join("sessions")).collect(),
+            paths.statusline_dir(),
             shutdown.clone(),
         )
         .expect("discovery worker must start");
@@ -191,15 +269,34 @@ impl App {
             update_banner,
             last_stale_sweep: std::time::Instant::now(),
             discovery_warned: false,
+            action_tx,
+            action_rx,
+        }
+    }
+
+    /// Run a slow external action on its own thread so a wedged CLI can't
+    /// freeze the UI. `pending` shows until the outcome arrives.
+    fn run_action(&mut self, pending: String, action: impl FnOnce() -> StatusMessage + Send + 'static) {
+        self.set_status_info(pending);
+        let tx = self.action_tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("nerve-action".into())
+            .spawn(move || {
+                let _ = tx.send(action());
+            });
+        if let Err(e) = spawned {
+            self.set_status_error(format!("could not start action: {e}"));
+        }
+    }
+
+    fn drain_action_results(&mut self) {
+        while let Ok(msg) = self.action_rx.try_recv() {
+            self.status_message = Some(msg);
         }
     }
 
     fn set_status_info(&mut self, text: impl Into<String>) {
         self.status_message = Some(StatusMessage::info(text));
-    }
-
-    fn set_status_success(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage::success(text));
     }
 
     fn set_status_error(&mut self, text: impl Into<String>) {
@@ -237,6 +334,8 @@ impl App {
     }
 
     pub(crate) fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        spawn_tty_watchdog();
+
         // Seed the registry from the worker's first snapshot so the
         // initial paint isn't blank. Generous 500 ms cap — in practice
         // the worker produces its first snapshot in ~50-100 ms on a
@@ -360,8 +459,8 @@ impl App {
                             );
                         }
                     }
-                    Overlay::ConfirmKill { ref name, .. } => {
-                        confirm_kill::render(frame, &self.theme, name);
+                    Overlay::ConfirmKill { ref name, kind, .. } => {
+                        confirm_kill::render(frame, &self.theme, name, *kind);
                     }
                     Overlay::ConfirmPreview => {
                         confirm_preview::render(frame, &self.theme);
@@ -437,10 +536,44 @@ impl App {
             return;
         };
 
-        let target = SessionTarget::from(session);
+        // Every per-kind decision for "go to session" lives here; bridges
+        // only ever see terminal sessions.
+        match session.kind {
+            SessionKind::Terminal => {
+                let target = SessionTarget::from(session);
+                match self.bridge.go_to_session(&target) {
+                    Ok(()) => self.visited_session = Some(target.name),
+                    Err(e) => self.set_status_error(e.to_string()),
+                }
+            }
+            SessionKind::Desktop => {
+                if let Err(e) = crate::platform::focus_desktop_app() {
+                    self.set_status_error(e.to_string());
+                }
+            }
+            SessionKind::Background => {
+                let id = session.id.clone();
+                self.attach_background(id.as_str());
+            }
+        }
+    }
 
-        match self.bridge.go_to_session(&target) {
-            Ok(()) => self.visited_session = Some(target.name),
+    /// Background sessions have no tab to jump to: open `claude attach`
+    /// in a split where the terminal allows it, else hand the user the
+    /// command on the clipboard.
+    fn attach_background(&mut self, session_id: &str) {
+        let argv = crate::detect::claude::attach_argv(session_id);
+        let job = argv[2];
+        match self.bridge.open_command(&argv) {
+            Ok(true) => self.set_status_info(format!("attached to background job {job}")),
+            Ok(false) => {
+                let cmd = argv.join(" ");
+                if copy_to_clipboard(&cmd) {
+                    self.set_status_info(format!("copied `{cmd}` — paste it in any terminal"));
+                } else {
+                    self.set_status_info(format!("run `{cmd}` in any terminal"));
+                }
+            }
             Err(e) => self.set_status_error(e.to_string()),
         }
     }
@@ -471,12 +604,141 @@ impl App {
 }
 
 #[cfg(test)]
+impl App {
+    /// App with no worker thread, update check, or terminal detection,
+    /// seeded through the same `apply_discovery` path production uses.
+    fn for_test(bridge: Bridge, snaps: Vec<crate::state::session::DiscoverySnapshot>) -> Self {
+        let themes = Theme::catalog(None);
+        let (action_tx, action_rx) = std::sync::mpsc::channel();
+        let mut app = Self {
+            paths: Paths::for_test(tempfile::tempdir().unwrap().keep()),
+            shutdown: ShutdownFlag::for_test(),
+            config: Config::default(),
+            registry: SessionRegistry::new(),
+            filtered: FilteredView::new(),
+            discovery: DiscoveryWorker::idle(),
+            focused: true,
+            claude_installed: true,
+            theme: themes[0].clone(),
+            themes,
+            theme_index: 0,
+            bridge,
+            selected: 0,
+            cols: 2,
+            overlay: Overlay::None,
+            search_query: None,
+            status_message: None,
+            should_quit: false,
+            notifier: Notifier::new(Default::default(), None),
+            prefs: Prefs::default(),
+            visited_session: None,
+            update_banner: None,
+            last_stale_sweep: std::time::Instant::now(),
+            discovery_warned: false,
+            action_tx,
+            action_rx,
+        };
+        app.apply_discovery(snaps);
+        app.apply_filter();
+        app
+    }
+
+    fn status_text(&self) -> &str {
+        self.status_message.as_ref().map(|m| m.text.as_str()).unwrap_or("")
+    }
+}
+
+#[cfg(test)]
 mod app_tests {
     use super::*;
+    use crate::state::session::{DiscoverySnapshot, SessionState};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    fn snap(id: &str, kind: SessionKind, state: SessionState) -> DiscoverySnapshot {
+        let mut s = DiscoverySnapshot::for_test(id, state);
+        s.kind = kind;
+        s
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_key(code, KeyModifiers::NONE);
+    }
 
     #[test]
     fn devnull_is_not_a_controlling_tty() {
         let dev_null = std::fs::File::open("/dev/null").expect("/dev/null open");
         assert!(!is_controlling_tty(&dev_null));
+    }
+
+    // Killing the desktop app's embedded claude from outside leaves the
+    // app showing a dead session; nerve must refuse before any dialog.
+    #[test]
+    fn kill_refuses_desktop_session() {
+        let mut app = App::for_test(
+            Bridge::NoOp,
+            vec![snap("d1", SessionKind::Desktop, SessionState::Processing)],
+        );
+        press(&mut app, KeyCode::Char('x'));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.status_text().contains("desktop session"));
+    }
+
+    // The confirm dialog must carry the kind so `y` routes a background
+    // job to `claude stop` (resumable) rather than SIGTERM.
+    #[test]
+    fn kill_dialog_carries_session_kind() {
+        for kind in [SessionKind::Background, SessionKind::Terminal] {
+            let mut app = App::for_test(Bridge::NoOp, vec![snap("s1", kind, SessionState::Processing)]);
+            press(&mut app, KeyCode::Char('x'));
+            match &app.overlay {
+                Overlay::ConfirmKill { kind: k, .. } => assert_eq!(*k, kind),
+                _ => panic!("no confirm dialog for {kind:?}"),
+            }
+            // Enter is cancel, never confirm.
+            press(&mut app, KeyCode::Enter);
+            assert!(matches!(app.overlay, Overlay::None));
+        }
+    }
+
+    // P on a non-terminal session must not start a tab-switching screen
+    // capture (or its confirm prompt): there is no pane, and the tmux/
+    // Ghostty cwd fallback would capture an unrelated one.
+    #[test]
+    fn live_preview_never_captures_for_non_terminal_sessions() {
+        for kind in [SessionKind::Background, SessionKind::Desktop] {
+            let mut app = App::for_test(
+                Bridge::Tmux(crate::platform::tmux::TmuxBridge),
+                vec![snap("s1", kind, SessionState::Idle)],
+            );
+            press(&mut app, KeyCode::Char('P'));
+            assert!(
+                matches!(app.overlay, Overlay::Preview { source: PreviewSource::LogEntries(_), .. }),
+                "{kind:?} opened something other than the log view"
+            );
+        }
+    }
+
+    // Claude's own status needs no debounce: the first observation
+    // must commit and notify. Heuristic states still wait 3 ticks.
+    #[test]
+    fn authoritative_state_notifies_on_first_tick() {
+        let mut app = App::for_test(
+            Bridge::NoOp,
+            vec![snap("s1", SessionKind::Terminal, SessionState::Processing)],
+        );
+        let mut waiting = snap("s1", SessionKind::Terminal, SessionState::WaitingForInput);
+        waiting.state_authoritative = true;
+        waiting.waiting_for = Some(Sanitised::new("permission prompt"));
+        let pending = app.apply_discovery(vec![waiting]);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].state, SessionState::WaitingForInput);
+        assert_eq!(pending[0].waiting_for.as_ref().map(Sanitised::as_str), Some("permission prompt"));
+
+        let mut app = App::for_test(
+            Bridge::NoOp,
+            vec![snap("s1", SessionKind::Terminal, SessionState::Processing)],
+        );
+        let heuristic = snap("s1", SessionKind::Terminal, SessionState::WaitingForInput);
+        assert!(app.apply_discovery(vec![heuristic]).is_empty());
     }
 }
