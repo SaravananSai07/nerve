@@ -8,7 +8,10 @@ laptop, a Raspberry Pi, a server. From any device you can:
 - answer its permission prompts and `AskUserQuestion` questions;
 - read its diff, transcript tail and subagent work;
 - move a session to another device and carry on there;
-- send a job to whichever device has what the job needs.
+- send a job to whichever device has what the job needs;
+- send files and git refs into a named place on another device, or pull
+  them from it;
+- run an allowlisted command on another device and get its exit code.
 
 Transport is [Nostr](https://github.com/nostr-protocol/nips): every
 device dials *out* to one or more relays over WebSocket, so it works
@@ -143,8 +146,13 @@ nerve sync status                               # last synced, sessions, pending
 nerve sync send pi 4c14e2fb "run the tests again"
 nerve sync answer pi 15a12dee3382bc05 allow     # or deny, or an option label
 nerve sync fetch pi 4c14e2fb diff
-nerve sync handoff cc6fb097 pi --then "carry on with the next step"
+nerve sync handoff cc6fb097 pi --to v2-harness --then "carry on with the next step"
 nerve sync job --needs macos --verify 'xcodebuild test ...' "ios tests" -- "fix the failing UI test"
+nerve sync put pi v2-harness ignored/v2-build --delete --wait
+nerve sync get pi v2-harness ignored/v2-build/units/S5 --wait
+nerve sync refs pi v2-harness v2-build:refs/remotes/mac/v2-build --wait
+nerve sync refs pi v2-harness --pull main:refs/remotes/pi/main
+nerve sync run pi --place v2-harness --timeout 1800 --wait -- node bin/v2.mjs verify S5
 nerve sync away on
 ```
 
@@ -214,8 +222,8 @@ the hook returns at once.
    subagent sidecar. Chunking is content-defined (2/8/32 KiB, SHA-256 ids).
 4. **Push.** It sends the index, then only chunks the target isn't known to
    hold. The target asks for anything missing.
-5. **Unpack.** The target restores the repo at the `path_map`-mapped path or
-   under `handoff_root`, refusing to overwrite uncommitted work. It installs
+5. **Unpack.** The target restores the repo where it was told (see
+   *Where a hand-off lands*), refusing to overwrite uncommitted work. It installs
    the transcript under the slug Claude derives from the *new* path, and runs
    `claude --resume <id> --fork-session` in a detached tmux session
    `nerve-<id>`, typing `--then <text>` if given.
@@ -224,6 +232,25 @@ the hook returns at once.
    commit later moved 16–19 KiB (E22).
 
 Chunks live in `<config>/sync/chunks/`, pruned oldest-first above 512 MiB.
+
+#### Where a hand-off lands
+
+The target picks the first of these that applies:
+
+1. the place named with `--to <place>`: its `[places]` entry on the target;
+2. the source path mapped through the target's `[path_map]`;
+3. `<handoff_root>/<repo name>`, but only when `handoff_root` is set.
+
+With none of these, the target refuses and names the config to add. It
+never picks a directory on its own.
+
+An existing checkout keeps its branch. The hand-off is refused, unless
+you pass `--force`, when:
+
+- the checkout is on a different branch from the hand-off's, or
+- its branch has commits the hand-off doesn't have.
+
+Uncommitted changes always refuse it.
 
 ### Jobs
 
@@ -242,6 +269,131 @@ Chunks live in `<config>/sync/chunks/`, pruned oldest-first above 512 MiB.
   relay for up to a day. They start when it reconnects.
 - **Re-running:** the job's `session_id` is reported, so it can be
   resumed or handed off.
+- **Where:** `--cwd` on the executing device. Without it, the job runs in
+  `job-<id>` under `handoff_root` when that is set, else in
+  `<config>/sync/jobs/`.
+
+### Places
+
+A place is a name for a directory, defined on each device in its own
+`fleet.toml`:
+
+```toml
+[places]                        # on the Mac
+v2-harness = "/Users/me/SS/theerv-app"
+```
+
+```toml
+[places]                        # on the Pi
+v2-harness = "/home/pi/SS/theerv-app"
+```
+
+Commands name the place. Each side resolves its own path, so a sender
+never needs to know remote paths. A place missing on either side is
+refused, with the line to add.
+
+### Files: `put` and `get`
+
+```bash
+nerve sync put pi v2-harness ignored/v2-build bin/v2.mjs --wait
+nerve sync get pi v2-harness ignored/v2-build/units --delete --wait
+```
+
+`put` sends files and directories, given relative to the place (`.` is
+the whole place). `get` asks the peer to send them back the same way, so
+either device can start a transfer.
+
+- **Incremental.** Files go through the hand-off's content-defined chunks
+  and per-peer ledger, so only chunks the peer isn't known to hold travel.
+  A repeat put of a 61-file, 1 MiB folder with one changed file moved
+  8.9 KiB (2 of 237 chunks).
+- **Atomic.** Each file is written to a temp file next to it and renamed
+  into place. Its permission bits are kept. A file whose content and mode
+  already match is left alone.
+- **Contained.** Every path is checked before anything is written. A path
+  that leaves the place (`..` or absolute), or that goes through a
+  symlink, refuses the whole transfer. The sender skips symlinks.
+- **`--delete`** removes files under the given *directories* that the
+  sender no longer has, then any directories that leaves empty. It never
+  deletes outside them, and doesn't follow symlinked directories.
+- **`--wait`** blocks until the receiver acknowledges, then prints what
+  moved. Without it, a running agent takes the transfer over and the
+  command returns at once. With no agent running, the CLI stays until the
+  transfer ends anyway. A failure exits 1.
+
+```
+beta ✓ b15eac3f…: beta place harness: 1 file(s) written, 60 unchanged, 0 deleted;
+  received 8.9 KiB in 2 of 237 chunks (235 reused) in 0.5s
+```
+
+### Git refs: `refs`
+
+```bash
+nerve sync refs pi v2-harness v2-build:refs/remotes/mac/v2-build --wait
+nerve sync refs pi v2-harness --pull main:refs/remotes/pi/main --wait
+```
+
+Each pair is `<src-ref>:<dst-ref>`. The source is a branch, tag or `HEAD`
+in the sender's place repo. The destination is a full ref in the
+receiver's. `--pull` reverses the direction: the source is on the peer
+and the destination is here.
+
+- The receiver reports its branch and remote-tracking tips first, as for
+  a hand-off. The git bundle carries only the commits beyond them, and
+  none at all when it already has them.
+- The receiver adds the bundle's objects (`git bundle unbundle`), then
+  points **exactly the named destination refs** at their commits with
+  `git update-ref`.
+- Nothing is checked out. HEAD, the index, the working tree and every
+  other ref stay as they were.
+- These are refused:
+  - a destination that isn't a full `refs/…` name;
+  - the destination the receiver has checked out;
+  - a place that holds a different repository (a different root commit).
+
+### Runs
+
+```bash
+nerve sync run pi --place v2-harness --timeout 1800 --wait -- node bin/v2.mjs verify S5
+```
+
+`run` starts one command on a peer. The command runs only if the peer's
+`fleet.toml` allows it:
+
+```toml
+[run]
+allow = [
+  { place = "v2-harness", argv = ["node", "bin/v2.mjs", "*"] },
+  { cwd = "/home/pi/SS/theerv-server", argv = ["make", "test"] },
+]
+```
+
+- **Matching.** `argv` matches literally. A final `"*"` matches any
+  further arguments, including none; a `*` anywhere else makes the rule
+  match nothing. A rule with `place` or `cwd` applies only there; a rule
+  with neither applies anywhere.
+- **Refusals** name the rule to add and the file to add it to.
+- **No shell.** The argv is passed as given. `./bin/x` resolves inside the
+  run's directory; a bare name is looked up on PATH, then in
+  `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin` and
+  `/usr/local/bin`. A rule with `shell = true` instead joins the argv with
+  spaces and runs `sh -c`. A trailing `*` in such a rule admits arbitrary
+  shell, so keep shell rules literal.
+- **Directory.** `--place P` runs in the place's directory on the peer,
+  `--cwd DIR` in an absolute directory there. With neither, it runs in the
+  home directory.
+- **Timing.** The 5-minute expiry applies to *starting*: a stored request
+  older than that is refused. A started command runs as long as it needs,
+  or until `--timeout` kills its process group (exit 124).
+- **Replay.** Like every envelope, a run request is deduplicated by id, so
+  it starts at most once.
+- **Output.** Stdout and stderr are merged into a 20-line tail, sent at
+  most once a second. `nerve sync status` and the Devices view list runs
+  with jobs, showing the exit code once the run ends.
+- **`--wait`** prints the output as it arrives, on stdout, and exits with
+  the remote exit code. When the command never ran (refused, unknown
+  device, no answer), it exits 125. Without `--wait`, it returns once the
+  peer accepts or refuses.
 
 ## Files
 
@@ -255,7 +407,8 @@ All under `<nerve config>/sync/`:
 | `mailbox/` | Prompts waiting for a remote answer (settings-hook path). |
 | `agent.sock` | The mod's connection to the agent (0600). |
 | `mod/` | The nerve mod, as installed into Claude. |
-| `chunks/`, `known/` | Content-addressed hand-off chunks; which chunks each peer holds. |
+| `chunks/`, `known/` | Content-addressed chunks for hand-offs and `put`/`get`/`refs`; which chunks each peer holds. |
+| `jobs/` | Working directories of jobs given no `--cwd` (when `handoff_root` is unset). |
 | `invites/` | Open one-time invite secrets (0700). |
 | `activity.log` | The agent's activity, which CLI commands follow for acks. |
 | `spool/` | CLI requests for the running agent. |
@@ -268,7 +421,7 @@ All under `<nerve config>/sync/`:
 device = "mac"
 relays = ["ws://100.73.26.46:7777", "wss://relay.primal.net"]
 caps = ["ios-sim"]                 # extra, on top of detected ones
-handoff_root = "/Users/me/nerve-handoff"
+handoff_root = "/Users/me/nerve-handoff"   # optional; unset, unplaced hand-offs are refused
 remote_questions = "away"          # away | always | never
 remote_permissions = true
 auto_trust_handoffs = true         # accept Claude's folder-trust prompt for handed-off sessions
@@ -279,7 +432,23 @@ pi = "npub1..."
 
 [path_map]                         # source prefix = local prefix
 "/Users/me/SS" = "/home/pi/SS"
+
+[places]                           # name = absolute path on this device
+v2-harness = "/Users/me/SS/theerv-app"
+
+[run]                              # commands peers may run here
+allow = [{ place = "v2-harness", argv = ["node", "bin/v2.mjs", "*"] }]
 ```
+
+### The agent's PATH
+
+launchd and systemd user units start with a bare PATH. Claude Code
+installs into `~/.local/bin`, which is not on it. `nerve setup` writes
+your PATH into the unit, adding `~/.local/bin`, `~/.cargo/bin`,
+`/opt/homebrew/bin` and `/usr/local/bin` where they exist. Hand-offs,
+jobs and runs also search those directories when PATH misses. If `claude`
+still isn't found, the error lists every directory searched. Re-run
+`nerve setup` to refresh a unit written by an older version.
 
 ## Security model
 
@@ -289,6 +458,12 @@ pi = "npub1..."
 - **Integrity.** Events are signature-checked.
 - **Replay.** Envelopes are deduplicated by id across restarts, and
   instructions expire after 5 minutes.
+- **Commands.** `nerve sync run` executes only what a `[run] allow` rule
+  in the *receiving* device's fleet.toml names. A sender cannot widen the
+  rule, and an empty allowlist (the default) runs nothing.
+- **Places.** `put`, `get` and `refs` write only inside a place the
+  receiver defined. Writes never follow a symlink out of it. `refs` sets
+  only the destination refs named, never one that is checked out.
 - **Scope of trust.** A paired device can type into your sessions and
   approve tool calls. That is remote code execution by design, so pair
   only devices you control. Treat `device.key` like an SSH private key.

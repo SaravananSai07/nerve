@@ -8,6 +8,7 @@ Two ways to see `nerve sync` working: on one Mac in a minute, or across real dev
 research/sync/demo/demo.sh           # relay + "beta" agent, then the TUI as "alpha"
 research/sync/demo/demo.sh --check   # the same, non-interactive; prints status and exits
 research/sync/demo/demo.sh --job     # also runs a headless Claude job on beta (costs a few cents)
+research/sync/demo/places.sh         # put/get/refs/run between two agents, each side initiating; exits non-zero on failure
 ```
 
 The script does the following:

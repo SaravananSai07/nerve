@@ -25,6 +25,42 @@
 - **Incremental hand-off.** Only the commits the target lacks and
   content-defined chunks it doesn't hold are sent. A repeat hand-off of a
   700 KiB session moved 16–19 KiB.
+- **Places, runs and refs (`--features sync`).** Each device names
+  directories under `[places]` in its fleet.toml, so peers address a
+  place by name and never need its remote path.
+  - `nerve sync put|get <device> <place> <paths…> [--delete] [--wait]`
+    moves files through the hand-off's chunk store. Either side can
+    start it. A repeat put of a 1 MiB folder with one changed file moved
+    8.9 KiB (2 of 237 chunks). Files are written atomically, with their
+    modes, only inside the place and never through a symlink.
+  - `nerve sync refs <device> <place> [--pull] <src>:<dst>…` sends only
+    the commits the target lacks and sets exactly the named refs. It
+    never checks out and never touches HEAD, the index or the working
+    tree.
+  - `nerve sync run <device> [--place P | --cwd DIR] [--timeout S]
+    [--wait] -- <argv…>` runs a command that a `[run] allow` rule on the
+    target names (a trailing `"*"` admits further arguments). The argv is
+    passed as given, with no shell. Runs stream an output tail, show in
+    `nerve sync status` and the Devices view, and with `--wait` the CLI
+    exits with the remote exit code. The 5-minute expiry bounds only
+    *starting* a run.
+
+### Changed
+
+- **Hand-offs land only where you said.** A hand-off goes to the place
+  given with `--to <place>`, else the `path_map`-mapped path, else under
+  `handoff_root` when that is set. With none of them it is refused, and
+  the message names the config to add. It no longer falls back to
+  `~/nerve-handoff`. An existing checkout on another branch, or one whose
+  branch has commits the hand-off lacks, is refused unless you pass
+  `--force`; it is no longer switched with `git checkout -B`. Jobs
+  without `--cwd` run under `handoff_root` if set, else
+  `<config>/sync/jobs/`.
+- **Services find `claude`.** `nerve setup` writes a PATH into the
+  launchd plist and systemd unit that includes `~/.local/bin`,
+  `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin` where they
+  exist. Hand-offs and jobs also look in those directories when PATH
+  misses, and the error lists where they looked.
 
 ### Fixed
 
