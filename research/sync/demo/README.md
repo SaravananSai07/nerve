@@ -1,6 +1,6 @@
 # Run the prototype
 
-Two ways to see `nerve sync` working: on one Mac in a minute, or across real devices.
+Two ways to see `nerve sync` working: on one machine in a minute, or across real devices.
 
 ## One machine, no setup
 
@@ -30,7 +30,7 @@ In the TUI:
 | `a` / `x` / `1`–`9` | answer a pending permission or question |
 | `H` | hand the selected session off to beta (it resumes in a detached tmux session, checkout under `.state/beta-work`) |
 
-Both "devices" run on this Mac, so beta reports the same Claude sessions you have open. An instruction sent with `m` is typed into a real session.
+Both "devices" run on this machine, so beta reports the same Claude sessions you have open. An instruction sent with `m` is typed into a real session.
 
 Logs are in `.state/relay.log` and `.state/beta-agent.log`. Quitting the TUI stops the relay and beta.
 

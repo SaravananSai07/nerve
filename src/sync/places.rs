@@ -271,7 +271,7 @@ pub(crate) fn this_repo_id(repo: &Path) -> String {
 /// leave the working tree out of step with it).
 pub(crate) fn check_dst(repo: &Path, dst: &str) -> Result<(), String> {
     if !dst.starts_with("refs/") || run(repo, &["git", "check-ref-format", dst]).is_err() {
-        return Err(format!("{dst}: destination must be a full ref name such as refs/remotes/mac/main"));
+        return Err(format!("{dst}: destination must be a full ref name such as refs/remotes/laptop/main"));
     }
     if text(repo, &["git", "symbolic-ref", "-q", "HEAD"]).is_ok_and(|h| h == dst) {
         return Err(format!("{dst} is checked out in {}; pick a ref that isn't, such as refs/remotes/<peer>/…", repo.display()));

@@ -852,7 +852,7 @@ fn xfer_refs(dir: &std::path::Path, device: &str, place: &str, rest: &[&str]) ->
             pair => {
                 let (src, dst) = pair.split_once(':').ok_or_else(|| format!("{pair}: give <src-ref>:<dst-ref>"))?;
                 if src.is_empty() || !dst.starts_with("refs/") {
-                    return Err(format!("{pair}: the destination must be a full ref, e.g. main:refs/remotes/mac/main"));
+                    return Err(format!("{pair}: the destination must be a full ref, e.g. main:refs/remotes/laptop/main"));
                 }
                 map.push(RefMap { src: src.to_string(), dst: dst.to_string() });
             }
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn transfers_end_on_their_own_id() {
         let u = Until::Id("x1".into());
-        assert!(u.feed("10:00:00Z mac \u{2713} y2: something else").is_none());
+        assert!(u.feed("10:00:00Z laptop \u{2713} y2: something else").is_none());
         assert!(u.feed("10:00:00Z server \u{2713} x1: server place h: 1 file(s) written").unwrap().ok);
     }
 }
