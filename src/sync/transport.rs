@@ -74,10 +74,11 @@ impl Transport {
     }
 
     async fn publish(&self, builder: EventBuilder) -> Result<usize, String> {
-        self.publish_to(builder, None).await
+        self.publish_to(builder, None).await.map(|(n, _)| n)
     }
 
-    async fn publish_to(&self, builder: EventBuilder, only: Option<Vec<String>>) -> Result<usize, String> {
+    /// How many relays took it, and its id (for a later deletion).
+    async fn publish_to(&self, builder: EventBuilder, only: Option<Vec<String>>) -> Result<(usize, EventId), String> {
         let event = builder.finalize(&self.keys).map_err(|e| e.to_string())?;
         // A relay that rate-limits refills its tokens within seconds, so a
         // long chunk train waits it out instead of dropping the transfer.
@@ -89,7 +90,7 @@ impl Transport {
             }
             .map_err(|e| e.to_string())?;
             if !out.success.is_empty() {
-                return Ok(out.success.len());
+                return Ok((out.success.len(), event.id));
             }
             let why = out.failed.values().next().map(|w| w.to_string()).unwrap_or_default();
             if !is_rate_limited(&why) || waited >= RATE_LIMIT_PATIENCE {
@@ -118,20 +119,37 @@ impl Transport {
     }
 
     pub(crate) async fn send(&self, to: &PublicKey, env: &Envelope) -> Result<usize, String> {
+        self.send_id(to, env).await.map(|(n, _)| n)
+    }
+
+    /// `send`, keeping the event's id for `delete`.
+    pub(crate) async fn send_id(&self, to: &PublicKey, env: &Envelope) -> Result<(usize, EventId), String> {
         let b = EventBuilder::new(Kind::Custom(KIND_MSG), self.seal(to, env)?)
             .tag(Tag::public_key(*to))
             .tag(Tag::expiration(Timestamp::now() + protocol::MSG_TTL_SECS));
-        let n = self.publish(b).await?;
+        let n = self.publish_to(b, None).await?;
         if self.paced {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         Ok(n)
     }
 
+    /// NIP-09: ask the relays to drop events of ours whose work is done
+    /// (a delivered transfer), instead of holding them until they expire.
+    pub(crate) async fn delete(&self, ids: &[EventId]) -> Result<(), String> {
+        for batch in ids.chunks(500) {
+            let b = EventBuilder::new(Kind::EventDeletion, "")
+                .tags(batch.iter().map(|id| Tag::event(*id)))
+                .tag(Tag::expiration(Timestamp::now() + protocol::MSG_TTL_SECS));
+            self.publish(b).await?;
+        }
+        Ok(())
+    }
+
     /// Bulk (handoff packs, diffs): only via connected self-hosted relays
     /// when there are any. Public relays rate-limit chunk trains (and
     /// store them for everyone), a private relay on the tailnet does not.
-    pub(crate) async fn send_bulk(&self, to: &PublicKey, env: &Envelope) -> Result<usize, String> {
+    pub(crate) async fn send_bulk(&self, to: &PublicKey, env: &Envelope) -> Result<(usize, EventId), String> {
         let private: Vec<String> = self
             .health()
             .await
@@ -140,7 +158,7 @@ impl Transport {
             .map(|h| h.url)
             .collect();
         if private.is_empty() {
-            return self.send(to, env).await;
+            return self.send_id(to, env).await;
         }
         let b = EventBuilder::new(Kind::Custom(KIND_MSG), self.seal(to, env)?)
             .tag(Tag::public_key(*to))
@@ -316,6 +334,38 @@ mod tests {
         });
     }
 
+    // A delivered transfer's chunks stayed in the relay's memory for a
+    // day; the sender now deletes them once the receiver confirms.
+    #[test]
+    fn a_deleted_event_is_gone_from_the_relay() {
+        use nostr_sdk::prelude::IntoNostrDatabase;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let db = nostr_memory::MemoryDatabase::unbounded().into_nostr_database();
+            let relay = LocalRelay::builder().database(db.clone()).build();
+            relay.run().await.unwrap();
+            let url = relay.url().await.to_string();
+            let t = Transport::connect(Keys::generate(), &[url]).await.unwrap();
+            let to = Keys::generate().public_key();
+            let env = Envelope::new("a", protocol::Body::SyncNow);
+            let (_, kept) = t.send_bulk(&to, &env).await.unwrap();
+            let (_, done) = t.send_bulk(&to, &env).await.unwrap();
+            let held = |ids: Vec<EventId>| {
+                let db = db.clone();
+                async move { db.query(Filter::new().ids(ids)).await.unwrap().len() }
+            };
+            assert_eq!(held(vec![kept, done]).await, 2);
+            t.delete(&[done]).await.unwrap();
+            assert_eq!(held(vec![done]).await, 0, "deleted");
+            assert_eq!(held(vec![kept]).await, 1, "only what was named");
+            // Nobody else may delete our events.
+            let other = Transport::connect(Keys::generate(), &[relay.url().await.to_string()]).await.unwrap();
+            assert!(other.delete(&[kept]).await.is_err() || held(vec![kept]).await == 1);
+            assert_eq!(held(vec![kept]).await, 1);
+            relay.shutdown();
+        });
+    }
+
     // Found pulling a 3.5 MB folder through the fleet relay: the train
     // outran the relay's per-minute limit and the transfer was dropped.
     #[test]
@@ -329,7 +379,7 @@ mod tests {
             let to = Keys::generate().public_key();
             let env = Envelope::new("a", protocol::Body::SyncNow);
             for i in 0..125 {
-                assert_eq!(t.send_bulk(&to, &env).await, Ok(1), "message {i}");
+                assert_eq!(t.send_bulk(&to, &env).await.map(|(n, _)| n), Ok(1), "message {i}");
             }
             relay.shutdown();
         });

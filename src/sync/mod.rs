@@ -11,11 +11,13 @@
 //! - `jobs`: headless capability-routed jobs
 //! - `runs`: allowlisted plain-command runs
 //! - `places`: files and git refs into named places
+//! - `bulk`: big files over rsync, coordinated over the relay
 //! - `bins`: executable lookup that survives a service's bare PATH
 //! - `cli`: `nerve sync ...`
 
 pub(crate) mod agent;
 pub(crate) mod bins;
+pub(crate) mod bulk;
 pub(crate) mod chunks;
 pub(crate) mod cli;
 pub(crate) mod fleet;

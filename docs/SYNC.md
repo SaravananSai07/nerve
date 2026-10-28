@@ -326,6 +326,46 @@ beta ✓ b15eac3f…: beta place harness: 1 file(s) written, 60 unchanged, 0 del
   received 8.9 KiB in 2 of 237 chunks (235 reused) in 0.5s
 ```
 
+#### Big files: rsync
+
+The relay holds every chunk in memory until it is deleted or expires,
+so files at or over `[xfer] bulk_over` (default 64 MiB) skip it: the
+relay carries the offer, the other side's path and the outcome, and
+the files go over rsync on ssh.
+
+```toml
+[ssh]
+pi = "theerv-pi"        # this device reaches the peer "pi" at this ssh host
+
+[xfer]
+bulk_over = 67108864    # bytes
+```
+
+- **One route is enough.** rsync runs on whichever side has one. A Pi
+  the Mac can reach but not the other way round still sends: the Mac
+  pulls from the path the Pi gives. With no route on either side the
+  transfer is refused, naming the setting to add.
+- **Same rules.** Roots stay inside the place, symlinks are skipped
+  (`-rtp`, no `-l`), nothing is written through one on the receiver,
+  and `--delete` reaches only into the named directories. Each root is
+  its own rsync; `--partial` lets each of up to three attempts resume.
+- **Fallback.** A relay transfer the relay fails to carry (down,
+  rate-limit patience spent) goes over rsync when there is a route. The
+  path then comes from the far side's own nerve over ssh
+  (`nerve sync place <name> --src|--dst <path>...`), never a guess. A
+  `--wait` that hears nothing about its transfer for five minutes, or
+  runs with no agent, does the same from the CLI.
+- **Outcome.** The same `✓ <id>:` line and exit code as the relay path,
+  ending `via rsync, N file(s), X MiB in Ys`. A running rsync logs a
+  line a minute.
+
+#### Relay memory
+
+A sender deletes (NIP-09) the events of a transfer once the receiver
+confirms it, and `serve-relay` sweeps expired events every ten minutes
+and keeps at most 4000 (oldest dropped first), so the in-memory store
+stays well under the service's memory cap.
+
 ### Git refs: `refs`
 
 ```bash

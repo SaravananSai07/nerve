@@ -144,6 +144,17 @@ fn check_parents(base: &Path, rel: &str, create: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Receiver of a bulk transfer, before rsync writes anything: the
+/// same refusals as `apply_files`, and the parents rsync cannot make.
+pub(crate) fn ready_for(base: &Path, rel: &str) -> Result<(), String> {
+    check_parents(base, rel, true)?;
+    let p = join(base, rel);
+    match std::fs::symlink_metadata(&p) {
+        Ok(m) if m.file_type().is_symlink() => Err(format!("refusing to write through symlink {}", p.display())),
+        _ => Ok(()),
+    }
+}
+
 /// Receiver: write the files into the place. Every path is checked
 /// before anything is written, so one bad path refuses the whole set.
 pub(crate) fn apply_files(pack: &XferPack, base: &Path, store: &Store) -> Result<Applied, String> {

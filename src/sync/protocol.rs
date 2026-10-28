@@ -224,6 +224,24 @@ pub(crate) struct XferOffer {
     /// The recipient's `XferGet` this answers.
     #[serde(default)]
     pub(crate) for_req: Option<String>,
+    /// Too big for the relay (`[xfer] bulk_over`): the files go over
+    /// rsync and the relay only carries the coordination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bulk: Option<BulkOffer>,
+}
+
+/// What a bulk transfer holds, scanned on the sender.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct BulkOffer {
+    /// The roots that are directories: the scope of `delete`, and rsync
+    /// copies them with a trailing slash.
+    pub(crate) dirs: Vec<String>,
+    pub(crate) files: usize,
+    pub(crate) bytes: u64,
+    /// Set when the sender has no ssh route to the recipient: its own
+    /// path of the place, for the recipient to pull from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) src: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -254,6 +272,10 @@ pub(crate) struct RefMap {
 pub(crate) struct HandoffHave {
     pub(crate) re: String,
     pub(crate) tips: Vec<String>,
+    /// For a bulk transfer the sender runs: the recipient's own path of
+    /// the place, checked and with its parent directories made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dest: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

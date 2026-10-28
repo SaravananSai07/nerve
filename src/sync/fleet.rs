@@ -49,6 +49,34 @@ pub(crate) struct Fleet {
     pub(crate) auto_trust_handoffs: bool,
     /// Seconds a hook waits for a remote answer before falling back.
     pub(crate) hook_timeout_secs: u64,
+    /// Peer name → the ssh host this device reaches it at. Files at or
+    /// over `[xfer] bulk_over`, and any the relay fails to carry, go over
+    /// rsync on it; one side of a pair having a route is enough.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) ssh: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "XferConfig::is_default")]
+    pub(crate) xfer: XferConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct XferConfig {
+    /// Bytes from which files skip the relay. The relay holds every
+    /// chunk in memory until it is deleted or expires, so it suits many
+    /// small transfers, not one big one.
+    pub(crate) bulk_over: u64,
+}
+
+impl Default for XferConfig {
+    fn default() -> Self {
+        Self { bulk_over: 64 << 20 }
+    }
+}
+
+impl XferConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Default for Fleet {
@@ -66,6 +94,8 @@ impl Default for Fleet {
             remote_permissions: true,
             auto_trust_handoffs: true,
             hook_timeout_secs: 600,
+            ssh: BTreeMap::new(),
+            xfer: XferConfig::default(),
         }
     }
 }

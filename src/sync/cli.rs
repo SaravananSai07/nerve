@@ -45,6 +45,9 @@ nerve sync — share agent progress across your devices over Nostr
                                      the same, from the peer into this device's place
   refs <device> <place> [--pull] [--wait] <src-ref>:<dst-ref>...
                                      send git refs into exactly <dst-ref> (never checks out)
+                                     files at or over [xfer] bulk_over (64 MiB), or that the
+                                     relay fails to carry, go over rsync on [ssh] <peer> = host
+  place <name> --src|--dst <path>... (run over ssh by a peer's rsync) this place's path, checked
   away on|off                        route Claude's questions to peers
   hook                               (Claude hook entry point)
 ";
@@ -109,6 +112,13 @@ pub(crate) fn run(paths: &Paths, args: &[String]) -> std::io::Result<()> {
         ["put", device, place, rest @ ..] => xfer_files(&dir, device, place, rest, false),
         ["get", device, place, rest @ ..] => xfer_files(&dir, device, place, rest, true),
         ["refs", device, place, rest @ ..] => xfer_refs(&dir, device, place, rest),
+        ["place", name, role, roots @ ..] if !roots.is_empty() && (*role == "--src" || *role == "--dst") => {
+            load(&dir).and_then(|f| f.place(name, &Fleet::file(&dir))).and_then(|base| {
+                let roots: Vec<String> = roots.iter().map(|r| r.to_string()).collect();
+                let info = super::bulk::place_info(&base, *role == "--src", &roots)?;
+                serde_json::to_string(&info).map_err(|e| e.to_string())
+            })
+        }
         ["away", "on"] => oneshot(&dir, |_| vec![Request::SetAway(true)], 2),
         ["away", "off"] => oneshot(&dir, |_| vec![Request::SetAway(false)], 2),
         ["hook"] => hook(&dir),
@@ -310,10 +320,20 @@ fn serve_relay(rest: &[&str]) -> Result<String, String> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(async {
         use nostr_sdk::prelude::*;
-        // Events up to 256 KiB; NIP-40 expiry keeps the in-memory store small.
-        // The library's default of 60 events a minute caps a transfer at
-        // ~2 MB a minute (32 KiB chunks); this relay only serves the fleet.
+        // Events up to 256 KiB. The library's default of 60 events a
+        // minute caps a transfer at ~2 MB a minute (32 KiB chunks); this
+        // relay only serves the fleet.
+        let db = relay_store();
+        let sweeper = db.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(RELAY_SWEEP);
+            loop {
+                every.tick().await;
+                let _ = sweep_expired(&sweeper).await;
+            }
+        });
         let relay = LocalRelay::builder()
+            .database(db)
             .rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 6_000 })
             .addr("0.0.0.0".parse().map_err(|e: std::net::AddrParseError| e.to_string())?)
             .port(port)
@@ -325,6 +345,31 @@ fn serve_relay(rest: &[&str]) -> Result<String, String> {
         let _ = tokio::signal::ctrl_c().await;
         Ok::<_, String>(String::new())
     })
+}
+
+/// The in-memory store hides expired events from readers but never
+/// drops them, so without a sweep it grows until the service's memory
+/// cap kills the relay (and every transfer in flight). The bound is the
+/// backstop for a burst within one sweep; the oldest go first.
+const RELAY_SWEEP: Duration = Duration::from_secs(10 * 60);
+const RELAY_MAX_EVENTS: usize = 4000;
+
+fn relay_store() -> std::sync::Arc<dyn nostr_sdk::prelude::NostrDatabase> {
+    use nostr_sdk::prelude::IntoNostrDatabase;
+    let max = std::num::NonZeroUsize::new(RELAY_MAX_EVENTS).unwrap_or(std::num::NonZeroUsize::MIN);
+    nostr_memory::MemoryDatabase::bounded(max).into_nostr_database()
+}
+
+/// Drop every event whose NIP-40 expiry has passed; how many went.
+async fn sweep_expired(db: &std::sync::Arc<dyn nostr_sdk::prelude::NostrDatabase>) -> Result<usize, String> {
+    use nostr_sdk::prelude::*;
+    let now = Timestamp::now();
+    let all = db.query(Filter::new()).await.map_err(|e| e.to_string())?;
+    let gone: Vec<EventId> = all.into_iter().filter(|e| e.is_expired_at(now)).map(|e| e.id).collect();
+    if !gone.is_empty() {
+        db.delete(Filter::new().ids(gone.iter().copied())).await.map_err(|e| e.to_string())?;
+    }
+    Ok(gone.len())
 }
 
 fn run_agent(paths: &Paths, dir: &std::path::Path) -> Result<String, String> {
@@ -361,6 +406,8 @@ struct Ended {
     ok: bool,
     /// For runs: the remote exit code.
     code: Option<i32>,
+    /// It failed because the relay could not carry it, not on its merits.
+    relay: bool,
 }
 
 impl Until {
@@ -369,14 +416,14 @@ impl Until {
         match self {
             Self::Any => {
                 println!("{line}");
-                agent::outcome(line).map(|(_, ok, _)| Ended { ok, code: None })
+                agent::outcome(line).map(|(_, ok, _)| Ended { ok, code: None, relay: false })
             }
             Self::Id(id) => {
                 let o = agent::outcome(line).filter(|(i, _, _)| i == id);
                 if o.is_some() || line.contains(id.as_str()) {
                     eprintln!("{line}");
                 }
-                o.map(|(_, ok, _)| Ended { ok, code: None })
+                o.map(|(_, ok, msg)| Ended { ok, code: None, relay: !ok && msg.starts_with("relay failed") })
             }
             Self::RunEnd(id) => {
                 // Command output goes to stdout as plain lines, so a
@@ -390,14 +437,28 @@ impl Until {
                 eprintln!("{line}");
                 if let Some(code) = msg.strip_prefix("run finished: exit ") {
                     let code = code.split_whitespace().next().and_then(|c| c.parse().ok()).unwrap_or(NOT_RUN);
-                    return Some(Ended { ok, code: Some(code) });
+                    return Some(Ended { ok, code: Some(code), relay: false });
                 }
                 // Accepted: keep following. Refused: it never ran.
-                (!ok).then_some(Ended { ok, code: Some(NOT_RUN) })
+                (!ok).then_some(Ended { ok, code: Some(NOT_RUN), relay: false })
             }
         }
     }
+
+    /// A transfer that has said nothing about itself for `STALL` is
+    /// taken as stuck (a running rsync speaks every minute).
+    fn stalled(&self, line: &str, last: &mut Instant) -> bool {
+        if let Self::Id(id) = self {
+            if line.contains(id.as_str()) {
+                *last = Instant::now();
+            }
+            return last.elapsed() > STALL;
+        }
+        false
+    }
 }
+
+const STALL: Duration = Duration::from_secs(5 * 60);
 
 /// Run a short-lived agent, issue requests, stay up `secs` for acks.
 fn oneshot(dir: &std::path::Path, reqs: impl FnOnce(&Fleet) -> Vec<Request>, secs: u64) -> Result<String, String> {
@@ -422,8 +483,12 @@ fn drive(dir: &std::path::Path, reqs: impl FnOnce(&Fleet) -> Vec<Request>, until
         if detach {
             return Ok(None);
         }
+        let mut last = Instant::now();
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(200));
+            if until.stalled("", &mut last) {
+                return Ok(None);
+            }
             let Ok(bytes) = std::fs::read(&log) else { continue };
             if (bytes.len() as u64) < at {
                 at = 0; // rotated
@@ -433,6 +498,7 @@ fn drive(dir: &std::path::Path, reqs: impl FnOnce(&Fleet) -> Vec<Request>, until
             let Some(end) = new.iter().rposition(|b| *b == b'\n') else { continue };
             at += end as u64 + 1;
             for line in String::from_utf8_lossy(&new[..end]).lines() {
+                until.stalled(line, &mut last);
                 if let Some(e) = until.feed(line) {
                     return Ok(Some(e));
                 }
@@ -450,12 +516,17 @@ fn drive(dir: &std::path::Path, reqs: impl FnOnce(&Fleet) -> Vec<Request>, until
         handle.request(r);
     }
     let mut printed = 0;
+    let mut last = Instant::now();
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
+        if until.stalled("", &mut last) {
+            return Ok(None);
+        }
         let v = handle.snapshot();
         // The view keeps the last 200 lines; count from its end.
         let skip = printed.min(v.log.len());
         for line in v.log.iter().skip(skip) {
+            until.stalled(line, &mut last);
             if let Some(e) = until.feed(line) {
                 return Ok(Some(e));
             }
@@ -721,9 +792,53 @@ fn xfer_files(dir: &std::path::Path, device: &str, place: &str, rest: &[&str], p
     if roots.is_empty() {
         return Err(format!("{} needs at least one path relative to the place (`.` for all of it)", if pull { "get" } else { "put" }));
     }
+    let fleet = load(dir)?;
+    let host = fleet.ssh.get(device).cloned();
     let id = protocol::new_id();
-    let offer = XferOffer { place: place.to_string(), what: XferWhat::Files { roots, delete }, for_req: None };
-    follow_xfer(dir, id.clone(), Request::Xfer { id, device: device.to_string(), offer, pull }, wait)
+    // No agent here and a route: a big put needs nothing from the relay.
+    if let (Some(h), false, false) = (&host, pull, agent::agent_alive(dir)) {
+        let base = fleet.place(place, &Fleet::file(dir))?;
+        if super::bulk::scan(&base, &roots)?.bytes >= fleet.xfer.bulk_over {
+            return direct_rsync(&fleet, dir, h, device, place, &roots, delete, pull, &id);
+        }
+    }
+    let offer = XferOffer { place: place.to_string(), what: XferWhat::Files { roots: roots.clone(), delete }, for_req: None, bulk: None };
+    let req = Request::Xfer { id: id.clone(), device: device.to_string(), offer, pull };
+    let followed = wait || !agent::agent_alive(dir);
+    match drive(dir, move |_| vec![req], Until::Id(id.clone()), XFER_WAIT, !wait)? {
+        Some(Ended { ok: true, .. }) => Ok(String::new()),
+        // The relay failed it, or it went quiet: this side can finish it.
+        Some(Ended { relay: true, .. }) | None if followed && host.is_some() => {
+            eprintln!("transfer {id}: the relay did not carry it; copying over rsync instead");
+            direct_rsync(&fleet, dir, host.as_deref().unwrap_or_default(), device, place, &roots, delete, pull, &id)
+        }
+        Some(_) => Err(format!("transfer {id} failed")),
+        None if !wait => Ok(format!("queued as {id} with the running agent; its outcome goes to {}", agent::activity_file(dir).display())),
+        None => Err(format!("transfer {id}: no outcome (nothing heard for {} minutes)", STALL.as_secs() / 60)),
+    }
+}
+
+/// The CLI's own rsync over `host`, for when the agent or the relay
+/// can't coordinate: the far side's nerve, reached over the same ssh,
+/// gives its path of the place and checks the roots by its own rules.
+#[allow(clippy::too_many_arguments)]
+fn direct_rsync(fleet: &Fleet, dir: &std::path::Path, host: &str, device: &str, place: &str, roots: &[String], delete: bool, pull: bool, id: &str) -> Result<String, String> {
+    use super::bulk::{self, End};
+    let base = fleet.place(place, &Fleet::file(dir))?;
+    let me = fleet.device.clone();
+    let far = bulk::remote_place(host, place, pull, roots)?;
+    let remote = End::Remote { host: host.to_string(), path: far.path.into() };
+    let (src, dst, scan, into) = if pull {
+        let scan = far.scan.ok_or_else(|| format!("{device} did not say what {} holds", roots.join(" ")))?;
+        (remote, End::Local(base), scan, me.clone())
+    } else {
+        let scan = bulk::scan(&base, roots)?;
+        (End::Local(base), remote, scan, device.to_string())
+    };
+    let line = |l: String| eprintln!("{} {me} [{id}] {l}", agent::clock(protocol::now_secs()));
+    let msg = bulk::run(&src, &dst, roots, &scan, delete, &line)?;
+    eprintln!("{} {me} \u{2713} {id}: {into} place {place}: {msg}", agent::clock(protocol::now_secs()));
+    Ok(String::new())
 }
 
 /// `refs <device> <place> [--pull] [--wait] <src>:<dst>...`
@@ -747,13 +862,33 @@ fn xfer_refs(dir: &std::path::Path, device: &str, place: &str, rest: &[&str]) ->
         return Err("refs needs at least one <src-ref>:<dst-ref>".into());
     }
     let id = protocol::new_id();
-    let offer = XferOffer { place: place.to_string(), what: XferWhat::Refs { map, repo_id: String::new() }, for_req: None };
+    let offer = XferOffer { place: place.to_string(), what: XferWhat::Refs { map, repo_id: String::new() }, for_req: None, bulk: None };
     follow_xfer(dir, id.clone(), Request::Xfer { id, device: device.to_string(), offer, pull }, wait)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_relay_sweep_drops_expired_events_and_keeps_live_ones() {
+        use nostr_sdk::prelude::*;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let db = relay_store();
+            let k = Keys::generate();
+            let ev = |exp: Timestamp| EventBuilder::new(Kind::TextNote, "x").tag(Tag::expiration(exp)).finalize(&k).unwrap();
+            // The store refuses an event that is already expired, so this
+            // one expires after it is stored, as a relayed message does.
+            let (old, live) = (ev(Timestamp::now() + 1), ev(Timestamp::now() + 3600));
+            db.save_event(&old).await.unwrap();
+            db.save_event(&live).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+            assert_eq!(sweep_expired(&db).await, Ok(1));
+            let left = db.query(Filter::new()).await.unwrap();
+            assert_eq!(left.into_iter().map(|e| e.id).collect::<Vec<_>>(), vec![live.id]);
+        });
+    }
 
     #[test]
     fn run_end_is_read_from_outcome_lines_not_output() {

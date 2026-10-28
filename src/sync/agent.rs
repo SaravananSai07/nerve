@@ -24,10 +24,12 @@ use super::jobs;
 use super::mailbox::Mailbox;
 use super::modhub::{HubEvent, ModHub};
 use super::pairing;
+use super::bulk::{self, End};
 use super::places::{self, XferPack};
 use super::protocol::{
     self, Blob, Body, DeviceState, Envelope, FetchWhat, HandoffHave, HandoffManifest, HandoffOffer, JobSpec,
     JobStatus, Reassembly, RemoteSession, RunSpec, TransferStats, XferOffer, XferWhat,
+    BulkOffer,
 };
 use super::runs;
 use super::transport::{Inbound, RelayHealth, Seen, Transport};
@@ -225,6 +227,9 @@ struct Agent {
     incoming: HashMap<String, Incoming>,
     pack_tx: Sender<Packed>,
     pack_rx: Receiver<Packed>,
+    /// Bulk copies this device ran as the sender: (offer id, outcome).
+    bulk_tx: Sender<(String, Result<String, String>)>,
+    bulk_rx: Receiver<(String, Result<String, String>)>,
     hub: Option<Arc<ModHub>>,
     /// Prompts handed to a mod, waiting for its ack: command id → sender.
     mod_cmds: HashMap<String, PublicKey>,
@@ -254,6 +259,28 @@ struct Outgoing {
     /// Every chunk id the pack (and its index) uses.
     ids: Vec<String>,
     stats: TransferStats,
+    /// Relay events this transfer published, deleted once it is over.
+    events: Vec<nostr_sdk::prelude::EventId>,
+}
+
+impl Outgoing {
+    fn job_for_req(&self) -> Option<String> {
+        match &self.job {
+            OutJob::Xfer { offer, .. } => offer.for_req.clone(),
+            OutJob::Handoff { .. } => None,
+        }
+    }
+}
+
+/// A running rsync's progress line. It names the pull it serves too,
+/// since a follower of the pull watches for that id.
+fn beat(view: &Arc<Mutex<SyncView>>, re: &str, for_req: Option<&str>, line: String) {
+    if let Ok(mut v) = view.lock() {
+        v.note(match for_req {
+            Some(g) => format!("[{re} for {g}] {line}"),
+            None => format!("[{re}] {line}"),
+        });
+    }
 }
 
 enum InJob {
@@ -361,6 +388,7 @@ async fn run(ctx: Ctx, view: Arc<Mutex<SyncView>>, rx: Receiver<Request>) {
     let (job_tx, job_rx) = channel();
     let (handoff_tx, handoff_rx) = channel();
     let (pack_tx, pack_rx) = channel();
+    let (bulk_tx, bulk_rx) = channel();
     // Sessions running the nerve mod connect here (long-lived agents only:
     // a one-shot CLI must not take the socket from the real agent).
     let hub = if ctx.long_lived {
@@ -405,6 +433,8 @@ async fn run(ctx: Ctx, view: Arc<Mutex<SyncView>>, rx: Receiver<Request>) {
         incoming: HashMap::new(),
         pack_tx,
         pack_rx,
+        bulk_tx,
+        bulk_rx,
         hub,
         mod_cmds: HashMap::new(),
         open_sub: None,
@@ -451,6 +481,7 @@ async fn run(ctx: Ctx, view: Arc<Mutex<SyncView>>, rx: Receiver<Request>) {
                 a.drain_jobs().await;
                 a.drain_handoffs().await;
                 a.drain_packs().await;
+                a.drain_bulk().await;
                 a.drain_hub().await;
                 if a.ctx.long_lived && last_prune.elapsed() >= Duration::from_secs(3600) {
                     last_prune = Instant::now();
@@ -766,13 +797,17 @@ impl Agent {
                         let _ = self.store.mark_known(&o.to.to_hex(), o.ids);
                     }
                     self.refresh_transfers();
+                    // Delivered (or given up on): nothing will ask for these
+                    // again, so the relay need not hold them for a day.
+                    self.forget_events(o.events).await;
                 }
                 self.note(format!("{from} {} {re}: {msg}", if ok { "✓" } else { "✗" }));
-                // The sender gave up on a pull we asked for: report it
-                // under the pull's id, which is what the CLI follows.
+                // The sender ended a pull we asked for (a bulk copy it ran,
+                // or giving up): report it under the pull's id, which is
+                // what the CLI follows.
                 if let Some(get) = self.incoming.remove(&re).and_then(|i| i.job.for_req()) {
                     self.pending_gets.remove(&get);
-                    self.note(format!("{from} ✗ {get}: {msg}"));
+                    self.note(format!("{from} {} {get}: {msg}", if ok { "✓" } else { "✗" }));
                     self.refresh_transfers();
                 }
                 self.pending_gets.remove(&re);
@@ -905,7 +940,7 @@ impl Agent {
         let label = format!("handoff '{session_id:.8}'");
         self.outgoing.insert(
             offer_id,
-            Outgoing { to: pk, device, label, job: OutJob::Handoff { session_id, cwd }, started: Instant::now(), ids: Vec::new(), stats: TransferStats::default() },
+            Outgoing { to: pk, device, label, job: OutJob::Handoff { session_id, cwd }, started: Instant::now(), ids: Vec::new(), stats: TransferStats::default(), events: Vec::new() },
         );
     }
 
@@ -924,12 +959,31 @@ impl Agent {
             if tips.is_empty() { "new checkout".to_string() } else { format!("have {} commit tip(s)", tips.len()) }
         ));
         self.incoming.insert(offer_id.clone(), Incoming::new(*from, InJob::Handoff(offer), dest));
-        self.reply(from, Body::HandoffHave(HandoffHave { re: offer_id, tips })).await;
+        self.reply(from, Body::HandoffHave(HandoffHave { re: offer_id, tips, dest: None })).await;
     }
 
     /// Source, step 3: pack against what the target has, off the loop.
     fn on_have(&mut self, from: &PublicKey, have: HandoffHave) {
         let Some(o) = self.outgoing.get(&have.re).filter(|o| o.to == *from) else { return };
+        if let OutJob::Xfer { offer: XferOffer { bulk: Some(scan), what: XferWhat::Files { roots, delete }, place, .. }, base } = &o.job {
+            // The recipient checked the place and gave its path; we copy.
+            let res = match (&have.dest, self.ctx.fleet.ssh.get(&o.device)) {
+                (Some(dest), Some(host)) => Ok((dest.clone(), host.clone())),
+                (None, _) => Err(format!("{} gave no path for a bulk copy", o.device)),
+                (_, None) => Err(format!("no [ssh] route to {}", o.device)),
+            };
+            let (tx, view, re) = (self.bulk_tx.clone(), self.view.clone(), have.re.clone());
+            let (scan, roots, delete, place, base) = (scan.clone(), roots.clone(), *delete, place.clone(), base.clone());
+            let for_req = o.job_for_req();
+            std::thread::spawn(move || {
+                let res = res.and_then(|(dest, host)| {
+                    let dst = End::Remote { host, path: dest.into() };
+                    bulk::run(&End::Local(base), &dst, &roots, &scan, delete, &|l| beat(&view, &re, for_req.as_deref(), l))
+                });
+                let _ = tx.send((re, res.map(|m| format!("{place}: {m}"))));
+            });
+            return;
+        }
         let (job, store, tx, re) = (o.job.clone(), self.store.clone(), self.pack_tx.clone(), have.re.clone());
         std::thread::spawn(move || {
             let index = |json: Vec<u8>| store.add_file("index", &json).map_err(|e| e.to_string());
@@ -976,8 +1030,22 @@ impl Agent {
             let to = o.to;
             let known = self.store.known(&to.to_hex());
             let push = chunks::needed(&all, &known);
-            self.reply(&to, Body::HandoffManifest(HandoffManifest { re: re.clone(), index })).await;
-            self.send_chunks(&re, push, true).await;
+            let env = Envelope::new(&self.ctx.fleet.device, Body::HandoffManifest(HandoffManifest { re: re.clone(), index }));
+            match self.t.send_id(&to, &env).await {
+                Ok((_, ev)) => {
+                    if let Some(o) = self.outgoing.get_mut(&re) {
+                        o.events.push(ev);
+                    }
+                    self.send_chunks(&re, push, true).await;
+                }
+                Err(e) => self.relay_failed(&re, e).await,
+            }
+        }
+    }
+
+    fn track(&mut self, re: &str, ev: nostr_sdk::prelude::EventId) {
+        if let Some(o) = self.outgoing.get_mut(re) {
+            o.events.push(ev);
         }
     }
 
@@ -996,8 +1064,9 @@ impl Agent {
             };
             if size + bytes.len() > protocol::CHUNK_BYTES && !batch.is_empty() {
                 let env = Envelope::new(&self.ctx.fleet.device, Body::ChunkData { re: re.to_string(), chunks: std::mem::take(&mut batch), last: false });
-                if let Err(e) = self.t.send_bulk(&to, &env).await {
-                    return self.note(format!("handoff chunks failed: {e}"));
+                match self.t.send_bulk(&to, &env).await {
+                    Ok((_, ev)) => self.track(re, ev),
+                    Err(e) => return self.relay_failed(re, format!("handoff chunks failed: {e}")).await,
                 }
                 size = 0;
             }
@@ -1011,8 +1080,9 @@ impl Agent {
         }
         if !batch.is_empty() || last {
             let env = Envelope::new(&self.ctx.fleet.device, Body::ChunkData { re: re.to_string(), chunks: batch, last });
-            if let Err(e) = self.t.send_bulk(&to, &env).await {
-                return self.note(format!("handoff chunks failed: {e}"));
+            match self.t.send_bulk(&to, &env).await {
+                Ok((_, ev)) => self.track(re, ev),
+                Err(e) => return self.relay_failed(re, format!("handoff chunks failed: {e}")).await,
             }
         }
         let line = self.outgoing.get_mut(re).map(|o| {
@@ -1371,7 +1441,23 @@ impl Agent {
                         return Err(format!("{r} does not exist in place {} ({})", offer.place, base.display()));
                     }
                 }
-                format!("files {} in {}{}", roots.join(" "), offer.place, if *delete { " (--delete)" } else { "" })
+                let (b, r) = (base.clone(), roots.clone());
+                let scan = tokio::task::spawn_blocking(move || bulk::scan(&b, &r)).await.map_err(|e| e.to_string())??;
+                let over = scan.bytes >= self.ctx.fleet.xfer.bulk_over;
+                if over {
+                    let src = match bulk::route(scan.bytes, self.ctx.fleet.xfer.bulk_over, self.ctx.fleet.ssh.contains_key(device)) {
+                        bulk::Route::RsyncThere => Some(base.display().to_string()),
+                        _ => None,
+                    };
+                    offer.bulk = Some(BulkOffer { src, ..scan.clone() });
+                }
+                format!(
+                    "files {} in {}{}{}",
+                    roots.join(" "),
+                    offer.place,
+                    if *delete { " (--delete)" } else { "" },
+                    if over { format!(" ({} over rsync)", bulk::human(scan.bytes)) } else { String::new() }
+                )
             }
             XferWhat::Refs { map, repo_id } => {
                 let b = base.clone();
@@ -1386,14 +1472,96 @@ impl Agent {
         // The id in the label puts it on every progress line the CLI follows.
         let label = format!("{label} [{id}]");
         let env = Envelope::with_id(&self.ctx.fleet.device, id, Body::XferOffer(offer.clone()));
-        self.t.send(&pk, &env).await?;
-        self.note(format!("offered {label} to {device}"));
         self.outgoing.insert(
             id.to_string(),
-            Outgoing { to: pk, device: device.to_string(), label, job: OutJob::Xfer { offer, base }, started: Instant::now(), ids: Vec::new(), stats: TransferStats::default() },
+            Outgoing {
+                to: pk,
+                device: device.to_string(),
+                label: label.clone(),
+                job: OutJob::Xfer { offer, base },
+                started: Instant::now(),
+                ids: Vec::new(),
+                stats: TransferStats::default(),
+                events: Vec::new(),
+            },
         );
+        match self.t.send_id(&pk, &env).await {
+            Ok((_, ev)) => {
+                self.note(format!("offered {label} to {device}"));
+                if let Some(o) = self.outgoing.get_mut(id) {
+                    o.events.push(ev);
+                }
+            }
+            Err(e) => self.relay_failed(id, e).await,
+        }
         self.refresh_transfers();
         Ok(())
+    }
+
+    /// The relay could not carry a transfer of files: copy them over
+    /// rsync when this device has a route, asking the far side's nerve
+    /// over ssh for its path, since the relay can't. Without a route the
+    /// transfer fails, marked so a follower with one can retry it.
+    async fn relay_failed(&mut self, re: &str, e: String) {
+        let me = self.ctx.fleet.device.clone();
+        let Some(o) = self.outgoing.get(re) else { return self.note(format!("relay failed: {e}")) };
+        let host = self.ctx.fleet.ssh.get(&o.device).cloned();
+        let (OutJob::Xfer { offer, base }, Some(host)) = (o.job.clone(), host) else {
+            let (to, for_req) = (o.to, match &o.job {
+                OutJob::Xfer { offer, .. } => offer.for_req.clone(),
+                OutJob::Handoff { .. } => None,
+            });
+            self.outgoing.remove(re);
+            self.refresh_transfers();
+            self.note(format!("{me} \u{2717} {re}: relay failed: {e}"));
+            // Best effort: the relay may still carry a short message.
+            if for_req.is_some() {
+                let env = Envelope::new(&me, Body::Ack { re: re.to_string(), ok: false, msg: format!("relay failed: {e}") });
+                let _ = self.t.send(&to, &env).await;
+            }
+            return;
+        };
+        let XferWhat::Files { roots, delete } = offer.what.clone() else {
+            self.outgoing.remove(re);
+            return self.note(format!("{me} \u{2717} {re}: relay failed: {e}"));
+        };
+        self.note(format!("{me}: relay failed for {re} ({e}); copying over rsync to {host}"));
+        let (tx, view, re, place) = (self.bulk_tx.clone(), self.view.clone(), re.to_string(), offer.place.clone());
+        std::thread::spawn(move || {
+            let res = (|| {
+                let scan = bulk::scan(&base, &roots)?;
+                let far = bulk::remote_place(&host, &place, false, &roots)?;
+                let dst = End::Remote { host: host.clone(), path: far.path.into() };
+                bulk::run(&End::Local(base), &dst, &roots, &scan, delete, &|l| beat(&view, &re, None, l))
+            })();
+            let _ = tx.send((re, res.map(|m| format!("{place}: {m}"))));
+        });
+    }
+
+    /// Sender of a bulk copy it ran: report it here, tell the recipient
+    /// (whose pull, if it asked, ends on that), and free the relay.
+    async fn drain_bulk(&mut self) {
+        while let Ok((re, res)) = self.bulk_rx.try_recv() {
+            let Some(o) = self.outgoing.remove(&re) else { continue };
+            let me = self.ctx.fleet.device.clone();
+            let (ok, msg) = match res {
+                Ok(m) => (true, format!("{} place {m}", o.device)),
+                Err(e) => (false, e),
+            };
+            self.note(format!("{me} {} {re}: {msg}", if ok { "\u{2713}" } else { "\u{2717}" }));
+            self.reply(&o.to, Body::Ack { re: re.clone(), ok, msg }).await;
+            self.forget_events(o.events).await;
+            self.refresh_transfers();
+        }
+    }
+
+    async fn forget_events(&self, ids: Vec<nostr_sdk::prelude::EventId>) {
+        if ids.is_empty() {
+            return;
+        }
+        if let Err(e) = self.t.delete(&ids).await {
+            self.note(format!("could not free {} relay event(s): {e}", ids.len()));
+        }
     }
 
     /// Target: check the place and what it may receive, then report what
@@ -1402,12 +1570,24 @@ impl Agent {
         let fleet = self.ctx.fleet.clone();
         let file = Fleet::file(&self.ctx.sync_dir);
         let o = offer.clone();
+        let sender = name.to_string();
         let checked = tokio::task::spawn_blocking(move || -> Result<(PathBuf, Vec<String>), String> {
             let dest = fleet.place(&o.place, &file)?;
             match &o.what {
                 XferWhat::Files { roots, .. } => {
                     for r in roots {
-                        places::norm_root(r)?;
+                        let rel = places::norm_root(r)?;
+                        // rsync writes as it goes: check every path first.
+                        if o.bulk.is_some() {
+                            places::ready_for(&dest, &rel)?;
+                        }
+                    }
+                    if o.bulk.as_ref().is_some_and(|b| b.src.is_some()) && !fleet.ssh.contains_key(&sender) {
+                        return Err(format!(
+                            "{sender} has no ssh route to {me} for files this big, and {me} has none to {sender}: add `{sender} = \"<ssh host>\"` under [ssh] in {} (or `{me} = …` in {sender}'s fleet.toml)",
+                            file.display(),
+                            me = fleet.device
+                        ));
                     }
                     Ok((dest, Vec::new()))
                 }
@@ -1437,9 +1617,31 @@ impl Agent {
             }
         };
         self.note(format!("{name} is sending into place {} → {}", offer.place, dest.display()));
-        self.incoming.insert(offer_id.clone(), Incoming::new(*from, InJob::Xfer(offer), dest));
+        let bulk = offer.bulk.clone();
+        let (place, what, for_req) = (offer.place.clone(), offer.what.clone(), offer.for_req.clone());
+        self.incoming.insert(offer_id.clone(), Incoming::new(*from, InJob::Xfer(offer), dest.clone()));
         self.refresh_transfers();
-        self.reply(from, Body::HandoffHave(HandoffHave { re: offer_id, tips })).await;
+        match (bulk, what) {
+            // The sender can't reach us: we pull from the path it gave.
+            (Some(scan @ BulkOffer { src: Some(_), .. }), XferWhat::Files { roots, delete }) => {
+                let host = self.ctx.fleet.ssh.get(name).cloned().unwrap_or_default();
+                let src = End::Remote { host, path: scan.src.clone().unwrap_or_default().into() };
+                let (tx, view, me, re, to) = (self.handoff_tx.clone(), self.view.clone(), self.ctx.fleet.device.clone(), offer_id, from.to_hex());
+                std::thread::spawn(move || {
+                    let res = bulk::run(&src, &End::Local(dest), &roots, &scan, delete, &|l| beat(&view, &re, for_req.as_deref(), l));
+                    let (ok, msg) = match res {
+                        Ok(m) => (true, format!("{me} place {place}: {m}")),
+                        Err(e) => (false, format!("{me} place {place}: {e}")),
+                    };
+                    let _ = tx.send(serde_json::json!({"to": to, "re": re, "ok": ok, "msg": msg, "for_req": for_req}).to_string());
+                });
+            }
+            (Some(_), _) => {
+                let dest = Some(dest.display().to_string());
+                self.reply(from, Body::HandoffHave(HandoffHave { re: offer_id, tips, dest })).await;
+            }
+            (None, _) => self.reply(from, Body::HandoffHave(HandoffHave { re: offer_id, tips, dest: None })).await,
+        }
     }
 
     /// Source of a pull: send it back as an ordinary offer.
@@ -1624,7 +1826,7 @@ impl Agent {
                         Ok(_) => self.note(format!("asked {device} to send {id}")),
                         Err(e) => {
                             self.pending_gets.remove(&id);
-                            self.note(format!("{me} \u{2717} {id}: send to {device} failed: {e}"));
+                            self.note(format!("{me} \u{2717} {id}: relay failed: send to {device} failed: {e}"));
                         }
                     }
                 } else if let Err(e) = self.start_xfer(pk, &device, &id, offer).await {

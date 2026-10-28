@@ -90,7 +90,7 @@ mod tests {
             Request::Xfer {
                 id: "x1".into(),
                 device: "pi".into(),
-                offer: XferOffer { place: "h".into(), what: crate::sync::protocol::XferWhat::Files { roots: vec!["a".into()], delete: true }, for_req: None },
+                offer: XferOffer { place: "h".into(), what: crate::sync::protocol::XferWhat::Files { roots: vec!["a".into()], delete: true }, for_req: None, bulk: None },
                 pull: true,
             },
             Request::Run { spec: RunSpec { id: "r1".into(), argv: vec!["ls".into()], ..Default::default() }, device: "pi".into() },

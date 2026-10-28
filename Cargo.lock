@@ -1106,6 +1106,7 @@ dependencies = [
  "dirs",
  "nix",
  "nostr",
+ "nostr-memory",
  "nostr-sdk",
  "notify",
  "qrcode",
