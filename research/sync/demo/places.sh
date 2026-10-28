@@ -68,14 +68,14 @@ alpha_pid=$!
 bg beta sync agent
 sleep 3
 
-step "alpha → beta: put units bin (first send)"
-alpha sync put beta harness units bin --wait 2>&1 | grep -E "✓|✗" | tail -1
+step "alpha → beta: put notes bin (first send)"
+alpha sync put beta harness notes bin --wait 2>&1 | grep -E "✓|✗" | tail -1
 cmp -s "$A/notes/part1/u7.md" "$B/notes/part1/u7.md" || fail "u7 differs"
 [ -x "$B/bin/check.sh" ] || fail "mode not kept"
 
 step "alpha → beta: put again after changing one file"
 echo "one more line" >>"$A/notes/part1/u3.md"
-alpha sync put beta harness units bin --wait 2>&1 | grep -E "✓|✗" | tail -1
+alpha sync put beta harness notes bin --wait 2>&1 | grep -E "✓|✗" | tail -1
 cmp -s "$A/notes/part1/u3.md" "$B/notes/part1/u3.md" || fail "u3 differs"
 
 step "alpha runs beta's allowlisted script; --wait exits with its code"
@@ -87,14 +87,14 @@ echo "exit code: $code"
 [ "$code" = 3 ] || fail "expected 3"
 
 step "a command beta's allowlist doesn't name is refused"
-if out=$(alpha sync run beta --place harness -- rm -rf units 2>&1); then fail "rm was allowed"; fi
+if out=$(alpha sync run beta --place harness -- rm -rf notes 2>&1); then fail "rm was allowed"; fi
 echo "$out" | grep -o "not allowed on beta.*" | head -1
-[ -d "$B/units" ] || fail "units deleted"
+[ -d "$B/notes" ] || fail "notes deleted"
 
 step "beta pulls from alpha with --delete (beta initiates)"
 rm "$A/notes/part1/u60.md"
 echo "stray" >"$B/notes/part1/stray.md"
-beta sync get alpha harness units --delete --wait 2>&1 | grep -E "✓|✗" | tail -1
+beta sync get alpha harness notes --delete --wait 2>&1 | grep -E "✓|✗" | tail -1
 [ ! -e "$B/notes/part1/u60.md" ] && [ ! -e "$B/notes/part1/stray.md" ] || fail "--delete left files"
 
 step "alpha sends a branch into beta's refs/remotes/alpha/feature"
@@ -115,7 +115,7 @@ alpha sync status | grep -E "run " | head -2
 step "without an agent on alpha: the CLI runs its own for the exchange"
 kill "$alpha_pid"; sleep 1
 echo "two" >>"$A/notes/part1/u2.md"
-alpha sync put beta harness units --wait 2>&1 | grep -E "✓|✗" | tail -1
+alpha sync put beta harness notes --wait 2>&1 | grep -E "✓|✗" | tail -1
 cmp -s "$A/notes/part1/u2.md" "$B/notes/part1/u2.md" || fail "u2 differs"
 echo "from beta" >"$B/notes/part1/beta-note.md"
 alpha sync get beta harness notes/part1/beta-note.md --wait 2>&1 | grep -E "✓|✗" | tail -1
