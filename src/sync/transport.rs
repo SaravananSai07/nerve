@@ -10,6 +10,14 @@ use nostr_sdk::prelude::*;
 
 use super::protocol::{self, Envelope, KIND_MSG, KIND_STATE};
 
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_millis(1500);
+const RATE_LIMIT_PATIENCE: Duration = Duration::from_secs(120);
+
+/// NIP-01 OK prefix `rate-limited:`.
+fn is_rate_limited(why: &str) -> bool {
+    why.contains("rate-limited")
+}
+
 pub(crate) struct Transport {
     pub(crate) client: Client,
     pub(crate) keys: Keys,
@@ -71,16 +79,25 @@ impl Transport {
 
     async fn publish_to(&self, builder: EventBuilder, only: Option<Vec<String>>) -> Result<usize, String> {
         let event = builder.finalize(&self.keys).map_err(|e| e.to_string())?;
-        let out = match only {
-            Some(urls) => self.client.send_event(&event).to(urls.iter().map(String::as_str)).await,
-            None => self.client.send_event(&event).await,
-        }
-        .map_err(|e| e.to_string())?;
-        if out.success.is_empty() {
+        // A relay that rate-limits refills its tokens within seconds, so a
+        // long chunk train waits it out instead of dropping the transfer.
+        let mut waited = Duration::ZERO;
+        loop {
+            let out = match &only {
+                Some(urls) => self.client.send_event(&event).to(urls.iter().map(String::as_str)).await,
+                None => self.client.send_event(&event).await,
+            }
+            .map_err(|e| e.to_string())?;
+            if !out.success.is_empty() {
+                return Ok(out.success.len());
+            }
             let why = out.failed.values().next().map(|w| w.to_string()).unwrap_or_default();
-            return Err(format!("no relay accepted the event: {why}"));
+            if !is_rate_limited(&why) || waited >= RATE_LIMIT_PATIENCE {
+                return Err(format!("no relay accepted the event: {why}"));
+            }
+            tokio::time::sleep(RATE_LIMIT_BACKOFF).await;
+            waited += RATE_LIMIT_BACKOFF;
         }
-        Ok(out.success.len())
     }
 
     /// Replace this device's state as seen by `to`.
@@ -294,6 +311,25 @@ mod tests {
             let env = Envelope::new("a", protocol::Body::SyncNow);
             for _ in 0..3 {
                 assert_eq!(t.put_state(&to, &env).await, Ok(1));
+            }
+            relay.shutdown();
+        });
+    }
+
+    // Found pulling a 3.5 MB folder through the fleet relay: the train
+    // outran the relay's per-minute limit and the transfer was dropped.
+    #[test]
+    fn a_train_longer_than_the_relay_limit_waits_instead_of_failing() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let relay = LocalRelay::builder().rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 120 }).build();
+            relay.run().await.unwrap();
+            let url = relay.url().await.to_string();
+            let t = Transport::connect(Keys::generate(), &[url]).await.unwrap();
+            let to = Keys::generate().public_key();
+            let env = Envelope::new("a", protocol::Body::SyncNow);
+            for i in 0..125 {
+                assert_eq!(t.send_bulk(&to, &env).await, Ok(1), "message {i}");
             }
             relay.shutdown();
         });

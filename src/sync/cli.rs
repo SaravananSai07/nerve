@@ -311,7 +311,10 @@ fn serve_relay(rest: &[&str]) -> Result<String, String> {
     rt.block_on(async {
         use nostr_sdk::prelude::*;
         // Events up to 256 KiB; NIP-40 expiry keeps the in-memory store small.
+        // The library's default of 60 events a minute caps a transfer at
+        // ~2 MB a minute (32 KiB chunks); this relay only serves the fleet.
         let relay = LocalRelay::builder()
+            .rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 6_000 })
             .addr("0.0.0.0".parse().map_err(|e: std::net::AddrParseError| e.to_string())?)
             .port(port)
             .max_event_size(256 * 1024)
