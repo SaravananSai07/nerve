@@ -4,6 +4,8 @@ pub(crate) mod cards;
 pub(crate) mod confirm_kill;
 pub(crate) mod confirm_preview;
 pub(crate) mod details;
+#[cfg(feature = "sync")]
+pub(crate) mod devices;
 pub(crate) mod help;
 pub(crate) mod preview;
 pub(crate) mod rename;

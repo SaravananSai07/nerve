@@ -9,6 +9,8 @@ mod notify;
 mod paths;
 mod platform;
 mod signals;
+#[cfg(feature = "sync")]
+mod sync;
 mod state;
 mod terminal_guard;
 mod tui;
@@ -148,6 +150,15 @@ fn main() -> std::io::Result<()> {
             None => &[][..],
         };
         return detect::statusline::run(&paths.statusline_dir(), wrapped);
+    }
+
+    #[cfg(feature = "sync")]
+    if argv.first().map(String::as_str) == Some("sync") {
+        return sync::cli::run(&paths, &argv[1..]);
+    }
+    #[cfg(feature = "sync")]
+    if argv.first().map(String::as_str) == Some("setup") {
+        return sync::cli::run(&paths, &argv);
     }
 
     if let Some(arg) = parse_focus_arg() {

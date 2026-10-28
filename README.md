@@ -227,6 +227,26 @@ nerve --dump   # JSON dump of all sessions
 nerve statusline [-- <cmd>]   # Claude statusLine hook (see above)
 ```
 
+## Cross-device sync (experimental)
+
+Built with `--features sync`, nerve can follow and drive sessions on your
+other devices (a laptop, a Raspberry Pi) over Nostr relays, with or
+without Tailscale: see progress and when each device last synced, type
+instructions into a remote session, answer its permission prompts and
+questions, read its diff, hand a session to another device to carry on,
+and send jobs to whichever device has the tools they need. `D` opens the
+Devices view and `H` hands off the selected session.
+
+```bash
+./install.sh --sync          # first device: prints a one-time code
+./install.sh nerve1…         # each other device: joins with it
+```
+
+On Claude Code 2.1.287 and later this installs a small Claude Code mod,
+so remote prompts and answers go through Claude itself. Setup and design
+are in [docs/SYNC.md](docs/SYNC.md); a guided overview with what was
+tested is in [research/sync/GUIDE.html](research/sync/GUIDE.html).
+
 ## Supported terminals
 
 - **Ghostty** — tab switching, screen capture

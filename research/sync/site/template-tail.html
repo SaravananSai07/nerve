@@ -1,0 +1,194 @@
+<script>
+(() => {
+  const docs = [...document.querySelectorAll('script.doc')].map(el => ({
+    group: el.dataset.group, title: el.dataset.title, path: el.dataset.path, text: el.textContent,
+  }));
+  const byPath = new Map(docs.map(d => [d.path, d]));
+  const nav = document.getElementById('nav');
+  const main = document.getElementById('main');
+  const built = document.getElementById('built');
+  document.getElementById('builtline').textContent = built ? built.textContent : '';
+
+  const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const slug = s => s.toLowerCase().replace(/<[^>]+>/g, '').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-');
+
+  function resolve(base, rel) {
+    const parts = base.split('/').slice(0, -1);
+    for (const p of rel.split('/')) {
+      if (p === '..') parts.pop(); else if (p && p !== '.') parts.push(p);
+    }
+    return parts.join('/');
+  }
+
+  let current = '';
+  function link(text, url) {
+    const [file, frag] = url.split('#');
+    if (file && !/^[a-z]+:/i.test(file)) {
+      for (const cand of [resolve(current, file), file, 'research/sync/' + file]) {
+        if (byPath.has(cand)) return `<a href="#${esc(cand)}${frag ? '::' + frag : ''}">${text}</a>`;
+      }
+    }
+    if (!file && frag) return `<a href="#${esc(current)}::${frag}">${text}</a>`;
+    return `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
+  }
+
+  function inline(s) {
+    const codes = [];
+    s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return '\u0000' + (codes.length - 1) + '\u0000'; });
+    s = esc(s);
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => link(t, u));
+    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:])/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?!\w)/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[^\w])_([^_\s][^_]*?)_(?!\w)/g, '$1<em>$2</em>');
+    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => '<code>' + esc(codes[+i]) + '</code>');
+  }
+
+  const isList = l => /^\s*([-*+]|\d+\.)\s+/.test(l);
+  const isTableSep = l => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
+  const startsBlock = l => /^(#{1,6}\s|```|>|\|)/.test(l) || /^(-{3,}|\*{3,})\s*$/.test(l);
+  const cells = l => l.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map(c => inline(c.trim().replace(/\\\|/g, '|')));
+
+  function renderList(lines) {
+    const base = lines[0].match(/^\s*/)[0].length;
+    const ordered = /^\s*\d+\./.test(lines[0]);
+    const items = [];
+    let cur = null;
+    for (const l of lines) {
+      const m = l.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+      if (m && m[1].length <= base) { cur = [m[3]]; items.push(cur); }
+      else if (cur) { const ind = l.match(/^\s*/)[0].length; cur.push(l.slice(Math.min(ind, base + 4))); }
+    }
+    const tag = ordered ? 'ol' : 'ul';
+    return `<${tag}>` + items.map(it => {
+      let h = blocks(it);
+      const m = h.match(/^<p>([\s\S]*?)<\/p>([\s\S]*)$/);
+      if (m && !m[2].includes('<p>')) h = m[1] + m[2];
+      return '<li>' + h + '</li>';
+    }).join('') + `</${tag}>`;
+  }
+
+  function blocks(lines) {
+    let out = '';
+    let i = 0;
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) { i++; continue; }
+      let m;
+      if ((m = l.match(/^\s*```(.*)$/))) {
+        const buf = [];
+        i++;
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
+        i++;
+        out += '<pre><code>' + esc(buf.join('\n')) + '</code></pre>';
+      } else if ((m = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/))) {
+        const h = inline(m[2]);
+        out += `<h${m[1].length} id="${slug(h)}">${h}</h${m[1].length}>`;
+        i++;
+      } else if (/^\s*(-{3,}|\*{3,})\s*$/.test(l)) {
+        out += '<hr>'; i++;
+      } else if (l.trim().startsWith('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+        const head = cells(l);
+        i += 2;
+        let body = '';
+        while (i < lines.length && lines[i].trim().startsWith('|')) {
+          body += '<tr>' + cells(lines[i]).map(c => `<td>${c}</td>`).join('') + '</tr>';
+          i++;
+        }
+        out += '<table><thead><tr>' + head.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>' + body + '</tbody></table>';
+      } else if (/^\s*>/.test(l)) {
+        const buf = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+        out += '<blockquote>' + blocks(buf) + '</blockquote>';
+      } else if (isList(l)) {
+        const buf = [l];
+        i++;
+        while (i < lines.length) {
+          const n = lines[i];
+          if (isList(n) || (/^\s+\S/.test(n))) { buf.push(n); i++; continue; }
+          if (!n.trim()) {
+            const next = lines[i + 1] || '';
+            if (isList(next) || /^\s+\S/.test(next)) { buf.push(n); i++; continue; }
+            break;
+          }
+          if (buf[buf.length - 1].trim() && !startsBlock(n)) { buf.push('  ' + n); i++; continue; }
+          break;
+        }
+        out += renderList(buf);
+      } else {
+        const buf = [];
+        while (i < lines.length && lines[i].trim() && !startsBlock(lines[i]) && !(buf.length && isList(lines[i]))) buf.push(lines[i++].trim());
+        out += '<p>' + inline(buf.join(' ')) + '</p>';
+      }
+    }
+    return out;
+  }
+
+  function show(path, frag) {
+    const d = byPath.get(path) || docs[0];
+    current = d.path;
+    nav.querySelectorAll('a').forEach(a => a.classList.toggle('on', a.dataset.path === d.path));
+    const header = `<div class="path">${esc(d.path)}</div>`;
+    if (d.path.endsWith('.html')) {
+      main.innerHTML = header;
+      const f = document.createElement('iframe');
+      f.title = d.title;
+      // <base>: relative links inside an embedded page resolve against
+      // the page's own folder rather than about:srcdoc.
+      const dir = d.path.split('/').slice(0, -1).join('/');
+      const depth = 'research/sync/site'.split('/').length;
+      const base = '../'.repeat(depth) + (dir ? dir + '/' : '');
+      f.srcdoc = d.text.replace(/<head>/i, `<head><base href="${base}">`);
+      // In-page links (#section) need the document's own URL, not <base>.
+      f.addEventListener('load', () => {
+        const doc = f.contentDocument;
+        if (!doc) return;
+        doc.querySelectorAll('a[href^="#"]').forEach(a => a.addEventListener('click', ev => {
+          const t = doc.getElementById(a.getAttribute('href').slice(1));
+          if (t) { ev.preventDefault(); t.scrollIntoView(); }
+        }));
+      });
+      main.appendChild(f);
+    } else if (d.path.endsWith('.md')) {
+      main.innerHTML = header + blocks(d.text.replace(/\r/g, '').split('\n'));
+    } else {
+      main.innerHTML = header + `<h1>${esc(d.title)}</h1><pre><code>${esc(d.text)}</code></pre>`;
+    }
+    const target = frag && document.getElementById(frag);
+    if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
+  }
+
+  let group = '';
+  for (const d of docs) {
+    if (d.group !== group) {
+      group = d.group;
+      const h = document.createElement('h2');
+      h.textContent = group;
+      nav.appendChild(h);
+    }
+    const a = document.createElement('a');
+    a.href = '#' + d.path;
+    a.textContent = d.title;
+    a.title = d.path;
+    a.dataset.path = d.path;
+    nav.appendChild(a);
+  }
+
+  document.getElementById('q').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase();
+    nav.querySelectorAll('a').forEach(a => {
+      const d = byPath.get(a.dataset.path);
+      a.style.display = !q || d.title.toLowerCase().includes(q) || d.text.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+
+  const route = () => {
+    const [path, frag] = decodeURIComponent(location.hash.slice(1)).split('::');
+    show(path, frag);
+  };
+  window.addEventListener('hashchange', route);
+  route();
+})();
+</script>
+</body>
+</html>

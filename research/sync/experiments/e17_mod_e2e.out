@@ -1,0 +1,121 @@
+
+=== E17 one-command setup + invite
+nerve setup
+  ✓ created device 'beta' (npub1j352zdv…zttv68), relays: ws://127.0.0.1:7791
+
+Add another device: on it, run
+
+    nerve setup nerve1eyJ2IjoxLCJuIjoiYmV0YSIsImsiOiI5NDY4YTEzNTg0MGI2NjUyNGY3NDZmNWU0MGM3OTIxMjcxOWE0MTFhZjQwMWYyZDdjNzliYTA0YzdiMDk1NWY5IiwicyI6IjE3NzA4NzQ3ZmUxMTIxOGNlMmNlNDQzMWM4ZjVhY2FkIiwiciI6WyJ3czovLzEyNy4wLjAuMTo3NzkxIl19
+
+                                                             
+                                                             
+                                                             
+                                                             
+The code works once, for the next hour. Anyone holding it can pair a device, so treat it like a password.
+nerve setup
+  ✓ created device 'alpha' (npub18sptyaq…hzuljd), relays: ws://127.0.0.1:7791
+  … asking beta to pair back
+  ✓ paired with beta: beta now trusts 'alpha'
+join took 4.644595000 s
+alpha peers: beta = "npub1j352zdvypdn9ynm5d  [path_map] 
+beta peers:  alpha = "npub18sptyaqsp7xtmplr  [path_map] 
+reusing the code:
+  ✓ paired with beta: beta already trusts 'alpha'
+
+=== a git repo with a Claude session on beta, loading the nerve mod
+session on beta with mod connected: e7a5f787-5f4a-490a-86a7-bf40d0d1a7b9
+
+=== E18 prompt from alpha (idle session)
+14:00:51Z agent up on 1 relay(s), 1 peer(s)
+14:00:51Z beta ✓ d4b66b3578b4cb4d: beta already trusts 'alpha'
+send→ack .383296000 s
+                                                             tmux detected · scroll with PgUp/PgDn · or add 'set -g mouse on' to ~/.tmux.conf for wheel scroll
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · alpha 8s
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+
+=== E18b two prompts while a turn runs (queued, in order)
+14:01:00Z beta ✓ 9865fb99a92582e8: submitted to the session
+14:01:09Z beta ✓ 9b2eca99a51d1c00: submitted to the session
+⏺ E18-QUEUED
+✻ Baked for 1s · done 7:31 PM
+                                                                                                        Update available! Run: brew upgrade claude-code@latest
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Run the echo again
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · alpha 23s
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+
+=== E19 permission prompt answered from alpha
+14:01:31Z beta ✓ 68df75d8470c2553: submitted to the session
+  ? d2042d30b1856e98 [permission] Write: /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e17/work/e19.txt
+--- beta's screen while waiting (dialog visible):
+  1 nineteen
+ Do you want to create e19.txt?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)
+   3. No
+ Esc to cancel · Tab to amend
+still pending on alpha after 20 s: 1
+14:01:53Z beta ✓ 7c6914a590a33d7b: answered d2042d30b1856e98
+e19.txt: nineteen
+❯ Run the echo again
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · alpha 6s
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+
+=== E20 question answered from alpha, no away mode
+14:01:59Z beta ✓ 7b40d978132b116c: submitted to the session
+  ? d676e61b4a71d136 [question] AskUserQuestion: Pick one: Red or Blue?  options: Red | Blue
+--- beta's screen (the question is visible locally too):
+  2. Blue                                                                               │
+     Choose Blue                                                                        │
+  3. Type something.                                                                    │
+────────────────────────────────────────────────────────────────────────────────────────│
+  4. Chat about this                                                                    │
+                                                                                        │
+Enter to select · ↑/↓ to navigate · Esc to cancel                                       │
+14:02:17Z beta ✓ def67136c6cc1ff0: answered d676e61b4a71d136
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Run the echo again
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · alpha 6s
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+
+=== E21 answered at the keyboard → withdrawn on alpha
+14:02:23Z beta ✓ 5d625533fd784f05: submitted to the session
+pending before:
+  ? 402422706f508e07 [permission] Write: /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e17/work/e21.txt
+pending after local answer:
+  (none)
+                                Update available! Run: brew upgrade claude-code@latest  │
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Run the echo again
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · alpha 20s
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+e21.txt: twentyone
+
+=== E22 hand-off twice from beta to alpha
+14:02:48Z offered 'e7a5f787' to alpha; waiting for it to say what it has
+14:02:48Z handoff 'e7a5f787' → alpha: sent 694.5 KiB of 722.9 KiB (102 of 102 chunks) in 0.5s
+14:02:51Z alpha ✓ 85eb58a9aa91692a: alpha resumed 'work' in tmux session nerve-e7a5f787 at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e17/alpha-handoff/work (3.1s)
+14:02:48Z beta is handing over 'work' → /var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T//nerve-e17/alpha-handoff/work (new checkout)
+14:02:51Z ok 85eb58a9aa91692a: alpha resumed 'work' in tmux session nerve-e7a5f787 at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e17/alpha-handoff/work (3.1s)
+14:02:48Z handoff 'e7a5f787' → alpha: sent 694.5 KiB of 722.9 KiB (102 of 102 chunks) in 0.5s
+--- one more turn and one more commit on beta, then hand off again
+14:02:53Z beta ✓ 2d8a9da399b83ed0: submitted to the session
+14:03:02Z handoff 'e7a5f787' → alpha: sent 20.0 KiB of 726.7 KiB (5 of 101 chunks) in 0.5s
+14:03:05Z alpha ✓ a4d7cfabe2adc658: alpha resumed 'work' in tmux session nerve-e7a5f787 at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e17/alpha-handoff/work (3.1s)
+14:02:48Z handoff 'e7a5f787' → alpha: sent 694.5 KiB of 722.9 KiB (102 of 102 chunks) in 0.5s
+14:03:02Z handoff 'e7a5f787' → alpha: sent 20.0 KiB of 726.7 KiB (5 of 101 chunks) in 0.5s
+14:02:51Z ok 85eb58a9aa91692a: alpha resumed 'work' in tmux session nerve-e7a5f787 at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e17/alpha-handoff/work (3.1s)
+14:03:05Z ok a4d7cfabe2adc658: alpha resumed 'work' in tmux session nerve-e7a5f787 at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e17/alpha-handoff/work (3.1s)
+chunk store sizes: beta 936K, alpha 936K
+
+=== done
+research/sync/experiments/e17_mod_e2e.sh: line 28: 72975 Terminated: 15          "$nerve" sync serve-relay --port "$port" > "$st/relay.log" 2>&1  (wd: ~/SS/nerve)
+research/sync/experiments/e17_mod_e2e.sh: line 28: 72992 Terminated: 15          NERVE_CONFIG_DIR="$st/$dev" "$nerve" sync agent > "$st/$dev-agent.log" 2>&1  (wd: ~/SS/nerve)
+research/sync/experiments/e17_mod_e2e.sh: line 28: 75952 Terminated: 15          NERVE_CONFIG_DIR="$st/$dev" "$nerve" sync agent > "$st/$dev-agent.log" 2>&1

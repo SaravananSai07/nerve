@@ -1,0 +1,12 @@
+RESULT nostr kind=4590 giftwrap=false size=512 relays=wss://relay.nostr.net: sent=6 recv=2 loss=66.7% min=800.2 p50=2995.8 mean=1898.0 p95=2995.8 max=2995.8 (ms RTT)
+  relay wss://relay.nostr.net: accepted=6 rejected=0
+RESULT nostr kind=4590 giftwrap=false size=512 relays=wss://nostr.oxtr.dev: sent=6 recv=6 loss=0.0% min=6333.8 p50=10548.7 mean=9818.3 p95=13333.4 max=13333.4 (ms RTT)
+  relay wss://nostr.oxtr.dev: accepted=6 rejected=0
+RESULT nostr kind=4590 giftwrap=false size=512 relays=wss://relay.snort.social: sent=6 recv=6 loss=0.0% min=523.6 p50=537.6 mean=551.1 p95=607.0 max=607.0 (ms RTT)
+  relay wss://relay.snort.social: accepted=6 rejected=0
+relay wss://relay.0xchat.com rejected: relay not connected
+RESULT nostr kind=4590 giftwrap=false size=512 relays=wss://relay.0xchat.com: sent=6 recv=0 loss=100%
+relay wss://nostr.bitcoiner.social rejected: Policy violated and pubkey is not in our web of trust.
+RESULT nostr kind=4590 giftwrap=false size=512 relays=wss://nostr.bitcoiner.social: sent=6 recv=0 loss=100%
+RESULT nostr kind=4590 giftwrap=false size=512 relays=wss://nostr-pub.wellorder.net: sent=6 recv=4 loss=33.3% min=632.8 p50=648.2 mean=643.9 p95=649.7 max=649.7 (ms RTT)
+  relay wss://nostr-pub.wellorder.net: accepted=6 rejected=0

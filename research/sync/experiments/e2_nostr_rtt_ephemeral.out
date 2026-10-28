@@ -1,0 +1,23 @@
+connected to 1 relays in 923 ms
+RESULT nostr kind=21059 giftwrap=false size=512 relays=wss://nos.lol: sent=20 recv=0 loss=100%
+RESULT   publish-ack(OK from all relays): sent=20 recv=20 loss=0.0% min=204.6 p50=225.5 mean=229.0 p95=259.5 max=277.1 (ms RTT)
+  relay wss://nos.lol: accepted=20 rejected=0
+connected to 1 relays in 1117 ms
+RESULT nostr kind=21059 giftwrap=false size=512 relays=wss://relay.primal.net: sent=20 recv=20 loss=0.0% min=589.6 p50=639.6 mean=675.4 p95=813.2 max=1063.9 (ms RTT)
+RESULT   publish-ack(OK from all relays): sent=20 recv=20 loss=0.0% min=242.6 p50=272.0 mean=301.5 p95=493.8 max=508.7 (ms RTT)
+  relay wss://relay.primal.net: accepted=20 rejected=0
+connected to 1 relays in 1001 ms
+relay wss://nostr.mom rejected: rate-limited: slow down matey
+RESULT nostr kind=21059 giftwrap=false size=512 relays=wss://nostr.mom: sent=20 recv=0 loss=100%
+RESULT   publish-ack(OK from all relays): sent=20 recv=20 loss=0.0% min=209.7 p50=242.5 mean=257.7 p95=360.2 max=379.9 (ms RTT)
+  relay wss://nostr.mom: accepted=17 rejected=3
+connected to 1 relays in 1783 ms
+RESULT nostr kind=21059 giftwrap=false size=512 relays=wss://relay.nostr.net: sent=20 recv=20 loss=0.0% min=839.8 p50=908.8 mean=1010.7 p95=1342.7 max=2267.5 (ms RTT)
+RESULT   publish-ack(OK from all relays): sent=20 recv=20 loss=0.0% min=406.7 p50=430.1 mean=443.3 p95=496.5 max=560.0 (ms RTT)
+  relay wss://relay.nostr.net: accepted=20 rejected=0
+connected to 3 relays in 1191 ms
+RESULT nostr kind=21059 giftwrap=false size=512 relays=wss://nos.lol,wss://relay.primal.net,wss://nostr.mom: sent=20 recv=20 loss=0.0% min=644.0 p50=721.4 mean=903.2 p95=946.8 max=4107.6 (ms RTT)
+RESULT   publish-ack(OK from all relays): sent=20 recv=20 loss=0.0% min=298.8 p50=330.7 mean=494.7 p95=400.7 max=3613.6 (ms RTT)
+  relay wss://relay.primal.net: accepted=20 rejected=0
+  relay wss://nostr.mom: accepted=20 rejected=0
+  relay wss://nos.lol: accepted=20 rejected=0

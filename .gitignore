@@ -5,3 +5,7 @@
 /.crates.toml
 /.crates2.json
 /bin/
+/target-linux
+research/sync/lab/target*
+research/sync/demo/.state/
+research/sync/experiments/.e17/

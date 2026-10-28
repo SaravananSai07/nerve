@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nerve sync guide</title>
+<style>
+:root {
+  --bg: #f7f7f4; --fg: #1d2021; --muted: #5f6466; --line: #dcddd6; --card: #ffffff;
+  --accent: #2f6f5e; --accent-soft: #e3efe9; --code-bg: #eeeee8;
+  --ok: #2e7d4f; --warn: #a3650f; --bad: #b3372f;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15181a; --fg: #e6e7e3; --muted: #9aa0a0; --line: #2c3133; --card: #1c2022;
+    --accent: #7cc4ad; --accent-soft: #1f2e29; --code-bg: #23282a;
+    --ok: #6cc28f; --warn: #e0a74f; --bad: #e57b72;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15181a; --fg: #e6e7e3; --muted: #9aa0a0; --line: #2c3133; --card: #1c2022;
+  --accent: #7cc4ad; --accent-soft: #1f2e29; --code-bg: #23282a;
+  --ok: #6cc28f; --warn: #e0a74f; --bad: #e57b72;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+.wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 96px; }
+header p.lede { font-size: 18px; color: var(--muted); margin-top: 4px; }
+nav.toc { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; margin: 20px 0 8px; }
+nav.toc ol { margin: 4px 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+nav.toc li { break-inside: avoid; }
+h1 { font-size: 30px; margin: 0; line-height: 1.2; }
+h2 { font-size: 22px; margin-top: 48px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+h3 { font-size: 17px; margin-top: 28px; }
+a { color: var(--accent); }
+code { font: 13.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14.5px; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+th { background: var(--accent-soft); }
+.tldr { background: var(--accent-soft); border-radius: 10px; padding: 14px 20px; margin: 20px 0; }
+.tldr ul { margin: 6px 0; padding-left: 20px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px 18px 12px; margin: 14px 0; }
+.card h3 { margin-top: 14px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; }
+.grid div b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 8px; }
+.ok { color: var(--ok); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+.bad { color: var(--bad); font-weight: 600; }
+.step { counter-increment: step; position: relative; padding-left: 36px; margin: 16px 0; }
+.step::before { content: counter(step); position: absolute; left: 0; top: 0; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--accent); color: var(--bg); font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.steps { counter-reset: step; }
+.expect { color: var(--muted); font-size: 14.5px; }
+.expect::before { content: "You should see: "; font-weight: 600; color: var(--fg); }
+details { margin: 8px 0; }
+summary { cursor: pointer; font-weight: 600; }
+.diagram { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; overflow-x: auto;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.foot { color: var(--muted); font-size: 13px; margin-top: 48px; }
+@media (max-width: 640px) {
+  .grid { grid-template-columns: 1fr; }
+  nav.toc ol { columns: 1; }
+  h1 { font-size: 25px; }
+}
+.layers { display: grid; gap: 10px; margin: 14px 0; }
+.layer { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 8px 14px; }
+.layer b { display: block; }
+.layer span { color: var(--muted); font-size: 14.5px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 14.5px; }
+.kv dt { font-weight: 600; }
+.kv dd { margin: 0; }
+.new { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--bg); background: var(--accent); border-radius: 4px; padding: 0 5px; vertical-align: 2px; }
+.num { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+<h1>nerve sync guide</h1>
+<p class="lede">Follow, steer and move Claude Code sessions across your Mac, Pi and phone. This page covers how it works and what crosses the wire, what was measured, what's still untested, and how to try it on each device.</p>
+</header>
+
+<div class="tldr">
+<b>Where it stands (round 2, 2026-10-12)</b>
+<ul>
+  <li><b>One command per device.</b> <code>nerve setup</code> on the first device prints a code. <code>nerve setup &lt;code&gt;</code> on each other device does everything else: identity, relays, the Claude mod, a background service, and pairing in both directions. Joining took <span class="num">4–7 s</span> (E17, E23).</li>
+  <li><b>Claude Code mods are in.</b> A small mod runs inside each Claude session. It does three things:
+    <ul>
+      <li>submits prompts from other devices, queued safely if Claude is busy;</li>
+      <li>answers permission prompts and questions from anywhere, while the dialog stays on screen locally;</li>
+      <li>reports each turn as it finishes.</li>
+    </ul>
+    Questions no longer need "away mode". Terminal paste and settings hooks remain as fallbacks.</li>
+  <li><b>Hand-offs are incremental.</b> Only commits the target lacks, plus content-addressed chunks of everything else.
+    <ul>
+      <li>First hand-off: <span class="num">694 KiB</span>.</li>
+      <li>The same session one turn and one commit later: <span class="num">16–19 KiB</span>.</li>
+    </ul>
+  </li>
+  <li><b>The Devices view was rebuilt.</b> Two panes on a laptop, tabs on a phone-sized terminal, with "needs you" first.</li>
+  <li><b>Tested:</b> one-Mac runs (E17–E22) and Mac ⇄ Pi over public relays only (E23–E26, E25b), plus 223 unit tests. Clippy is clean.</li>
+  <li><b>Still missing:</b> a native phone app; iPhone remains SSH-only.</li>
+</ul>
+</div>
+
+<nav class="toc"><b>Contents</b>
+<ol>
+  <li><a href="#setup">Setting up a device</a></li>
+  <li><a href="#how">How it fits together</a></li>
+  <li><a href="#mods">Claude Code mods: what changed</a></li>
+  <li><a href="#features">Each feature: how, what's sent, trade-offs</a></li>
+  <li><a href="#handoff">Hand-off and incremental sync</a></li>
+  <li><a href="#wire">Wire format and security</a></li>
+  <li><a href="#transport">Transport options</a></li>
+  <li><a href="#tested">Tested vs untested</a></li>
+  <li><a href="#try">Try it yourself</a></li>
+  <li><a href="#phone">Phones: Android and iPhone</a></li>
+  <li><a href="#gotchas">Gotchas</a></li>
+  <li><a href="#next">What's next</a></li>
+  <li><a href="#more">Where the detail lives</a></li>
+</ol>
+</nav>
+
+<h2 id="setup">1. Setting up a device</h2>
+
+<p><b>On the first device</b> (say your Mac):</p>
+<pre><code>./install.sh --sync          # from the repo: builds nerve with sync, then runs `nerve setup`
+# or, with nerve already built:  nerve setup</code></pre>
+<p>It prints a block like this, then waits for another device to join:</p>
+<pre><code>nerve setup
+  ✓ created device 'mac' (npub1dc6d7h0…cmuflx), relays: wss://relay.primal.net wss://relay.snort.social
+  ✓ nerve mod installed for Claude Code 2.1.295 (new sessions load it)
+  ✓ background agent runs at login (launchd dev.nerve.sync; log …/sync/agent.log)
+
+Add another device: on it, run
+
+    nerve setup nerve1eyJ2IjoxLCJuIjoibWFjIi…
+
+[QR code of the same text]
+The code works once, for the next hour. Anyone holding it can pair a device, so treat it like a password.</code></pre>
+
+<p><b>On every other device:</b></p>
+<pre><code>./install.sh nerve1eyJ2IjoxLCJuIjoibWFjIi…      # or: nerve setup nerve1eyJ2…</code></pre>
+<pre><code>  ✓ created device 'pi' (npub1hrdrlnv…a3s8km), relays: wss://relay.primal.net wss://relay.snort.social
+  … asking mac to pair back
+  ✓ paired with mac: mac now trusts 'pi'
+  ✓ background agent runs as systemd user service nerve-sync (also while logged out)</code></pre>
+
+<p><b>Each step, and what it does:</b></p>
+<div class="layers">
+  <div class="layer"><b>Identity</b><span>Creates a secp256k1 key (<code>&lt;config&gt;/sync/device.key</code>, mode 0600) and <code>fleet.toml</code>. The default relays are the two that reliably delivered for brand-new keys in testing. Joining adopts the inviter's relays, including a private one.</span></div>
+  <div class="layer"><b>Claude</b><span>On Claude Code ≥ 2.1.287, installs the nerve mod as a local plugin (<code>claude plugin install nerve@nerve-local</code>), loaded by new sessions. On older Claude, writes settings hooks instead and tells you how to enable them.</span></div>
+  <div class="layer"><b>Background agent</b><span>The service depends on the OS:
+    <ul>
+      <li>macOS: a launchd LaunchAgent.</li>
+      <li>Linux: a systemd user unit, plus <code>loginctl enable-linger</code> so a headless Pi keeps it after you log out.</li>
+      <li>Termux and containers: a detached process, plus a Termux:Boot script.</li>
+    </ul></span></div>
+  <div class="layer"><b>Pairing</b><span>The joiner trusts the inviter's key, then proves the invite's one-time secret. The inviter's agent trusts the joiner back and acks. A used or expired code gets a clear refusal.</span></div>
+</div>
+
+<p><b>Re-running</b> <code>nerve setup</code> is safe: every step checks what's already in place. To check a device later, run <code>nerve sync doctor</code>. It reports the agent, the mod socket, the mod install, every relay, and every peer's freshness, one line each with what to do about a failure. To add a third device, run <code>nerve sync invite</code> for a fresh code.</p>
+
+<h2 id="how">2. How it fits together</h2>
+
+<div class="diagram">  Mac                                                   Raspberry Pi
+ ┌────────────────────────────────────┐               ┌────────────────────────────────────┐
+ │ claude ──[nerve mod]──┐            │               │ claude ──[nerve mod]──┐            │
+ │ claude (no mod: tmux paste/hooks)  │               │ claude --bg  (mod only)│            │
+ │                       ▼ unix socket│               │                       ▼            │
+ │   nerve sync agent (launchd)       │               │   nerve sync agent (systemd)       │
+ │   · scans sessions every 3 s       │               │                                    │
+ │   · chunk store  · activity log    │               │                                    │
+ │   nerve TUI → D (reads the agent)  │               │                                    │
+ └──────────────┬─────────────────────┘               └──────────────┬─────────────────────┘
+                │   NIP-44 encrypted, signed Nostr events            │
+                ▼                                                    ▼
+      ┌───────────────────────────────────────────────────────────────────────┐
+      │ relays: wss://relay.primal.net, wss://relay.snort.social (public)     │
+      │         ws://&lt;pi-tailscale-ip&gt;:7777 (optional private, nerve sync serve-relay) │
+      └───────────────────────────────────────────────────────────────────────┘
+                ▲
+      phone: SSH (Tailscale) into the Pi → `nerve` → D        Android: Termux can also be a device</div>
+
+<p>Every device runs one <b>agent</b>. It does four things:</p>
+<ul>
+  <li><b>Publishes</b> a snapshot of its sessions to each paired device whenever something changes, and at least once a minute.</li>
+  <li><b>Receives</b> commands from paired devices and carries them out: send text, answer, fetch, hand off, run a job.</li>
+  <li><b>Hosts the mod socket</b>, so Claude sessions on the same machine can reach it.</li>
+  <li><b>Acks every command</b> end to end. A relay saying "OK" is not proof of delivery: two public relays were measured accepting and then dropping everything.</li>
+</ul>
+<p>The TUI and the <code>nerve sync …</code> commands talk to the agent through a spool directory, and follow its activity log until the ack arrives.</p>
+
+<h2 id="mods">3. Claude Code mods: what changed</h2>
+
+<p>Mods shipped in Claude Code 2.1.287. A mod is a plugin whose JavaScript runs <i>inside</i> the Claude process and hooks its events. That means it can do things nerve could only approximate from outside before. The full API lives in the type declarations Claude writes into a mod's <code>.claude-plugin/types/</code> on first load: 16,000 lines, read for this round.</p>
+
+<table>
+<tr><th>Job</th><th>Before (round 1)</th><th>Now, with the mod</th><th>Why it's better</th></tr>
+<tr><td>Send a prompt</td><td>Paste into the tmux pane or Ghostty tab, then press Enter</td><td><code>$.prompt.submit({text, asUser: true})</code></td><td>Queued while a turn runs, never typed into an open dialog (E18b). Works for <code>claude --bg</code> sessions, which have no terminal.</td></tr>
+<tr><td>Answer a permission</td><td>Settings hook <code>nerve sync hook</code> + file mailbox</td><td><code>classic.PermissionRequest</code> hook ⇄ agent socket</td><td>Same race with the local dialog, but no shell process per prompt, and the request is withdrawn reliably when answered locally (E21).</td></tr>
+<tr><td>Answer a question</td><td>Only in away mode, because the hook hid the dialog</td><td>Races Claude's own <code>AskUserQuestion</code> dialog</td><td>The dialog stays on screen locally. Answer it there or from any device (E20).</td></tr>
+<tr><td>Progress</td><td>Inferred from the transcript every 3 s</td><td><code>turn.start</code> / <code>turn.complete</code> with duration and tokens</td><td>Exact turn timing and token use per session, shown in the Devices view.</td></tr>
+<tr><td>Status in Claude</td><td>none</td><td><code>$.ui.status</code>: <code>⚠ nerve: ⇄ nerve · pi 4s · 1 waiting on another device</code></td><td>You can see sync is live from inside the session.</td></tr>
+</table>
+
+<details><summary>How the mod talks to the agent (protocol)</summary>
+<p>HTTP/1.1 over a Unix socket (<code>&lt;sync&gt;/agent.sock</code>, mode 0600) via <code>$.http.fetch(url, {socketPath})</code>. No TCP port is opened. Routes:</p>
+<table>
+<tr><th>Call</th><th>Purpose</th></tr>
+<tr><td><code>POST /v1/hello</code></td><td>Session id, cwd and surface (terminal/desktop) on start.</td></tr>
+<tr><td><code>GET /v1/poll</code></td><td>Long-poll (8 s) for prompts from other devices; also carries the status line.</td></tr>
+<tr><td><code>POST /v1/request</code></td><td>"This permission or question is pending", with Claude's tool input.</td></tr>
+<tr><td><code>GET /v1/wait</code></td><td>Long-poll (2 s) for the remote answer to one request.</td></tr>
+<tr><td><code>POST /v1/resolved</code></td><td>"Answered here", so the request is withdrawn everywhere.</td></tr>
+<tr><td><code>POST /v1/event</code></td><td>Turn start and turn complete, with usage.</td></tr>
+<tr><td><code>POST /v1/ack</code></td><td>Outcome of a submitted prompt; becomes the end-to-end ack to the sender.</td></tr>
+</table>
+</details>
+
+<details><summary>Two traps found by testing, and how they're handled</summary>
+<ol>
+  <li><b>A mod hook has 10 s of its own time.</b>
+    <ul>
+      <li>The first version waited for remote answers in a <code>$.clock.sleep</code> loop. Claude cut the hook off at 10 s, and the request vanished from other devices.</li>
+      <li>Time spent inside another <code>$</code> call doesn't count against the budget. So the hook now waits inside <code>$.http.fetch</code> against <code>/v1/wait</code>.</li>
+      <li>E19 deliberately answers 20 s after the prompt appears.</li>
+    </ul></li>
+  <li><b>Claude doesn't abort the hook when you answer at the keyboard.</b>
+    <ul>
+      <li><code>next.signal.aborted</code> stayed false for 14 s after "Yes" was pressed.</li>
+      <li>The mod now also wraps every <code>tool.call</code>. When the same tool call with the same input settles, the request is withdrawn.</li>
+      <li>The agent also drops any request whose hook stops polling for 6 s.</li>
+    </ul></li>
+</ol>
+<p>Also found: returning early from <code>tool.call</code> while Claude's permission dialog is open leaves the dialog stuck, and <code>$.ui.ask</code> can't be cancelled. So the mod answers through Claude's own hooks rather than drawing its own dialogs.</p>
+</details>
+
+<p><b>Limits of mods:</b></p>
+<ul>
+  <li>They need Claude Code 2.1.287 or newer.</li>
+  <li>They aren't sandboxed: the nerve mod can approve tool calls, which is its job.</li>
+  <li>They load only in folders you've trusted.</li>
+  <li>A session started before <code>nerve setup</code> doesn't have the mod until it's restarted. The Devices view shows <code>tty</code> or <code>view</code> for such sessions, and the old paths still work for them.</li>
+</ul>
+
+<h2 id="features">4. Each feature: how, what's sent, trade-offs</h2>
+
+<div class="card">
+<h3>Progress and "last synced"</h3>
+<div class="grid">
+<div><b>How</b>The agent scans sessions every 3 s, using the same discovery as the TUI. On a change, or every 60 s, it publishes a <i>state</i> event per peer. That's an addressable Nostr event (kind 30078), so relays keep only the newest copy. A sleeping laptop therefore still shows what it was doing, and since when.</div>
+<div><b>Sends</b>
+  <ul>
+    <li><b>Device:</b> name, OS, architecture, capabilities, away flag.</li>
+    <li><b>Per session:</b> id, name, folder, branch, state, what it waits for, cost, subagent count, the last 8 transcript lines, <code>via_mod</code>, and the last turn (time, duration, tokens, model).</li>
+    <li><b>Also:</b> pending prompts and job status.</li>
+  </ul>
+  Typically 2–10 KB.</div>
+<div><b>Upside</b>Works across offline periods and needs no polling. Mod sessions add exact turn timing.</div>
+<div><b>Downside</b>A snapshot: about 3 s stale at best on the private relay, plus 0.5–1 s on public ones. The tail is a peek; <code>l</code> fetches 200 lines.</div>
+</div>
+<p><b>Tested:</b> <span class="ok">✓</span> E10b, E14, E23 (Pi seen from the Mac over public relays only).</p>
+</div>
+
+<div class="card">
+<h3>Send an instruction</h3>
+<div class="grid">
+<div><b>How</b>
+  <ul>
+    <li><b>Mod sessions:</b> the agent queues the text, the mod calls <code>$.prompt.submit</code>, and the mod's ack goes back to the sender.</li>
+    <li><b>Others:</b> the agent re-checks the PID is still <code>claude</code>, then pastes into its tmux pane or Ghostty tab and presses Enter.</li>
+  </ul></div>
+<div><b>Sends</b>Session id plus the text, control characters stripped, up to 16,000 characters.</div>
+<div><b>Upside</b>Mod path: queued if busy, works in background sessions, and the ack means Claude actually took it.</div>
+<div><b>Downside</b>Desktop-app sessions without the mod are view-only. Instructions older than 5 minutes are refused rather than typed, so a stale replay can't fire.</div>
+</div>
+<p><b>Tested:</b> <span class="ok">✓</span> mod path: ack in 0.37 s on one Mac (E18), 4.8 s Mac→Pi over public relays (E24), queued in order (E18b). <span class="ok">✓</span> tmux path (E10a). <span class="warn">◐</span> Ghostty path: the mechanism works (E9), but it was never run end to end.</p>
+</div>
+
+<div class="card">
+<h3>Answer permission prompts and questions</h3>
+<div class="grid">
+<div><b>How</b>The mod reports the prompt and waits. Claude's own dialog stays on screen. The first answer wins:
+  <ul>
+    <li><b>Remote:</b> from another device, via the agent.</li>
+    <li><b>Local:</b> at the keyboard, which withdraws the request everywhere.</li>
+  </ul>
+  Sessions without the mod use the settings hook as before, where questions still need away mode.</div>
+<div><b>Sends</b>The tool name plus a one-line summary (command, file path or URL), or the question with up to 9 options. Back comes allow, deny or the chosen label.</div>
+<div><b>Upside</b>Answer from any device without taking the prompt away from whoever is at the keyboard.</div>
+<div><b>Downside</b>Waits up to 10 minutes for permissions and 30 for questions, then falls back to local only. Multi-select questions answer only the first option set.</div>
+</div>
+<p><b>Tested:</b> <span class="ok">✓</span> permission held for 20 s, then answered remotely (E19); question without away mode (E20); local answer withdrawn (E21); across machines over public relays (E25b: visible on the other device after 6 s, file written after the answer).</p>
+</div>
+
+<div class="card">
+<h3>Read changes, transcript and subagent work</h3>
+<div class="grid">
+<div><b>How</b>The remote agent runs <code>git status</code> and <code>git diff HEAD</code> (capped at 512 KiB), or reads 200 transcript lines, or each subagent's tail.</div>
+<div><b>Sends</b>The text in 32 KiB chunks over the bulk lane: the private relay if connected, otherwise public relays.</div>
+<div><b>Upside</b>On demand only. The pager colours diffs and shows line numbers.</div>
+<div><b>Downside</b>Large diffs over public relays take about 1–2 s per chunk.</div>
+</div>
+<p><b>Tested:</b> <span class="ok">✓</span> diff (E10d). <span class="warn">◐</span> log and subagents use the same path but weren't run separately across devices.</p>
+</div>
+
+<div class="card">
+<h3>Jobs routed by capability</h3>
+<div class="grid">
+<div><b>How</b><code>nerve sync job --needs linux,aarch64 --verify '…' -- "prompt"</code> picks the least-busy device with every capability. That device runs <code>claude -p</code> headless, then runs the verify command; exit 0 means verified.</div>
+<div><b>Sends</b>Prompt, needs, verify command and allowed tools. Back come progress, turns, cost and the session id.</div>
+<div><b>Upside</b>Queues for sleeping devices. Another Claude can use it to delegate work (E16).</div>
+<div><b>Downside</b>Headless jobs can't ask permission, so pre-allow tools with <code>--allow</code>.</div>
+</div>
+<p><b>Tested:</b> <span class="ok">✓</span> E13, E15, E16 (round 1, unchanged). <span class="bad">✗</span> Xcode / iOS simulator.</p>
+</div>
+
+<h2 id="handoff">5. Hand-off and incremental sync <span class="new">NEW</span></h2>
+
+<p>Round 1 sent one tar every time: a <code>git bundle --all</code> (the whole history), the patch, untracked files and the whole transcript. A repeat hand-off of a busy session resent almost everything. Round 2 replaces that with a short exchange:</p>
+
+<div class="diagram">source (has the session)                         target
+  HandoffOffer  {session, repo name, root commit} ──►
+                                                  ◄── HandoffHave {tips its checkout already has}
+  pack: git bundle --all --not &lt;tips&gt;
+        + content-defined chunks of patch, untracked files, transcript, sidecars
+  HandoffManifest {index of files → chunk ids}    ──►
+  ChunkData × n   {only chunks it isn't known to hold} ──►
+                                                  ◄── ChunkWant {anything still missing}   (rare)
+                                                  ◄── Ack "resumed in tmux nerve-xxxx"
+  both: remember which chunks the other now holds</div>
+
+<dl class="kv">
+  <dt>Git</dt><dd>The target names the commits it has; the bundle carries only what lies beyond them. With nothing new there is no bundle at all. The repo is identified by its root commit, so an unrelated checkout at the same path is never treated as having these commits.</dd>
+  <dt>Everything else</dt><dd>FastCDC-style content-defined chunking (gear hash; 2 KiB minimum, 8 KiB average, 32 KiB maximum), stored by SHA-256 in <code>&lt;sync&gt;/chunks/</code>. An append or an edit changes only the chunks around it.</dd>
+  <dt>Knowledge</dt><dd><code>&lt;sync&gt;/known/&lt;peer&gt;</code> lists chunk ids that peer has confirmed holding. It is updated on the target's ack, and corrected if the peer later asks for a chunk again.</dd>
+  <dt>Integrity</dt><dd>Every chunk is checked against its id on arrival, so a corrupt or forged chunk is dropped. The index is itself a chunked file, so big repos don't overflow a message.</dd>
+  <dt>Storage</dt><dd>The store is pruned oldest-first above 512 MiB. A pruned chunk costs one extra request later, never correctness.</dd>
+</dl>
+
+<table>
+<tr><th>Run</th><th>What changed since the last hand-off</th><th>Sent</th><th>Total size</th></tr>
+<tr><td>E22 #1 (Mac, local relay)</td><td>first time: new checkout</td><td class="num">694 KiB · 101/101 chunks</td><td class="num">716 KiB</td></tr>
+<tr><td>E22 #2</td><td>one turn + one commit</td><td class="num"><b>16–19 KiB</b> · 4–5/100 chunks</td><td class="num">720 KiB</td></tr>
+<tr><td>E26 #1 (Pi → Mac, public relays only)</td><td>first time: new checkout</td><td class="num">all 5 chunks, 3.1 s</td><td class="num">≈ 24 KiB (small test repo)</td></tr>
+<tr><td>E26 #2</td><td>one commit</td><td class="num"><b>3 of 5 chunks</b>, 2.3 s</td><td class="num">≈ 26 KiB</td></tr>
+</table>
+
+<p><b>Upside:</b> repeat hand-offs cost roughly the size of the change, so moving a session back and forth is cheap even over public relays. <b>Downside:</b> the first hand-off of a big repo is still the whole history, and over public relays that is slow (paced to avoid bans). Chunks aren't compressed yet, although transcripts compress about 5×.</p>
+
+<h2 id="wire">6. Wire format and security</h2>
+
+<table>
+<tr><th>Event</th><th>Nostr kind</th><th>Kept by relays</th><th>Carries</th></tr>
+<tr><td>State</td><td>30078 (addressable, <code>d = nerve/2/state/&lt;recipient&gt;</code>)</td><td>newest only, 7-day expiry</td><td>the device snapshot in §4</td></tr>
+<tr><td>Messages</td><td>4590</td><td>24 h (NIP-40 expiry)</td><td><code>Send</code>, <code>Answer</code>, <code>SyncNow</code>, <code>Fetch</code>/<code>Blob</code>, <code>HandoffOffer</code>/<code>Have</code>/<code>Manifest</code>, <code>ChunkWant</code>/<code>ChunkData</code>, <code>JobSubmit</code>/<code>JobUpdate</code>, <code>PairRequest</code>, <code>Ack</code></td></tr>
+</table>
+<p>Each payload is a JSON envelope <code>{v: 2, id, from, sent_at, body}</code>, NIP-44 v2 encrypted to exactly one device and signed by the sender. Devices on protocol v1 and v2 ignore each other rather than misreading each other.</p>
+
+<table>
+<tr><th>Who</th><th>Can see</th><th>Cannot see</th></tr>
+<tr><td>Your paired devices</td><td>everything above</td><td>—</td></tr>
+<tr><td>A public relay</td><td>which keys talk, when, message sizes; ciphertext for up to 24 h</td><td>any content</td></tr>
+<tr><td>Anyone else</td><td>nothing useful</td><td>unknown keys are ignored. The one exception: a <code>PairRequest</code>, accepted only while an invite is open, and only with its secret.</td></tr>
+<tr><td>Other users on the same machine</td><td>—</td><td>the mod socket is 0600 in your config directory</td></tr>
+</table>
+<p><b>Trust model:</b> a paired device can type into your sessions and approve tool calls. That is remote control by design. Treat <code>device.key</code> like an SSH key, and an invite code like a one-hour password.</p>
+<p><b>Safety rails:</b></p>
+<ul>
+  <li>Only keys listed in <code>[peers]</code> are obeyed.</li>
+  <li>Message ids are de-duplicated, even across restarts.</li>
+  <li>Instructions expire after 5 minutes.</li>
+  <li>The PID is re-checked before any typing.</li>
+  <li>Control characters are stripped.</li>
+  <li>Network strings are sanitised before display.</li>
+  <li>Hand-off paths can't escape their directory.</li>
+  <li>Chunks are verified by hash.</li>
+  <li>Invites are single-use.</li>
+</ul>
+
+<h2 id="transport">7. Transport options</h2>
+<table>
+<tr><th>Setup</th><th>Round trip</th><th>Upside</th><th>Downside</th></tr>
+<tr><td><b>Public relays only</b> (the default)</td><td>0.5–0.9 s</td><td>Zero setup, no VPN, works from anywhere</td><td>Rate limits; first hand-offs of big repos are slow; relays see metadata</td></tr>
+<tr><td><b>+ private relay on the Pi</b> (<code>nerve sync serve-relay</code>, then <code>nerve sync relay add ws://&lt;pi-tailscale-ip&gt;:7777</code>)</td><td>~16 ms</td><td>No third party; bulk data (hand-offs, diffs) goes there</td><td>Every device must be on your tailnet; the relay is in memory, so a restart drops queued messages (public relays cover for it)</td></tr>
+</table>
+<details><summary>Alternatives considered (48 surveyed in round 1)</summary>
+<ul>
+  <li><b>iroh:</b> fastest, but needs Rust 1.91 (nerve's minimum is 1.85) and has no store-and-forward. It is the planned bulk lane.</li>
+  <li><b>NATS / MQTT:</b> need a reachable hub and have no end-to-end encryption.</li>
+  <li><b>Matrix:</b> heavy SDK, Rust 1.96.</li>
+  <li><b>Tailscale + HTTP:</b> fails the "no VPN" goal.</li>
+  <li><b>Claude Remote Control:</b> great for phone chat, but no fleet view, hand-off, jobs or API. Use it alongside nerve.</li>
+</ul>
+</details>
+
+<h2 id="tested">8. Tested vs untested</h2>
+<table>
+<tr><th>Area</th><th>Status</th><th>Evidence</th></tr>
+<tr><td>One-command setup and invite pairing</td><td class="ok">Tested</td><td>E17 (one Mac), E23 (Mac → Pi, with the systemd service)</td></tr>
+<tr><td>Mod: prompts, queueing, permissions, questions, local-answer withdrawal</td><td class="ok">Tested</td><td>E18–E21 on one Mac. Across machines over public relays: E24 (prompt Mac → Pi, ack 0.9–4.8 s) and E25b (Mac session's permission answered from the Pi). The Pi's own E25 couldn't run: its Claude account hit its usage limit mid-run, so the reverse direction stood in.</td></tr>
+<tr><td>Incremental hand-off</td><td class="ok">Tested</td><td>E22 (one Mac, twice); E26 (Pi → Mac, twice, public relays); unit tests</td></tr>
+<tr><td>Hand-off Pi → Mac</td><td class="ok">Tested now</td><td>E26: was untested in round 1</td></tr>
+<tr><td>Round-1 features: jobs, fetch, offline catch-up, private relay</td><td class="ok">Tested</td><td>E10–E16</td></tr>
+<tr><td>Unit tests</td><td class="ok">223 pass</td><td>Adds chunking, the mod hub protocol, invites, setup, and the new Devices view at 40–140 columns</td></tr>
+<tr><td>Devices view at laptop and phone widths</td><td class="ok">Checked</td><td>Rendered in tmux at 132 and 54 columns against live data</td></tr>
+<tr><td>launchd service on macOS</td><td class="warn">Written, not run</td><td>The tests used <code>--no-service</code> on the Mac to avoid touching your login items. The systemd path was exercised on the Pi.</td></tr>
+<tr><td>Termux (Android)</td><td class="warn">Partly</td><td>A fully static aarch64 binary was built on the Pi (12 MB, <code>ldd</code>: "not a dynamic executable"), which is the kind Termux runs; not yet run on a phone</td></tr>
+<tr><td>Ghostty as a send target; log/subagent fetch across devices</td><td class="warn">Partly</td><td>Mechanism tested, not end to end</td></tr>
+<tr><td>Different networks, NAT; more than two devices; running for days</td><td class="bad">Untested</td><td>The code handles N peers; only 2 were used</td></tr>
+<tr><td>iPhone as a device; Xcode jobs; key rotation</td><td class="bad">Not built</td><td>§12</td></tr>
+</table>
+
+<h2 id="try">9. Try it yourself</h2>
+
+<h3>A. One Mac, no setup (2 minutes)</h3>
+<pre><code>research/sync/demo/demo.sh            # relay + "beta" device, then the TUI as "alpha": press D
+research/sync/demo/demo.sh --check    # non-interactive; prints status and exits</code></pre>
+<p class="expect">Devices shows <b>beta</b>, its sessions, and "synced Ns ago". Both "devices" are this Mac, so its sessions are your real ones. <code>m</code> types into a real session, so pick a throwaway one.</p>
+
+<h3>B. The full mod flow on one Mac (about 3 minutes, a few cents of Haiku)</h3>
+<pre><code>research/sync/experiments/e17_mod_e2e.sh</code></pre>
+<p>This runs E17–E22 and prints every step, including beta's Claude screen while prompts are pending. It runs in a temp directory, loads the mod only for its own test session, and leaves nothing running.</p>
+
+<h3>C. Mac + Pi</h3>
+<div class="steps">
+<div class="step">On the Mac: <code>./install.sh --sync</code>. Keep the code it prints.</div>
+<div class="step">On the Pi: get the source there (<code>rsync -a --exclude target ~/SS/nerve/ pi@&lt;pi&gt;:nerve/</code>, since the branch isn't pushed), then <code>cd nerve &amp;&amp; ./install.sh nerve1…</code>. It builds (4.5 min on a Pi 5), joins and installs the service.</div>
+<div class="step">Start Claude on the Pi in any repo (<code>tmux new -s work claude</code>). On the Mac run <code>nerve</code> and press <code>D</code>.</div>
+</div>
+<table>
+<tr><th>Try</th><th>Keys</th><th>You should see</th></tr>
+<tr><td>Follow the Pi</td><td><code>D</code>, then <code>Tab</code> to the Pi</td><td>Its sessions ordered waiting → working → idle, each tagged <code>mod</code>, <code>tty</code> or <code>view</code></td></tr>
+<tr><td>Send something</td><td>select the session, <code>m</code> (or Enter), type, Enter</td><td>"submitted to the session" in the footer; Claude starts on the Pi</td></tr>
+<tr><td>Approve from the Mac</td><td>ask Claude on the Pi to write a file; on the Mac, <code>a</code> on the "wants to run Write" row</td><td>The file appears on the Pi; the Pi's dialog closes</td></tr>
+<tr><td>Answer a question</td><td>ask Claude to use AskUserQuestion; <code>1</code>–<code>9</code></td><td>Visible on both screens, answered from either</td></tr>
+<tr><td>Move the session</td><td>main grid, select a session, <code>H</code>, pick a device</td><td>A progress bar in Devices; later <code>tmux attach -t nerve-&lt;id&gt;</code> on the target shows the session continuing</td></tr>
+<tr><td>Move it again</td><td><code>H</code> after a bit more work</td><td>The log line reads "sent 16 KiB of 720 KiB" rather than the whole thing</td></tr>
+<tr><td>Check health</td><td><code>nerve sync doctor</code> on either device</td><td>All ✓, or a ✗ with what to do</td></tr>
+</table>
+
+<h3>D. Mac + Pi, scripted (E23–E26)</h3>
+<pre><code>PI=you@&lt;pi&gt; PI_KEY=~/.ssh/&lt;key&gt; research/sync/experiments/e23_pi_e2e.sh</code></pre>
+<p>This uses throwaway configs on both machines and only the two public relays. It installs and then removes a test systemd service on the Pi.</p>
+
+<h2 id="phone">10. Phones: Android and iPhone</h2>
+
+<table>
+<tr><th></th><th>Android (Termux)</th><th>iPhone (iSH, a-Shell, Blink)</th></tr>
+<tr><td>Run nerve on the phone</td><td><b>Yes</b>, as a full device</td><td><b>No.</b> iOS can't run native Linux binaries. iSH emulates x86 slowly and has no working tmux/Claude path; a-Shell runs only WebAssembly.</td></tr>
+<tr><td>Run Claude Code on the phone</td><td>Possible with community glibc shims, but unsupported; not needed for nerve</td><td>No</td></tr>
+<tr><td>Best way today</td><td>A nerve device in Termux for the Devices view and answering; or SSH into the Pi</td><td>SSH (Blink or Termius) over Tailscale into the Pi or Mac, then <code>nerve</code> → D</td></tr>
+</table>
+
+<h3>Android with Termux</h3>
+<p>Install <b>Termux</b> from F-Droid or GitHub, not the stale Play Store build. Optionally add <b>Termux:Boot</b> so the agent starts at boot. Then either:</p>
+<pre><code># build on the phone: install.sh installs rust, git, tmux, openssh from pkg first
+git clone &lt;your fork&gt; nerve &amp;&amp; cd nerve &amp;&amp; ./install.sh nerve1…</code></pre>
+<p>or copy the prebuilt static binary (no compiler needed on the phone):</p>
+<pre><code># on the Pi, once:  cargo build --release --features sync --target aarch64-unknown-linux-musl
+scp pi:nerve-src/target/aarch64-unknown-linux-musl/release/nerve $PREFIX/bin/
+nerve setup nerve1…</code></pre>
+<p>That's all you need: setup uses public relays, so the phone needs no Tailscale. Because Termux has no service manager, setup starts the agent as a detached process, takes a wake-lock, and writes <code>~/.termux/boot/nerve-sync</code> for Termux:Boot. Android may still kill background apps, so exempt Termux from battery optimisation. <span class="warn">This path is built but not yet run on a real phone.</span></p>
+
+<h3>iPhone</h3>
+<div class="steps">
+<div class="step">Install <b>Tailscale</b> and an SSH app (<b>Blink Shell</b> supports mosh, which survives sleep and network changes).</div>
+<div class="step"><code>ssh you@&lt;pi-tailscale-ip&gt;</code>, then <code>nerve</code>, then <code>D</code>. The Pi's service agent keeps running, and the TUI attaches to it.</div>
+<div class="step">Below 90 columns the view switches to tabs (<code>Tab</code> moves between devices). Landscape helps.</div>
+</div>
+<p>SSHing into the Mac works for <code>nerve sync …</code> commands. A second <code>nerve</code> TUI is refused while the Mac's own TUI is open, because nerve allows one instance at a time.</p>
+
+<h2 id="gotchas">11. Gotchas</h2>
+<ul>
+  <li><b>Restart sessions after setup</b> to get the mod. Older sessions still work through tmux and hooks.</li>
+  <li><b>One agent per device key.</b> Setup installs it as a service. Don't also run <code>nerve sync agent</code> by hand; the TUI detects the service and becomes a viewer.</li>
+  <li><b>macOS can't reach the Pi's LAN IP</b> from an ad-hoc-signed binary (Local Network Privacy). Use the Tailscale address or public relays.</li>
+  <li><b>A mod is code inside Claude.</b> Install it only from your own nerve; <code>claude plugin validate</code> lists every API call it makes.</li>
+  <li><b>Invite codes are passwords for an hour.</b> Make a fresh one per device with <code>nerve sync invite</code>.</li>
+</ul>
+
+<h2 id="next">12. What's next</h2>
+<ol>
+  <li><b>A phone web app</b> (<code>nostr-tools</code>, same JSON) for iPhone without SSH, plus push notifications via ntfy from the Pi.</li>
+  <li><b>Compress chunks</b> (zstd) for public-relay first hand-offs; <b>iroh</b> as the bulk lane once the minimum Rust version allows it.</li>
+  <li>Run the <b>launchd</b> path and <b>Termux</b> on real hardware; test across different networks and with three or more devices.</li>
+  <li><b>An MCP tool</b> around <code>nerve sync job/send/status</code>, so Claude on one device can drive another; with mods this can be <code>$.tool.register</code> inside the session.</li>
+</ol>
+
+<h2 id="more">13. Where the detail lives</h2>
+<table>
+<tr><th>For</th><th>Open</th></tr>
+<tr><td>Everything, browsable offline</td><td><a href="site/index.html" target="_top">site/index.html</a></td></tr>
+<tr><td>Every measurement, including E17–E26</td><td><code>research/sync/experiments/RESULTS.md</code>, plus the <code>.out</code> files next to it</td></tr>
+<tr><td>Why each choice was made (D1–D22)</td><td><code>research/sync/DECISIONS.md</code></td></tr>
+<tr><td>User guide and every config option</td><td><code>docs/SYNC.md</code></td></tr>
+<tr><td>The code</td><td><code>src/sync/</code> (chunks, modhub, pairing, setup, handoff, agent, transport, protocol); <code>mod/nerve/</code>; <code>src/tui/devices.rs</code></td></tr>
+</table>
+
+<p class="foot">Round 2, 2026-10-12, branch <code>sync-research</code> (uncommitted). Mac on macOS 27 with Claude Code 2.1.295; Raspberry Pi 5 on Debian 13 with Claude Code 2.1.296.</p>
+</div>
+</body>
+</html>

@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added
+
+- **Cross-device sync (experimental, `--features sync`).** Devices pair
+  by Nostr key and exchange NIP-44-encrypted state and commands through
+  public relays or a private one (`nerve sync serve-relay`). The `D` view
+  lists each device's sessions, pending prompts, jobs and last-synced
+  time; `m` types an instruction into a remote session, `a`/`x`/`1-9`
+  answer its prompts, `d`/`l`/`g` fetch its diff, log or subagent work,
+  and `H` hands a session to another device. `nerve sync job` runs a
+  verified headless job on a device with the needed capabilities. See
+  docs/SYNC.md.
+- **`nerve setup [code]`** sets a device up in one step. It creates the
+  identity, installs the nerve mod into Claude Code, installs the agent as
+  a launchd, systemd or Termux service, and pairs by a one-time invite
+  code. `nerve sync doctor` checks a device; `nerve sync invite` makes a
+  new code.
+- **Claude Code mod** (`mod/nerve`, Claude Code ≥ 2.1.287). It submits
+  remote prompts inside Claude (queued while busy, works for `--bg`
+  sessions), and answers permissions and questions from other devices
+  while the local dialog stays up.
+- **Incremental hand-off.** Only the commits the target lacks and
+  content-defined chunks it doesn't hold are sent. A repeat hand-off of a
+  700 KiB session moved 16–19 KiB.
+
 ### Fixed
 
 - **Stopping or attaching to a background job failed when it lived under

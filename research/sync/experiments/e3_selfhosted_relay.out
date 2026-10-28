@@ -1,0 +1,22 @@
+RESULT nostr kind=21059 giftwrap=false size=512 relays=ws://100.73.26.46:7777: sent=25 recv=25 loss=0.0% min=12.9 p50=15.8 mean=24.9 p95=27.5 max=234.5 (ms RTT)
+  relay ws://100.73.26.46:7777: accepted=25 rejected=0
+relay ws://100.73.26.46:7777 rejected: blocked: event size (87918 bytes) exceeds maximum allowed size (65536 bytes)
+RESULT nostr kind=21059 giftwrap=false size=60000 relays=ws://100.73.26.46:7777: sent=25 recv=0 loss=100%
+  relay ws://100.73.26.46:7777: accepted=0 rejected=25
+relay ws://100.73.26.46:7777 rejected: blocked: event size (699594 bytes) exceeds maximum allowed size (65536 bytes)
+RESULT nostr kind=21059 giftwrap=false size=500000 relays=ws://100.73.26.46:7777: sent=25 recv=0 loss=100%
+  relay ws://100.73.26.46:7777: accepted=0 rejected=25
+RESULT nostr kind=1059 giftwrap=true size=512 relays=ws://100.73.26.46:7777: sent=25 recv=25 loss=0.0% min=9.2 p50=15.0 mean=15.0 p95=18.6 max=19.9 (ms RTT)
+  relay ws://100.73.26.46:7777: accepted=25 rejected=0
+relay ws://192.168.1.17:7777 rejected: relay not connected
+RESULT nostr kind=21059 giftwrap=false size=512 relays=ws://192.168.1.17:7777: sent=25 recv=0 loss=100%
+  relay ws://192.168.1.17:7777: accepted=0 rejected=25
+relay ws://192.168.1.17:7777 rejected: relay not connected
+RESULT nostr kind=21059 giftwrap=false size=60000 relays=ws://192.168.1.17:7777: sent=25 recv=0 loss=100%
+  relay ws://192.168.1.17:7777: accepted=0 rejected=25
+relay ws://192.168.1.17:7777 rejected: relay not connected
+RESULT nostr kind=21059 giftwrap=false size=500000 relays=ws://192.168.1.17:7777: sent=25 recv=0 loss=100%
+  relay ws://192.168.1.17:7777: accepted=0 rejected=25
+relay ws://192.168.1.17:7777 rejected: relay not connected
+RESULT nostr kind=1059 giftwrap=true size=512 relays=ws://192.168.1.17:7777: sent=25 recv=0 loss=100%
+  relay ws://192.168.1.17:7777: accepted=0 rejected=25

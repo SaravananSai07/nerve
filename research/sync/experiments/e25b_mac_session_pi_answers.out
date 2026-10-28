@@ -1,0 +1,27 @@
+
+=== pair (Pi invites, Mac joins), agents on both
+  ✓ created device 'mac' (npub1gc3r9fj…nhfjfw), relays: wss://relay.primal.net wss://relay.snort.social
+  ✓ paired with pi: pi now trusts 'mac'
+
+=== Claude on the Mac with the nerve mod
+
+=== E25b the Pi sees the prompt and answers it
+visible on the Pi after 6 s: eac1620ea73e0a96
+  ? eac1620ea73e0a96 [permission] Write: /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e25b/work/e25.txt
+--- Mac screen (dialog up):
+  1 mac-ok
+ Do you want to create e25.txt?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)
+   3. No
+ Esc to cancel · Tab to amend
+13:55:21Z mac ✓ a719e53742dfe929: answered eac1620ea73e0a96
+answer → ack: 5.846885000 s (includes the SSH round trip and a one-shot client on the Pi)
+e25.txt on the Mac: mac-ok
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · pi 3s · 1 waiting on another device
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+
+=== done
+research/sync/experiments/e25b_mac_session_pi_answers.sh: line 19: 67474 Terminated: 15          NERVE_CONFIG_DIR="$mac" "$nerve" sync agent > "$mac/agent.log" 2>&1  (wd: ~/SS/nerve)

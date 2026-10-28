@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nerve cross-device sync</title>
+<style>
+:root {
+  --bg: #f7f7f4; --fg: #1d2021; --muted: #5f6466; --line: #dcddd6; --card: #ffffff;
+  --accent: #2f6f5e; --accent-soft: #e3efe9; --warn: #a3621b; --warn-soft: #f6ead9;
+  --bad: #a83a32; --code-bg: #eeeee8;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15181a; --fg: #e6e7e3; --muted: #9aa0a0; --line: #2c3133; --card: #1c2022;
+    --accent: #7cc4ad; --accent-soft: #1f3530; --warn: #e0a560; --warn-soft: #3a2e1f;
+    --bad: #e58a80; --code-bg: #23282a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15181a; --fg: #e6e7e3; --muted: #9aa0a0; --line: #2c3133; --card: #1c2022;
+  --accent: #7cc4ad; --accent-soft: #1f3530; --warn: #e0a560; --warn-soft: #3a2e1f;
+  --bad: #e58a80; --code-bg: #23282a; color-scheme: dark;
+}
+[hidden]{display:none!important}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif; padding: 0 16px; }
+main { max-width: 920px; margin: 0 auto; padding: 48px 0 80px; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+h2 { font-size: 1.3rem; margin: 48px 0 12px; padding-top: 16px; border-top: 1px solid var(--line); }
+h3 { font-size: 1.05rem; margin: 24px 0 8px; }
+p, li { max-width: 72ch; }
+.lede { font-size: 1.12rem; color: var(--muted); margin: 0 0 24px; }
+.answer { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 16px 20px; border-radius: 6px; margin: 24px 0; }
+.answer p { margin: 6px 0; }
+code, pre { font: 0.88em/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 14px 16px; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+.tw { overflow-x: auto; margin: 12px 0 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
+tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ok { color: var(--accent); font-weight: 600; }
+.part { color: var(--warn); font-weight: 600; }
+.no { color: var(--bad); font-weight: 600; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 20px 0; }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.stat b { display: block; font-size: 1.6rem; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.stat span { color: var(--muted); font-size: 0.86rem; }
+.finding { background: var(--warn-soft); border-radius: 6px; padding: 12px 16px; margin: 10px 0; }
+.finding b { color: var(--warn); }
+nav { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.9rem; margin: 0 0 8px; }
+nav a { color: var(--accent); text-decoration: none; }
+a { color: var(--accent); }
+.meta { color: var(--muted); font-size: 0.88rem; }
+</style>
+</head>
+<body>
+<main>
+<p class="meta">Branch <code>sync-research</code> · measured 2026-10-09/10 on a Mac (macOS 27) and a Raspberry Pi 5 (Debian 13)</p>
+<h1>nerve cross-device sync</h1>
+<p class="lede">Can nerve sync, steer, hand off and distribute Claude Code work across your own devices over Nostr, both with and without Tailscale? Below: what was built, what was measured, and what was decided.</p>
+
+<nav><a href="#answer">Answer</a><a href="#reqs">Requirements</a><a href="#numbers">Measurements</a><a href="#findings">Findings</a><a href="#arch">Architecture</a><a href="#landscape">Landscape</a><a href="#decisions">Decisions</a><a href="#use">Try it</a><a href="#next">Limits</a></nav>
+
+<div class="answer" id="answer">
+<p><b>Yes, and it runs.</b> Every requirement works end to end between the real Mac and the real Pi.</p>
+<p><b>Over public Nostr relays with no VPN</b>, latency is 0.5–1 s per hop. <b>With a private relay on the Pi over Tailscale</b>, the same protocol runs at about 16 ms.</p>
+<p>The transport was the easy part. The hard part was <b>getting into a running interactive Claude session</b>. That is solved with Claude's documented hooks plus paste injection, and each edge case was checked empirically.</p>
+</div>
+
+<div class="stats">
+  <div class="stat"><b>15.8 ms</b><span>RTT through the private relay on the Pi, over Tailscale</span></div>
+  <div class="stat"><b>~640 ms</b><span>RTT through public relays, no VPN</span></div>
+  <div class="stat"><b>0.6 s</b><span>to move a 730 KiB session from the Mac to the Pi (20.7 s via a public relay)</span></div>
+  <div class="stat"><b>48</b><span>protocols and frameworks compared</span></div>
+  <div class="stat"><b>16</b><span>experiments, raw output kept</span></div>
+  <div class="stat"><b>39</b><span>new unit tests; clippy, MSRV 1.85 and Linux e2e all pass</span></div>
+</div>
+
+<h2 id="reqs">Your nine requirements</h2>
+<div class="tw"><table>
+<tr><th>#</th><th>Requirement</th><th>Status</th><th>How it works</th></tr>
+<tr><td>1</td><td>View progress on any device</td><td class="ok">Done</td><td>Each device publishes one encrypted state event per peer, on change and every 60 s. It lists sessions, their state, the waiting reason, branch, cost, subagent count and the last 8 transcript lines.</td></tr>
+<tr><td>2</td><td>Send instructions to a running agent elsewhere</td><td class="ok">Done</td><td>The text is pasted into the session's tmux pane or Ghostty tab, then Enter is pressed. Before that, nerve checks the PID still belongs to <code>claude</code>, strips control keys, and refuses anything older than 5 minutes. <code>claude --bg</code> and desktop-app sessions are view-only, because there is no pane to type into.</td></tr>
+<tr><td>3</td><td>View and answer pending questions or decisions</td><td class="ok">Done</td><td><code>nerve sync hook</code> runs as a PermissionRequest hook and as a PreToolUse hook on AskUserQuestion. Permission prompts are always answerable remotely. Questions go remote only in away mode (see Findings).</td></tr>
+<tr><td>4</td><td>Read changes, progress and subagent work</td><td class="ok">Done</td><td><code>fetch diff | log | subagents</code> sends the content back in chunks. The TUI also shows the transcript tail inline.</td></tr>
+<tr><td>5</td><td>Continue the work on another device</td><td class="ok">Done</td><td>Press <code>H</code>, or run <code>nerve sync handoff</code>. It sends a git bundle, the uncommitted patch, untracked files and the transcript. The target runs <code>claude --resume --fork-session</code> in tmux, with an optional follow-up instruction.</td></tr>
+<tr><td>6</td><td>Last-synced status per device; manual sync</td><td class="ok">Done</td><td>Each device shows "last synced 4s ago (19:36:46Z)", and the status bar shows <code>⇄ pi 4s · 1 pending</code>. Press <code>r</code> to sync now.</td></tr>
+<tr><td>7</td><td>Nostr without WireGuard, compared with Tailscale</td><td class="ok">Both measured</td><td>No-VPN mode uses public relays. Tailscale mode uses a private relay on the Pi. You can configure both at once; the first copy to arrive wins.</td></tr>
+<tr><td>8</td><td>TUI management; web UI later</td><td class="ok">TUI done</td><td class="part">The <code>D</code> Devices view and the <code>H</code> handoff picker are done. The wire protocol is plain JSON inside NIP-44, so a nostr-tools PWA can reuse it unchanged.</td></tr>
+<tr><td>9</td><td>Distribute work to the device that can do and verify it</td><td class="ok">Done</td><td><code>nerve sync job --needs … --verify …</code> routes by capability and load. In E16, a Claude on the Mac used nerve to delegate verified work to the Pi.</td></tr>
+</table></div>
+
+<h2 id="numbers">Measurements</h2>
+<p>RTTs are Mac→Pi→Mac round trips timed on one clock, so clock skew can't distort them.</p>
+<div class="tw"><table>
+<tr><th>Transport</th><th>p50 RTT</th><th>Bulk</th><th>Needs</th></tr>
+<tr><td>Private Nostr relay (inside nerve) over Tailscale</td><td class="num">15.8 ms</td><td class="num">730 KiB in 0.6 s</td><td>Tailscale, or any host you can reach</td></tr>
+<tr><td>iroh, direct path (found the LAN path by itself)</td><td class="num">8.5 ms</td><td class="num">14.7 MiB/s</td><td>Nothing, but iroh needs Rust 1.91</td></tr>
+<tr><td>scp over Tailscale (baseline)</td><td class="num">—</td><td class="num">13.8 MiB/s</td><td>Tailscale + ssh</td></tr>
+<tr><td>Public Nostr: relay.snort.social</td><td class="num">538 ms</td><td class="num">—</td><td>Nothing</td></tr>
+<tr><td>Public Nostr: relay.primal.net</td><td class="num">640 ms</td><td class="num">32 KB events in 1.7 s</td><td>Nothing</td></tr>
+<tr><td>Public Nostr: 3 relays, first copy wins</td><td class="num">721 ms</td><td class="num">—</td><td>Nothing</td></tr>
+<tr><td>iroh, forced through the n0 relay</td><td class="num">197 ms</td><td class="num">1.1 MiB/s</td><td>Nothing</td></tr>
+</table></div>
+
+<h3>Live runs of the shipped prototype</h3>
+<div class="tw"><table>
+<tr><th>Run</th><th>What happened</th></tr>
+<tr><td>E10</td><td>An instruction sent from the Mac was typed into the Pi's tmux pane. The Pi's Write permission prompt appeared on the Mac about 4 s later. "allow" was sent, and the file was written on the Pi about 3 s later. The diff was then fetched back to the Mac.</td></tr>
+<tr><td>E11</td><td>With the Pi in away mode, an AskUserQuestion offering [Namaste, Hola] was answered from the Mac. <code>greet.txt</code> = Namaste.</td></tr>
+<tr><td>E12</td><td>A Mac session was handed to the Pi and resumed at a <em>different path</em>. It answered "The secret project codename is BLUE-HERON", which had been told to it on the Mac. It then added <code>mul()</code> on top of the Mac's uncommitted <code>sub()</code>.</td></tr>
+<tr><td>E13</td><td>Three jobs: the <code>linux</code> one went to the Pi and passed verification; the <code>macos</code> one ran on the Mac and passed; the <code>gpu</code> one was refused because no device has a GPU.</td></tr>
+<tr><td>TUI</td><td><code>D</code> → <code>m</code> → type → Enter. The prompt appeared in the view, <code>a</code> approved it, and <code>tui.txt</code> was written on the Pi. This run also exposed a bug where a reorder sent the instruction to the wrong session; fixed, with a regression test.</td></tr>
+<tr><td>E14</td><td>The whole loop again, over public relays only, with no Tailscale.</td></tr>
+<tr><td>E15</td><td>A job was sent while the Pi's agent was down. It was delivered from relay storage 1 s after the agent came back, then ran and passed verification.</td></tr>
+<tr><td>E16</td><td>A Claude on the Mac, given only the CLI, asked the Pi for proof of its platform. nerve routed the job; <code>plat.txt</code> = <code>aarch64</code>, verified.</td></tr>
+</table></div>
+
+<h2 id="findings">Findings that shaped the design</h2>
+<div class="finding"><b>Relays acknowledge events they then drop.</b> nos.lol and nostr.mom returned <code>OK</code> for every event from a new key, then neither delivered nor stored them. Damus banned a test key within minutes. So every command gets an end-to-end ack from the receiving device, each device uses several relays, and the docs list relays verified to deliver.</div>
+<div class="finding"><b>Real size limits are lower than advertised.</b> Some relays topped out at 60 KB, and one accepted only 8 KB from unknown keys. Events are split into 32 KiB chunks, and bulk data goes only through private relays when one is available.</div>
+<div class="finding"><b>Claude's two prompt hooks behave differently.</b> While a PermissionRequest hook waits, the permission dialog stays on screen, so a local keypress and a remote answer race safely. A PreToolUse hook on AskUserQuestion hides the question until it returns. That is why questions only go remote in away mode. Neither hook is told when someone answers locally, so nerve watches the transcript for that.</div>
+<div class="finding"><b>Handoff only needs the project slug to match.</b> Absolute paths inside the transcript didn't matter. <code>--fork-session</code> keeps the two devices from writing to the same history.</div>
+<div class="finding"><b>macOS blocks ad-hoc-signed binaries from reaching LAN IPs</b> because of Local Network Privacy. Tailscale addresses were unaffected.</div>
+
+<h2 id="arch">Architecture</h2>
+<pre><code>Claude session ──PermissionRequest / PreToolUse hook──► nerve sync hook ─┐
+(tmux pane / Ghostty tab)                                                 │ mailbox/
+     ▲ bracketed paste                                                    ▼
+     └─────────────── inject ◄──── sync agent (thread + tokio) ──── handoff / jobs
+                                     │ discovery (same code as the TUI)
+                                     │ NIP-44 envelopes, one per peer
+                  ┌──────────────────┴────────────────────┐
+           ws://pi:7777 (private,               wss://primal, wss://snort
+           Tailscale, bulk lane)                (public, no VPN)
+                  └──────────────────┬────────────────────┘
+                                     ▼
+                       other devices' agents / TUI `D` view</code></pre>
+<p>Two Nostr event kinds:</p>
+<ul>
+<li><b>Kind 30078</b> (addressable): each device's latest state, one copy per recipient. Because the relay keeps only the newest, a closed laptop still shows what it was last doing.</li>
+<li><b>Kind 4590</b> (stored, 24 h expiry): commands, answers, chunked data and jobs. Storage is what lets a sleeping device catch up when it wakes.</li>
+</ul>
+<p>The code follows nerve's existing rules:</p>
+<ul>
+<li>all I/O stays in the worker;</li>
+<li>everything received from the network is wrapped in <code>Sanitised</code>;</li>
+<li>Claude's data dirs come from <code>claude_roots()</code>;</li>
+<li>the PID is re-validated before typing;</li>
+<li>visibility is <code>pub(crate)</code> only.</li>
+</ul>
+
+<h2 id="landscape">Landscape: why Nostr, and what else fits</h2>
+<div class="tw"><table>
+<tr><th>Option</th><th>Verdict</th></tr>
+<tr><td>Claude Code Remote Control</td><td>First-party, excellent for chatting and approving from a phone. It has no handoff, no fleet view and no job routing, and no public API, and it requires a claude.ai login. <b>It complements nerve rather than replacing it.</b></td></tr>
+<tr><td>Happy, Paseo, YepAnywhere</td><td>Mature remote UIs, but they <em>own</em> the Claude process through the Agent SDK. nerve monitors sessions it didn't start, which is why it uses hooks and paste.</td></tr>
+<tr><td>CodeDeck+, ContextVM</td><td>The closest prior art on Nostr. CodeDeck+'s split of event kinds matches ours. ContextVM (MCP over Nostr) is the route to "agents drive other devices" later.</td></tr>
+<tr><td>iroh</td><td>Fastest in testing, with no setup. It needs Rust 1.91 (nerve's MSRV is 1.85) and has no store-and-forward. <b>Planned as the bulk lane.</b></td></tr>
+<tr><td>NATS / MQTT / Zenoh</td><td>Mature, but every device must reach a hub, and none encrypts end to end. Without Tailscale the Pi would have to be exposed.</td></tr>
+<tr><td>Matrix</td><td>You'd get a phone UI for free, but it needs Rust 1.96 and a heavy SDK.</td></tr>
+<tr><td>Tailscale + HTTP</td><td>The simplest option, but it doesn't meet the no-WireGuard goal. Supported here as the fast private-relay setup.</td></tr>
+</table></div>
+<p class="meta">The full survey of 48 options is in <code>research/sync/reports/02-alternatives-survey.md</code>. The Nostr deep dive and the survey of Claude Code control surfaces are alongside it.</p>
+
+<h2 id="decisions">Key decisions</h2>
+<p class="meta">All 14 decisions, with the evidence for each, are in <code>research/sync/DECISIONS.md</code>.</p>
+<ol>
+<li><b>Hooks, not screen scraping.</b> Prompts are answered through hooks. Keystrokes are used only to type new instructions.</li>
+<li><b>Questions go remote only in away mode.</b> Otherwise the person at the keyboard would never see them.</li>
+<li><b>A local answer is detected from the transcript.</b> The hook then withdraws its remote request.</li>
+<li><b>Nostr, built in, behind a cargo feature.</b> nostr-sdk's MSRV is 1.85, the same as nerve's.</li>
+<li><b>Every command is acknowledged end to end.</b> A relay's OK is not proof of delivery.</li>
+<li><b>32 KiB chunks.</b> Bulk data goes over private relays only.</li>
+<li><b>Handoff resumes with <code>--fork-session</code>, inside tmux.</b> It refuses to overwrite a checkout that has uncommitted work.</li>
+<li><b>Replays are blocked twice.</b> Every message type is deduplicated across restarts, and <code>Send</code> has a hard 5-minute age limit.</li>
+<li><b>Short-lived CLI runs never execute peer commands.</b> If a long-running agent exists, they queue to it.</li>
+<li><b>The Devices view selects rows by identity, not by position.</b></li>
+<li><b>MSRV 1.85 is kept</b> by MSRV-aware lock resolution, with zero existing dependencies changed.</li>
+</ol>
+
+<h2 id="use">Try it</h2>
+<p>On one Mac, with no Pi and no internet: <code>research/sync/demo/demo.sh</code> starts a private relay plus a second "device" and opens the TUI (press <code>D</code>). Across real devices:</p>
+<pre><code>cargo build --release --features sync
+nerve sync init --name mac --relay wss://relay.primal.net --relay wss://relay.snort.social
+nerve sync pair pi npub1…            # the Pi's key; run the reverse on the Pi
+nerve sync install-hooks             # start Claude with --settings &lt;printed path&gt;
+nerve sync agent                     # on the Pi (or a systemd service)
+nerve                                # press D: Devices, H: hand off the selected session
+
+nerve sync status
+nerve sync job --needs linux --allow 'Bash(python3 *)' --verify 'grep -q ok out.txt' check -- "write ok to out.txt"</code></pre>
+
+<h2 id="next">Limits and next steps</h2>
+<ul>
+<li><b>Not built yet:</b>
+  <ul>
+  <li>a phone or web client (your brief marked this "later");</li>
+  <li>the iroh bulk lane, which is blocked by the MSRV;</li>
+  <li>NIP-59 gift wrap and NIP-42 relay auth as defaults (both work, but add size and setup);</li>
+  <li>key rotation;</li>
+  <li>typing into <code>--bg</code> sessions.</li>
+  </ul></li>
+<li><b>Not tested:</b>
+  <ul>
+  <li>Two separate networks. Both devices share a home LAN, so the no-VPN runs went through public internet relays, which is the same path a remote laptop would use.</li>
+  <li>The iOS simulator. This Mac has no Xcode, so routing was shown with <code>macos</code>/<code>linux</code> capabilities; <code>ios-sim</code> is auto-detected when Xcode is present.</li>
+  </ul></li>
+<li><b>Next:</b>
+  <ul>
+  <li>a systemd/launchd agent service;</li>
+  <li>a PWA on nostr-tools, with ntfy push from the Pi;</li>
+  <li>an MCP or ContextVM server so agents can call <code>job</code>, <code>send</code> and <code>status</code> as tools;</li>
+  <li>surfacing Remote Control links in the details view.</li>
+  </ul></li>
+</ul>
+</main>
+</body>
+</html>

@@ -75,6 +75,16 @@ impl App {
                 }
                 return;
             }
+            #[cfg(feature = "sync")]
+            Overlay::Devices(_) => {
+                self.handle_devices_key(code);
+                return;
+            }
+            #[cfg(feature = "sync")]
+            Overlay::Handoff { .. } => {
+                self.handle_handoff_key(code);
+                return;
+            }
             Overlay::None => {}
         }
 
@@ -145,6 +155,10 @@ impl App {
             KeyCode::Char('x') => {
                 self.start_kill();
             }
+            #[cfg(feature = "sync")]
+            KeyCode::Char('D') => self.open_devices(),
+            #[cfg(feature = "sync")]
+            KeyCode::Char('H') => self.open_handoff(),
             KeyCode::Char('i') => {
                 if let Some(session) = self.nth_filtered(self.selected) {
                     self.overlay = Overlay::Details { id: session.id.clone() };

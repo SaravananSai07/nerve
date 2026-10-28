@@ -1,0 +1,12 @@
+RESULT nostr kind=1059 giftwrap=true size=512 relays=wss://relay.primal.net: sent=15 recv=15 loss=0.0% min=638.8 p50=704.2 mean=743.7 p95=1020.5 max=1084.7 (ms RTT)
+RESULT   publish-ack(OK from all relays): sent=15 recv=15 loss=0.0% min=313.1 p50=328.7 mean=340.0 p95=364.4 max=452.0 (ms RTT)
+  relay wss://relay.primal.net: accepted=15 rejected=0
+RESULT nostr kind=21059 giftwrap=false size=8192 relays=wss://relay.primal.net: sent=10 recv=10 loss=0.0% min=1271.7 p50=1302.4 mean=1311.8 p95=1373.9 max=1373.9 (ms RTT)
+RESULT   publish-ack(OK from all relays): sent=10 recv=10 loss=0.0% min=337.7 p50=353.3 mean=371.8 p95=480.6 max=480.6 (ms RTT)
+  relay wss://relay.primal.net: accepted=10 rejected=0
+RESULT nostr kind=21059 giftwrap=false size=32768 relays=wss://relay.primal.net: sent=10 recv=10 loss=0.0% min=1563.2 p50=1731.7 mean=2088.7 p95=5283.6 max=5283.6 (ms RTT)
+RESULT   publish-ack(OK from all relays): sent=10 recv=10 loss=0.0% min=332.9 p50=381.9 mean=731.1 p95=3902.5 max=3902.5 (ms RTT)
+  relay wss://relay.primal.net: accepted=10 rejected=0
+RESULT nostr kind=21059 giftwrap=false size=60000 relays=wss://relay.primal.net: sent=10 recv=10 loss=0.0% min=2181.7 p50=2466.1 mean=2912.8 p95=5372.2 max=5372.2 (ms RTT)
+RESULT   publish-ack(OK from all relays): sent=10 recv=10 loss=0.0% min=557.6 p50=684.7 mean=916.6 p95=3185.0 max=3185.0 (ms RTT)
+  relay wss://relay.primal.net: accepted=10 rejected=0

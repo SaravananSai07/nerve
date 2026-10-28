@@ -27,6 +27,10 @@ const BINDINGS: &[HelpLine] = &[
     HelpLine::Entry { key: "Shift+P", desc: "Preview live output" },
     HelpLine::Entry { key: "n", desc: "Rename session" },
     HelpLine::Entry { key: "x", desc: "Kill / stop session" },
+    #[cfg(feature = "sync")]
+    HelpLine::Entry { key: "D", desc: "Devices: other machines' sessions, prompts, jobs" },
+    #[cfg(feature = "sync")]
+    HelpLine::Entry { key: "H", desc: "Hand this session to another device" },
     HelpLine::Header("view"),
     HelpLine::Entry { key: "s", desc: "Cycle sort: stable → state → name → age" },
     HelpLine::Entry { key: "t", desc: "Cycle theme" },

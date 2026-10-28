@@ -466,3 +466,32 @@ end run"#;
     }
     Ok(())
 }
+
+/// Terminal id for a session without the own-terminal probe, which
+/// writes to stdout and so can't run from a headless sync agent.
+#[cfg(feature = "sync")]
+pub(crate) fn terminal_id_headless(target: &SessionTarget) -> Option<String> {
+    let terminals = query_terminals().ok()?;
+    find_terminal_for_session(&terminals, &target.cwd, &target.name, &target.dir_name, None, target.tty.as_deref())
+        .map(|t| t.terminal_id.clone())
+}
+
+/// Type `text` into a terminal as a paste, then press Enter. Ghostty's
+/// `input text` pastes verbatim (no shell expansion; verified with
+/// `$(...)` and quotes), so multi-line instructions arrive intact.
+#[cfg(feature = "sync")]
+pub(crate) fn input_text(terminal_id: &str, text: &str) -> anyhow::Result<()> {
+    const SCRIPT: &str = r#"on run argv
+    set tid to item 1 of argv
+    tell application "Ghostty"
+        input text (item 2 of argv) to terminal id tid
+        delay 0.3
+        send key "enter" to terminal id tid
+    end tell
+end run"#;
+    let output = applescript::run(SCRIPT, &[terminal_id, text])?;
+    if !output.status.success() {
+        anyhow::bail!("ghostty input failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}

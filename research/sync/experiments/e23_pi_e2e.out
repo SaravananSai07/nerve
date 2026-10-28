@@ -1,0 +1,75 @@
+
+=== E23 setup on the Mac, join from the Pi
+nerve setup
+  ✓ created device 'mac' (npub1mfwwjk5…wnxt4r), relays: wss://relay.primal.net wss://relay.snort.social
+Add another device: on it, run
+    nerve setup nerve1eyJ2IjoxLCJuIjoibWFjIiwiayI6ImRhNWNlOTVhOTk1NzZiNjk0ODU2MmRiNWMwNmRiOTI0NTU0NjM5MWJmODZhOGE2OWY0MmEyODBkMDY1YjliODMiLCJzIjoiNWEyYjI4ZDViNzVkNjUyNDNiZDhjMTBkMTJiYTA4NDQiLCJyIjpbIndzczovL3JlbGF5LnByaW1hbC5uZXQiLCJ3c3M6Ly9yZWxheS5zbm9ydC5zb2NpYWwiXX0
+nerve setup
+  ✓ created device 'pi' (npub1twc6jr9…kdajun), relays: wss://relay.primal.net wss://relay.snort.social
+  … asking mac to pair back
+  ✓ paired with mac: mac now trusts 'pi'
+Created symlink '/home/sspi/.config/systemd/user/default.target.wants/nerve-sync.2fa65c5e.service' → '/home/sspi/.config/systemd/user/nerve-sync.2fa65c5e.service'.
+  ✓ background agent runs as systemd user service nerve-sync.2fa65c5e (also while logged out)
+join + service install took 4 s
+  nerve-sync.2fa65c5e.service loaded active running nerve sync agent
+  ✓ device 'pi', 1 peer(s), 2 relay(s)
+  ✓ sync agent running
+  ✓ mod socket /home/sspi/nerve-e23/sync/agent.sock
+  ✗ nerve mod missing or stale: run `nerve setup`
+  ✓ 1 Claude session(s) on this device
+  ✓ relay wss://relay.primal.net connected
+
+=== Claude on the Pi with the nerve mod
+Pi session with the mod, seen from the Mac: b7bf812c-9e59-4138-9144-9fc706759014
+
+=== E24 prompt from the Mac
+13:49:07Z pi ✓ c668eb5dcd1915c2: submitted to the session
+send → ack: .856621000 s
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · mac 3s
+  ⚠ Usage limit reached · limit resets 10:20pm
+    Continuing automatically at 10:20pm · esc to cancel
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+
+=== E25 permission on the Pi, answered from the Mac
+13:49:22Z pi ✓ 4312cabb9c7c2c05: submitted to the session
+prompt visible on the Mac after 149 s: NEVER
+--- Pi screen:
+✻ Cogitated for 0s · done 19:19
+› Prompt from the nerve plugin
+❯ Use the Write tool to write the word pi-ok into e25.txt. Nothing else.
+  ⎿  You've hit your session limit · resets 10:20pm (Asia/Kolkata)
+✻ Cooked for 0s · done 19:19
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ nerve: ⇄ nerve · mac 1s
+  ⚠ Usage limit reached · limit resets 10:20pm
+    Continuing automatically at 10:20pm · esc to cancel
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent
+--- Pi activity:
+13:48:51Z agent up on 2 relay(s), 1 peer(s)
+13:48:52Z mac ✓ 2fd5536cf2dfac89: mac now trusts 'pi'
+13:49:07Z ok c668eb5dcd1915c2: submitted to the session
+13:49:22Z ok 4312cabb9c7c2c05: submitted to the session
+13:51:52Z pi ✗ 2d11141988d3ffb7: request already resolved
+answer → ack: 1.070589000 s
+cat: /home/sspi/nerve-e23-work/e25.txt: No such file or directory
+
+=== E26 hand the Pi session to the Mac, twice
+13:52:03Z mac ✓ 4944bc64b3692344: mac resumed 'nerve-e23-work' in tmux session nerve-b7bf812c at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e23/handoff/nerve-e23-work (6.3s)
+13:51:56Z pi is handing over 'nerve-e23-work' → /var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T//nerve-e23/handoff/nerve-e23-work (new checkout)
+13:52:03Z ok 4944bc64b3692344: mac resumed 'nerve-e23-work' in tmux session nerve-b7bf812c at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e23/handoff/nerve-e23-work (6.3s)
+13:52:00Z handoff 'b7bf812c' → mac: sent 23.6 KiB of 23.0 KiB (5 of 5 chunks) in 3.1s
+13:52:06Z pi ✓ 58a420c953adb105: submitted to the session
+13:52:26Z mac ✓ 6fa483ba91c76fec: mac resumed 'nerve-e23-work' in tmux session nerve-b7bf812c at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e23/handoff/nerve-e23-work (8.7s)
+13:52:03Z ok 4944bc64b3692344: mac resumed 'nerve-e23-work' in tmux session nerve-b7bf812c at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e23/handoff/nerve-e23-work (6.3s)
+13:52:25Z ok 6fa483ba91c76fec: mac resumed 'nerve-e23-work' in tmux session nerve-b7bf812c at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e23/handoff/nerve-e23-work (8.7s)
+13:52:00Z handoff 'b7bf812c' → mac: sent 23.6 KiB of 23.0 KiB (5 of 5 chunks) in 3.1s
+13:52:23Z handoff 'b7bf812c' → mac: sent 6.4 KiB of 26.1 KiB (3 of 5 chunks) in 2.3s
+Mac checkout HEAD: more
+
+=== done
+removed test service nerve-sync.2fa65c5e.service
+research/sync/experiments/e23_pi_e2e.sh: line 25: 62321 Terminated: 15          NERVE_CONFIG_DIR="$mac" "$nerve" sync agent > "$mac/agent.log" 2>&1

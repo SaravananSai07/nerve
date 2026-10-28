@@ -1,0 +1,8 @@
+RESULT nostr kind=25501 giftwrap=false size=512 relays=wss://nos.lol: sent=8 recv=0 loss=100%
+  relay wss://nos.lol: accepted=8 rejected=0
+RESULT nostr kind=25501 giftwrap=false size=512 relays=wss://nostr.mom: sent=8 recv=0 loss=100%
+  relay wss://nostr.mom: accepted=8 rejected=0
+RESULT nostr kind=4501 giftwrap=false size=512 relays=wss://nos.lol: sent=8 recv=0 loss=100%
+  relay wss://nos.lol: accepted=8 rejected=0
+RESULT nostr kind=4501 giftwrap=false size=512 relays=wss://nostr.mom: sent=8 recv=0 loss=100%
+  relay wss://nostr.mom: accepted=8 rejected=0

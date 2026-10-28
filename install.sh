@@ -6,9 +6,12 @@ set -euo pipefail
 # Usage:
 #   ./install.sh                                                 (from a cloned repo)
 #   curl -fsSL https://raw.githubusercontent.com/SaravananSai07/nerve/master/install.sh | bash
+#   ./install.sh --sync [<invite code>]     also set up cross-device sync
 #
 # When run from the repo, builds from source.
 # When run via curl | bash, installs from crates.io.
+# --sync builds with the sync feature, then runs `nerve setup [code]`.
+# On Termux it installs what nerve needs from pkg (rust, git, tmux).
 
 BOLD='\033[1m'
 DIM='\033[2m'
@@ -20,6 +23,25 @@ RESET='\033[0m'
 info()  { printf "${GREEN}✓${RESET} %s\n" "$1"; }
 warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
 err()   { printf "${RED}✗${RESET} %s\n" "$1"; }
+
+SYNC=0
+CODE=""
+for arg in "$@"; do
+    case "$arg" in
+        --sync) SYNC=1 ;;
+        nerve1*) SYNC=1; CODE="$arg" ;;
+        *) printf "unknown argument: %s\n" "$arg"; exit 2 ;;
+    esac
+done
+FEATURES=()
+[[ $SYNC == 1 ]] && FEATURES=(--features sync)
+
+# Termux (Android): no rustup, no glibc. Everything comes from pkg, and
+# nerve is built against Termux's own libc.
+if [[ "${PREFIX:-}" == *com.termux* ]]; then
+    printf "\n${BOLD}Termux detected${RESET}: installing rust, git, tmux from pkg\n"
+    pkg install -y rust git tmux openssh >/dev/null
+fi
 
 printf "\n${BOLD}nerve installer${RESET}\n"
 printf "${DIM}First-time install takes a few minutes — Rust toolchain (if missing)${RESET}\n"
@@ -62,7 +84,7 @@ mkdir -p "$INSTALL_DIR"
 # ---------------------------------------------------------------------------
 if [[ -f "Cargo.toml" ]] && grep -q '^name = "nerve-tui"' Cargo.toml 2>/dev/null; then
     printf "\n${BOLD}Building nerve from source...${RESET}\n"
-    cargo build --release
+    cargo build --release ${FEATURES[@]+"${FEATURES[@]}"}
     SRC_BINARY="$(pwd)/target/release/nerve"
     if [[ ! -f "$SRC_BINARY" ]]; then
         err "Build failed — binary not found at $SRC_BINARY"
@@ -73,7 +95,7 @@ else
     printf "\n${BOLD}Installing nerve from crates.io...${RESET}\n"
     TMP_ROOT="$(mktemp -d)"
     trap 'rm -rf "$TMP_ROOT"' EXIT
-    cargo install nerve-tui --locked --root "$TMP_ROOT" --quiet
+    cargo install nerve-tui --locked --root "$TMP_ROOT" --quiet ${FEATURES[@]+"${FEATURES[@]}"}
     cp "$TMP_ROOT/bin/nerve" "$INSTALL_DIR/nerve"
 fi
 
@@ -157,5 +179,10 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Done
 # ---------------------------------------------------------------------------
+if [[ $SYNC == 1 ]]; then
+    printf "\n${BOLD}Setting up sync${RESET}\n"
+    "$INSTALL_DIR/nerve" setup ${CODE:+"$CODE"}
+fi
+
 printf "\n${GREEN}${BOLD}nerve installed successfully.${RESET}\n"
 printf "Run ${BOLD}nerve${RESET} to start the TUI.\n\n"

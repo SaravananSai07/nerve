@@ -1,0 +1,5 @@
+wss://relay.damus.io: 8K=ok 32K=ok 60K=ok 64K=NO(rate-limited: you are noting too much)
+wss://nos.lol: 8K=ok 32K=ok 60K=ok 64K=NO(invalid: event too large: 65908)
+wss://relay.primal.net: 8K=ok 32K=ok 60K=ok 64K=ok 100K=ok 128K=ok 200K=ok 256K=ok 500K=NO(invalid: event too large: 512372)
+wss://nostr.mom: 8K=ok 32K=ok 60K=ok 64K=NO(invalid: event too large: 65908)
+wss://relay.nostr.net: 8K=ok 32K=ok 60K=ok 64K=ok 100K=ok 128K=ok 200K=ok 256K=NO(relay not connected)

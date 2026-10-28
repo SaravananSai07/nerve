@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nerve sync research</title>
+<style>
+:root {
+  --bg: #f7f7f4; --fg: #1d2021; --muted: #5f6466; --line: #dcddd6; --card: #ffffff;
+  --accent: #2f6f5e; --accent-soft: #e3efe9; --code-bg: #eeeee8;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15181a; --fg: #e6e7e3; --muted: #9aa0a0; --line: #2c3133; --card: #1c2022;
+    --accent: #7cc4ad; --accent-soft: #1f2e29; --code-bg: #23282a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15181a; --fg: #e6e7e3; --muted: #9aa0a0; --line: #2c3133; --card: #1c2022;
+  --accent: #7cc4ad; --accent-soft: #1f2e29; --code-bg: #23282a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--fg);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  display: grid; grid-template-columns: 290px 1fr; }
+aside { border-right: 1px solid var(--line); overflow-y: auto; height: 100vh; position: sticky; top: 0;
+  padding: 16px 12px 40px; background: var(--card); }
+aside h1 { font-size: 16px; margin: 0 4px 4px; }
+aside .sub { color: var(--muted); font-size: 12px; margin: 0 4px 12px; }
+aside input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); margin-bottom: 8px; font: inherit; font-size: 13px; }
+aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  margin: 14px 4px 4px; }
+aside a { display: block; padding: 3px 8px; border-radius: 5px; color: var(--fg); text-decoration: none;
+  font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+aside a:hover { background: var(--accent-soft); }
+aside a.on { background: var(--accent); color: var(--bg); }
+main { min-width: 0; padding: 24px 40px 80px; max-width: 1100px; }
+main .path { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 12px; }
+main iframe { width: 100%; height: calc(100vh - 90px); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+h1, h2, h3, h4 { line-height: 1.25; }
+main h1 { font-size: 26px; } main h2 { font-size: 20px; border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-top: 32px; }
+main h3 { font-size: 16px; margin-top: 24px; }
+a { color: var(--accent); }
+code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 1px 4px; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.45; }
+pre code { background: none; padding: 0; font-size: inherit; }
+table { border-collapse: collapse; margin: 12px 0; display: block; overflow-x: auto; font-size: 13.5px; }
+th, td { border: 1px solid var(--line); padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: var(--accent-soft); }
+blockquote { margin: 12px 0; padding: 4px 14px; border-left: 3px solid var(--accent); color: var(--muted); }
+hr { border: 0; border-top: 1px solid var(--line); margin: 24px 0; }
+#built { display: none; }
+.built { color: var(--muted); font-size: 11px; margin: 16px 4px 0; }
+@media (max-width: 760px) {
+  body { display: block; }
+  aside { position: static; height: auto; max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  main { padding: 16px; }
+}
+</style>
+</head>
+<body>
+<aside>
+  <h1>nerve cross-device sync</h1>
+  <p class="sub">Research, results and prototype source. Works offline.</p>
+  <p class="sub"><a href="../GUIDE.html" style="display:inline;padding:0;white-space:normal;color:var(--accent);font-weight:600">→ Open the guide on its own page</a></p>
+  <input id="q" type="search" placeholder="Filter documents…" aria-label="Filter documents">
+  <nav id="nav"></nav>
+  <p class="built" id="builtline"></p>
+</aside>
+<main id="main"></main>

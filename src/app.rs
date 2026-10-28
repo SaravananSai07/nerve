@@ -144,6 +144,12 @@ enum Overlay {
     },
     ConfirmKill { name: String, id: SessionId, kind: SessionKind, root: std::path::PathBuf },
     ConfirmPreview,
+    /// Paired devices: their sessions, questions, jobs (`--features sync`).
+    #[cfg(feature = "sync")]
+    Devices(crate::tui::devices::DevicesState),
+    /// Pick the device to hand the selected session to.
+    #[cfg(feature = "sync")]
+    Handoff { id: SessionId, cwd: std::path::PathBuf },
     /// Full details of one session, read live each frame. Held by id so a
     /// re-sort can't swap in another session under the user.
     Details { id: SessionId },
@@ -152,6 +158,8 @@ enum Overlay {
 mod discovery;
 mod input;
 mod overlays;
+#[cfg(feature = "sync")]
+mod sync_ui;
 
 pub(crate) struct App {
     paths: Paths,
@@ -196,6 +204,9 @@ pub(crate) struct App {
     /// fresh `ps`) run off the UI thread; drained into the status bar.
     action_tx: std::sync::mpsc::Sender<StatusMessage>,
     action_rx: std::sync::mpsc::Receiver<StatusMessage>,
+    /// Cross-device sync agent, when `nerve sync init` has been run.
+    #[cfg(feature = "sync")]
+    sync: Option<crate::sync::agent::AgentHandle>,
 }
 
 impl App {
@@ -241,6 +252,8 @@ impl App {
             Some(StatusMessage::error(load_errors.join(" | ")))
         };
 
+        #[cfg(feature = "sync")]
+        let sync = crate::sync::start_for_tui(&paths);
         let (action_tx, action_rx) = std::sync::mpsc::channel();
         let claude_roots = crate::detect::claude_roots();
         let claude_installed = claude_roots.iter().any(|r| r.exists());
@@ -285,6 +298,8 @@ impl App {
             discovery_warned: false,
             action_tx,
             action_rx,
+            #[cfg(feature = "sync")]
+            sync,
         }
     }
 
@@ -381,6 +396,14 @@ impl App {
                 continue;
             }
 
+            // Same for the Devices view: it settles which device and row
+            // are selected while drawing, and keeps that.
+            #[cfg(feature = "sync")]
+            let mut devices_ui = match &mut self.overlay {
+                Overlay::Devices(ui) => Some(std::mem::replace(ui, crate::tui::devices::DevicesState::new())),
+                _ => None,
+            };
+
             // Refresh the cached FilteredView before drawing. On
             // steady state (registry version + query unchanged)
             // this is one comparison; only mutations or query
@@ -413,6 +436,7 @@ impl App {
                         update_banner: self.update_banner.as_deref(),
                         search_query: self.search_query.as_deref(),
                         claude_installed: self.claude_installed,
+                        sync_hint: self.sync_hint(),
                     },
                 );
                 match &self.overlay {
@@ -484,6 +508,18 @@ impl App {
                             crate::tui::details::render(frame, &self.theme, session);
                         }
                     }
+                    #[cfg(feature = "sync")]
+                    Overlay::Devices(_) => {
+                        if let (Some(h), Some(ui)) = (&self.sync, devices_ui.as_mut()) {
+                            crate::tui::devices::render(frame, &self.theme, &h.snapshot(), ui);
+                        }
+                    }
+                    #[cfg(feature = "sync")]
+                    Overlay::Handoff { .. } => {
+                        if let Some(h) = &self.sync {
+                            crate::tui::devices::render_handoff_picker(frame, &self.theme, &h.snapshot());
+                        }
+                    }
                     Overlay::None => {}
                 }
             })?;
@@ -491,6 +527,10 @@ impl App {
             // Write back the (possibly clamped) scroll position.
             if let Overlay::Preview { scroll, .. } = &mut self.overlay {
                 *scroll = preview_scroll;
+            }
+            #[cfg(feature = "sync")]
+            if let (Overlay::Devices(ui), Some(d)) = (&mut self.overlay, devices_ui) {
+                *ui = d;
             }
 
             if event::poll(Duration::from_millis(self.config.general.refresh_interval_ms))? {
@@ -540,6 +580,11 @@ impl App {
         }
 
         Ok(())
+    }
+
+    #[cfg(not(feature = "sync"))]
+    fn sync_hint(&self) -> Option<String> {
+        None
     }
 
     fn cycle_theme(&mut self) {
@@ -657,6 +702,8 @@ impl App {
             discovery_warned: false,
             action_tx,
             action_rx,
+            #[cfg(feature = "sync")]
+            sync: None,
         };
         app.apply_discovery(snaps);
         app.apply_filter();

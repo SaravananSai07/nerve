@@ -1,0 +1,15 @@
+### default (direct allowed)
+connect (handshake incl. lookup) 744 ms
+  path[0] Relay(https://aps1-1.relay.n0.iroh.link./) selected=false relay=true rtt=422.221171ms
+  path[0] Ip(192.168.1.17:34020) selected=true relay=false rtt=6.2642ms
+  path[24] Relay(https://aps1-1.relay.n0.iroh.link./) selected=false relay=true rtt=316.761264ms
+  path[24] Ip(192.168.1.17:34020) selected=true relay=false rtt=10.770351ms
+RESULT iroh size=512 relay_only=false no_relay=false: sent=25 recv=25 loss=0.0% min=4.8 p50=8.5 mean=19.5 p95=9.3 max=304.5 (ms RTT)
+RESULT iroh bulk 64 MiB in 4.37s = 14.7 MiB/s
+### relay-only
+connect (handshake incl. lookup) 574 ms
+  path[0] Relay(https://aps1-1.relay.n0.iroh.link./) selected=true relay=true rtt=434.250488ms
+  path[24] Relay(https://aps1-1.relay.n0.iroh.link./) selected=true relay=true rtt=200.647135ms
+RESULT iroh size=512 relay_only=true no_relay=false: sent=25 recv=25 loss=0.0% min=168.6 p50=197.1 mean=201.4 p95=231.1 max=280.0 (ms RTT)
+RESULT iroh bulk 16 MiB in 15.08s = 1.1 MiB/s
+RESULT tailscale scp 64 MiB in 4.63s = 13.8 MiB/s

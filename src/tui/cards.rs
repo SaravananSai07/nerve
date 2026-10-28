@@ -27,6 +27,8 @@ pub(crate) struct RenderContext<'a> {
     pub(crate) update_banner: Option<&'a str>,
     pub(crate) search_query: Option<&'a str>,
     pub(crate) claude_installed: bool,
+    /// "⇄ pi 12s · 1 pending" when cross-device sync is on.
+    pub(crate) sync_hint: Option<String>,
 }
 
 pub(crate) fn render(frame: &mut Frame, area: Rect, ctx: RenderContext<'_>) {
@@ -411,6 +413,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, ctx: &RenderContext<'_>) {
             ]);
         }
     }
+    if let Some(hint) = &ctx.sync_hint {
+        right.insert(0, Span::raw("  "));
+        right.insert(0, Span::styled(hint.clone(), Style::default().fg(theme.processing)));
+    }
     if notifications_muted {
         if !right.is_empty() {
             right.push(Span::raw("  "));
@@ -554,6 +560,7 @@ mod tests {
                     update_banner: None,
                     search_query: None,
                     claude_installed: true,
+                    sync_hint: None,
                 },
             )
         })
