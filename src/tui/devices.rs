@@ -494,7 +494,7 @@ fn render_device(frame: &mut Frame, area: Rect, theme: &Theme, pal: &Palette, p:
 
     if !st.jobs.is_empty() {
         lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(" JOBS", pal.muted.add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(" JOBS & RUNS", pal.muted.add_modifier(Modifier::BOLD))));
         for j in &st.jobs {
             let (mark, c) = match (j.phase.as_str(), j.verified) {
                 ("done", Some(true)) => ("✓ verified", pal.ok),
@@ -508,7 +508,15 @@ fn render_device(frame: &mut Frame, area: Rect, theme: &Theme, pal: &Palette, p:
                 Line::from(vec![
                     Span::styled(format!("{:<28} ", truncate_width(&san(&j.title), 28)), pal.text),
                     Span::styled(format!("{mark:<12}"), Style::default().fg(c)),
-                    Span::styled(format!(" {} turns · ${:.3}", j.turns, j.cost_usd), pal.muted),
+                    Span::styled(
+                        if j.kind == "run" {
+                            let code = j.exit_code.map(|c| format!("exit {c} · ")).unwrap_or_default();
+                            format!(" {code}{} lines{}", j.lines, j.tail.last().map(|l| format!(" · {}", truncate_width(&san(l), 40))).unwrap_or_default())
+                        } else {
+                            format!(" {} turns · ${:.3}", j.turns, j.cost_usd)
+                        },
+                        pal.muted,
+                    ),
                 ]),
             );
             i += 1;

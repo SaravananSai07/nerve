@@ -79,7 +79,7 @@ fn job_dir(spec: &JobSpec, root: &Path) -> PathBuf {
 }
 
 /// Run a job to completion on this thread, sending every status change.
-pub(crate) fn run(spec: JobSpec, device: &str, handoff_root: &Path, claude_root: Option<&Path>, tx: &Sender<JobStatus>) {
+pub(crate) fn run(spec: JobSpec, device: &str, work_root: &Path, claude_root: Option<&Path>, tx: &Sender<JobStatus>) {
     let mut st = JobStatus {
         id: spec.id.clone(),
         title: spec.title.clone(),
@@ -93,7 +93,7 @@ pub(crate) fn run(spec: JobSpec, device: &str, handoff_root: &Path, claude_root:
         let _ = tx.send(st.clone());
     };
     send(&mut st);
-    let dir = job_dir(&spec, handoff_root);
+    let dir = job_dir(&spec, work_root);
     if let Err(e) = prepare_dir(&dir, spec.repo.as_deref()) {
         st.phase = "failed".into();
         st.result = Some(e);

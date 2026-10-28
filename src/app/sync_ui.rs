@@ -42,7 +42,7 @@ impl App {
                 let idx = c as usize - '1' as usize;
                 let Some(h) = &self.sync else { return };
                 let Some(peer) = h.snapshot().peers.get(idx).map(|p| p.name.clone()) else { return };
-                h.request(Request::Handoff { session_id: id.as_str().to_string(), cwd, device: peer.clone(), continue_with: None });
+                h.request(Request::Handoff { session_id: id.as_str().to_string(), cwd, device: peer.clone(), continue_with: None, place: None, force: false });
                 self.overlay = Overlay::None;
                 self.set_status_info(format!("handing off to {peer}… (progress in D)"));
             }

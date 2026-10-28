@@ -24,8 +24,16 @@ pub(crate) struct Fleet {
     pub(crate) peers: BTreeMap<String, String>,
     /// Extra capabilities on top of the detected ones (os, arch, tools).
     pub(crate) caps: Vec<String>,
-    /// Where handed-off sessions and job checkouts land.
+    /// Where a hand-off of a repo that neither `--to <place>` nor
+    /// `path_map` places lands. Unset, such a hand-off is refused.
     pub(crate) handoff_root: Option<PathBuf>,
+    /// Name → absolute directory on *this* device. Peers address places
+    /// by name, so the same name can map to a different path per device.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) places: BTreeMap<String, String>,
+    /// Commands peers may run here (`nerve sync run`).
+    #[serde(skip_serializing_if = "RunConfig::is_empty")]
+    pub(crate) run: RunConfig,
     /// Source path prefix → local prefix, e.g. "/Users/me/SS" = "/home/pi/SS".
     pub(crate) path_map: BTreeMap<String, String>,
     /// When Claude's AskUserQuestion may be answered remotely:
@@ -51,6 +59,8 @@ impl Default for Fleet {
             peers: BTreeMap::new(),
             caps: Vec::new(),
             handoff_root: None,
+            places: BTreeMap::new(),
+            run: RunConfig::default(),
             path_map: BTreeMap::new(),
             remote_questions: "away".into(),
             remote_permissions: true,
@@ -58,6 +68,33 @@ impl Default for Fleet {
             hook_timeout_secs: 600,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct RunConfig {
+    pub(crate) allow: Vec<RunRule>,
+}
+
+impl RunConfig {
+    fn is_empty(&self) -> bool {
+        self.allow.is_empty()
+    }
+}
+
+/// One allowed command. `argv` matches literally, except that a final
+/// `"*"` matches any further arguments (none included).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct RunRule {
+    /// Only inside this place; unset matches any place or directory.
+    pub(crate) place: Option<String>,
+    /// Only inside this absolute directory.
+    pub(crate) cwd: Option<String>,
+    pub(crate) argv: Vec<String>,
+    /// Join the argv with spaces and run it with `sh -c`. A trailing `*`
+    /// then admits arbitrary shell, so keep shell rules literal.
+    pub(crate) shell: bool,
 }
 
 pub(crate) fn sync_dir(paths: &Paths) -> PathBuf {
@@ -111,11 +148,18 @@ impl Fleet {
             .collect()
     }
 
-    pub(crate) fn handoff_root(&self) -> PathBuf {
-        self.handoff_root
-            .clone()
-            .or_else(|| dirs::home_dir().map(|h| h.join("nerve-handoff")))
-            .unwrap_or_else(|| PathBuf::from("/tmp/nerve-handoff"))
+    /// The local directory of place `name`, or what to add to `file`
+    /// (this device's fleet.toml) to define it.
+    pub(crate) fn place(&self, name: &str, file: &Path) -> Result<PathBuf, String> {
+        let add = || format!("add `{name} = \"/abs/path\"` under [places] in {}", file.display());
+        let Some(p) = self.places.get(name) else {
+            return Err(format!("no place '{name}' on {}: {}", self.device, add()));
+        };
+        let p = PathBuf::from(p);
+        if !p.is_absolute() {
+            return Err(format!("place '{name}' on {} is not an absolute path: {}", self.device, add()));
+        }
+        Ok(p)
     }
 
     /// Longest matching `path_map` prefix wins; None when nothing maps.
@@ -226,5 +270,30 @@ mod tests {
         assert_eq!(g.device, "mac");
         assert_eq!(g.peers["pi"], "npub1x");
         assert_eq!(g.remote_questions, "away");
+        let body = std::fs::read_to_string(Fleet::file(dir.path())).unwrap();
+        assert!(!body.contains("[places]") && !body.contains("[run]"), "empty tables stay out of the file");
+    }
+
+    #[test]
+    fn places_and_run_rules_parse_from_toml() {
+        let f: Fleet = toml::from_str(
+            r#"
+device = "pi"
+[places]
+v2-harness = "/home/pi/SS/theerv-app"
+rel = "not/absolute"
+[run]
+allow = [{ place = "v2-harness", argv = ["node", "bin/v2.mjs", "*"] }, { cwd = "/srv", argv = ["make"], shell = true }]
+"#,
+        )
+        .unwrap();
+        let file = Path::new("/c/fleet.toml");
+        assert_eq!(f.place("v2-harness", file).unwrap(), PathBuf::from("/home/pi/SS/theerv-app"));
+        assert!(f.place("rel", file).unwrap_err().contains("absolute"));
+        let e = f.place("nope", file).unwrap_err();
+        assert!(e.contains("[places]") && e.contains("/c/fleet.toml"), "{e}");
+        assert_eq!(f.run.allow.len(), 2);
+        assert_eq!(f.run.allow[0].argv, ["node", "bin/v2.mjs", "*"]);
+        assert!(f.run.allow[1].shell && f.run.allow[1].place.is_none());
     }
 }

@@ -9,6 +9,8 @@
 //! - `inject`: typing into a session's tmux pane / Ghostty tab
 //! - `handoff`: pack/unpack/resume a session on another device
 //! - `jobs`: headless capability-routed jobs
+//! - `runs`: allowlisted plain-command runs
+//! - `places`: files and git refs into named places
 //! - `bins`: executable lookup that survives a service's bare PATH
 //! - `cli`: `nerve sync ...`
 
@@ -23,7 +25,9 @@ pub(crate) mod jobs;
 pub(crate) mod mailbox;
 pub(crate) mod modhub;
 pub(crate) mod pairing;
+pub(crate) mod places;
 pub(crate) mod protocol;
+pub(crate) mod runs;
 pub(crate) mod setup;
 pub(crate) mod spool;
 pub(crate) mod transport;

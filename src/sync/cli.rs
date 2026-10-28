@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::agent::{self, Ctx, Request};
 use super::fleet::{self, Fleet};
 use super::mailbox::{self, Mailbox};
-use super::protocol::{self, Answer, Body, FetchWhat, JobSpec};
+use super::protocol::{self, Answer, Body, FetchWhat, JobSpec, RefMap, RunSpec, XferOffer, XferWhat};
 use super::transport::Transport;
 use crate::paths::Paths;
 use crate::util::sanitize::Sanitised;
@@ -34,8 +34,17 @@ nerve sync — share agent progress across your devices over Nostr
   send <device> <session> <text>     type an instruction into a session
   answer <device> <request> allow|deny|<label>[,<label>...]
   fetch <device> <session> diff|log|subagents
-  handoff <session> <device> [--then <text>]   continue a session elsewhere
+  handoff <session> <device> [--to <place>] [--force] [--then <text>]
+                                     continue a session elsewhere
   job [--on D] [--needs cap,cap] [--allow RULE]... [--verify CMD] [--cwd DIR] [--repo URL] [--model M] <title> -- <prompt>
+  run <device> [--place P | --cwd DIR] [--timeout S] [--wait] -- <cmd> [args...]
+                                     run an allowlisted command; --wait exits with its code
+  put <device> <place> <path>... [--delete] [--wait]
+                                     send files/dirs (relative to the place) into the peer's place
+  get <device> <place> <path>... [--delete] [--wait]
+                                     the same, from the peer into this device's place
+  refs <device> <place> [--pull] [--wait] <src-ref>:<dst-ref>...
+                                     send git refs into exactly <dst-ref> (never checks out)
   away on|off                        route Claude's questions to peers
   hook                               (Claude hook entry point)
 ";
@@ -96,6 +105,10 @@ pub(crate) fn run(paths: &Paths, args: &[String]) -> std::io::Result<()> {
         }
         ["handoff", session, device, rest @ ..] => handoff(paths, &dir, session, device, rest),
         ["job", rest @ ..] => job(&dir, rest),
+        ["run", device, rest @ ..] => run_cmd(&dir, device, rest),
+        ["put", device, place, rest @ ..] => xfer_files(&dir, device, place, rest, false),
+        ["get", device, place, rest @ ..] => xfer_files(&dir, device, place, rest, true),
+        ["refs", device, place, rest @ ..] => xfer_refs(&dir, device, place, rest),
         ["away", "on"] => oneshot(&dir, |_| vec![Request::SetAway(true)], 2),
         ["away", "off"] => oneshot(&dir, |_| vec![Request::SetAway(false)], 2),
         ["hook"] => hook(&dir),
@@ -103,6 +116,9 @@ pub(crate) fn run(paths: &Paths, args: &[String]) -> std::io::Result<()> {
     };
     match result {
         Ok(msg) => {
+            if let Some(code) = msg.strip_prefix(EXIT_PREFIX) {
+                std::process::exit(code.parse().unwrap_or(1));
+            }
             if !msg.is_empty() {
                 println!("{msg}");
             }
@@ -114,6 +130,12 @@ pub(crate) fn run(paths: &Paths, args: &[String]) -> std::io::Result<()> {
         }
     }
 }
+
+/// A command result that is an exit code to leave with, not a message.
+const EXIT_PREFIX: &str = "\0exit:";
+/// `run --wait` exit code when the command never ran (refused, unknown
+/// device, no answer), as `docker run` and `env` use it.
+const NOT_RUN: i32 = 125;
 
 fn usage() -> std::io::Result<()> {
     eprint!("{USAGE}");
@@ -321,13 +343,102 @@ fn run_agent(paths: &Paths, dir: &std::path::Path) -> Result<String, String> {
     }
 }
 
+/// What following the activity log should stop at.
+enum Until {
+    /// The first outcome line of any request (legacy commands).
+    Any,
+    /// The first outcome line for this id.
+    Id(String),
+    /// The end of run `id`: its `run finished` line, or a refusal.
+    RunEnd(String),
+}
+
+/// How a followed request ended.
+struct Ended {
+    ok: bool,
+    /// For runs: the remote exit code.
+    code: Option<i32>,
+}
+
+impl Until {
+    /// Print what matters about `line`; Some once it is the end.
+    fn feed(&self, line: &str) -> Option<Ended> {
+        match self {
+            Self::Any => {
+                println!("{line}");
+                agent::outcome(line).map(|(_, ok, _)| Ended { ok, code: None })
+            }
+            Self::Id(id) => {
+                let o = agent::outcome(line).filter(|(i, _, _)| i == id);
+                if o.is_some() || line.contains(id.as_str()) {
+                    eprintln!("{line}");
+                }
+                o.map(|(_, ok, _)| Ended { ok, code: None })
+            }
+            Self::RunEnd(id) => {
+                // Command output goes to stdout as plain lines, so a
+                // waited-on run pipes like a local one.
+                let mark = format!(" \u{2502} {id} ");
+                if let Some(at) = line.find(&mark) {
+                    println!("{}", &line[at + mark.len()..]);
+                    return None;
+                }
+                let (_, ok, msg) = agent::outcome(line).filter(|(i, _, _)| i == id)?;
+                eprintln!("{line}");
+                if let Some(code) = msg.strip_prefix("run finished: exit ") {
+                    let code = code.split_whitespace().next().and_then(|c| c.parse().ok()).unwrap_or(NOT_RUN);
+                    return Some(Ended { ok, code: Some(code) });
+                }
+                // Accepted: keep following. Refused: it never ran.
+                (!ok).then_some(Ended { ok, code: Some(NOT_RUN) })
+            }
+        }
+    }
+}
+
 /// Run a short-lived agent, issue requests, stay up `secs` for acks.
 fn oneshot(dir: &std::path::Path, reqs: impl FnOnce(&Fleet) -> Vec<Request>, secs: u64) -> Result<String, String> {
+    match drive(dir, reqs, Until::Any, Duration::from_secs(secs), false)? {
+        None if agent::agent_alive(dir) => Ok("handed to the running sync agent; no answer yet (see `nerve sync status`)".into()),
+        _ => Ok(String::new()),
+    }
+}
+
+/// Issue `reqs` through the running agent (spool) or a short-lived one,
+/// then follow the activity until `until` says it ended or `max` passes.
+/// With `detach` and a running agent, return as soon as it is queued.
+fn drive(dir: &std::path::Path, reqs: impl FnOnce(&Fleet) -> Vec<Request>, until: Until, max: Duration, detach: bool) -> Result<Option<Ended>, String> {
     let fleet = load(dir)?;
+    let deadline = Instant::now() + max;
     if agent::agent_alive(dir) {
         // A long-running agent already holds this device's identity;
         // queue through it instead of racing it for the mailbox.
-        return queue_via_file(dir, reqs(&fleet), secs);
+        let log = agent::activity_file(dir);
+        let mut at = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        queue_via_file(dir, reqs(&fleet))?;
+        if detach {
+            return Ok(None);
+        }
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            let Ok(bytes) = std::fs::read(&log) else { continue };
+            if (bytes.len() as u64) < at {
+                at = 0; // rotated
+            }
+            let new = bytes.get(at as usize..).unwrap_or_default();
+            // Only whole lines: the agent may be mid-write.
+            let Some(end) = new.iter().rposition(|b| *b == b'\n') else { continue };
+            at += end as u64 + 1;
+            for line in String::from_utf8_lossy(&new[..end]).lines() {
+                if let Some(e) = until.feed(line) {
+                    return Ok(Some(e));
+                }
+            }
+        }
+        return Ok(None);
+    }
+    if detach {
+        eprintln!("no sync agent runs here, so this command stays until the transfer ends");
     }
     let handle = agent::spawn(Ctx { sync_dir: dir.to_path_buf(), fleet: fleet.clone(), statusline_dir: None, long_lived: false })
         .map_err(|e| e.to_string())?;
@@ -335,20 +446,20 @@ fn oneshot(dir: &std::path::Path, reqs: impl FnOnce(&Fleet) -> Vec<Request>, sec
     for r in reqs(&fleet) {
         handle.request(r);
     }
-    let deadline = Instant::now() + Duration::from_secs(secs);
     let mut printed = 0;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
         let v = handle.snapshot();
-        for line in v.log.iter().skip(printed) {
-            println!("{line}");
-            if line.contains(" ✓ ") || line.contains(" ✗ ") {
-                return Ok(String::new());
+        // The view keeps the last 200 lines; count from its end.
+        let skip = printed.min(v.log.len());
+        for line in v.log.iter().skip(skip) {
+            if let Some(e) = until.feed(line) {
+                return Ok(Some(e));
             }
         }
         printed = v.log.len();
     }
-    Ok(String::new())
+    Ok(None)
 }
 
 fn wait_running(handle: &agent::AgentHandle) -> Result<(), String> {
@@ -366,13 +477,10 @@ fn wait_running(handle: &agent::AgentHandle) -> Result<(), String> {
     Err("timed out connecting to relays".into())
 }
 
-/// Hand requests to the running agent through the spool directory, then
-/// follow its activity log until the outcome (an ack) shows up.
-fn queue_via_file(dir: &std::path::Path, reqs: Vec<Request>, secs: u64) -> Result<String, String> {
+/// Hand requests to the running agent through the spool directory.
+fn queue_via_file(dir: &std::path::Path, reqs: Vec<Request>) -> Result<(), String> {
     let spool = dir.join("spool");
     std::fs::create_dir_all(&spool).map_err(|e| e.to_string())?;
-    let log = agent::activity_file(dir);
-    let start = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     for r in reqs {
         let v = super::spool::encode(&r);
         let id = protocol::new_id();
@@ -380,21 +488,7 @@ fn queue_via_file(dir: &std::path::Path, reqs: Vec<Request>, secs: u64) -> Resul
         std::fs::write(&tmp, v.to_string()).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, spool.join(format!("{id}.json"))).map_err(|e| e.to_string())?;
     }
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    let mut shown = 0usize;
-    while Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(200));
-        let Ok(bytes) = std::fs::read(&log) else { continue };
-        let new = String::from_utf8_lossy(bytes.get(start as usize..).unwrap_or_default()).into_owned();
-        for line in new.lines().skip(shown) {
-            println!("{line}");
-            if line.contains(" ✓ ") || line.contains(" ✗ ") {
-                return Ok(String::new());
-            }
-        }
-        shown = new.lines().count();
-    }
-    Ok("handed to the running sync agent; no answer yet (see `nerve sync status`)".into())
+    Ok(())
 }
 
 fn status(dir: &std::path::Path, json: bool) -> Result<String, String> {
@@ -461,7 +555,16 @@ fn status(dir: &std::path::Path, json: bool) -> Result<String, String> {
                     ));
                 }
                 for j in &d.jobs {
-                    out.push_str(&format!("  job {} '{}': {}\n", j.id, Sanitised::new(j.title.clone()), j.phase));
+                    let title = Sanitised::new(j.title.clone());
+                    if j.kind == "run" {
+                        let code = j.exit_code.map(|c| format!(" · exit {c}")).unwrap_or_default();
+                        out.push_str(&format!("  run {} '{title}': {}{code} · {} line(s)\n", j.id, j.phase, j.lines));
+                        if let Some(last) = j.tail.last() {
+                            out.push_str(&format!("      {}\n", Sanitised::new(last.clone())));
+                        }
+                    } else {
+                        out.push_str(&format!("  job {} '{title}': {}\n", j.id, j.phase));
+                    }
                 }
             }
             _ => out.push_str(&format!("\n{name}: no state yet (never synced, or expired)\n")),
@@ -490,11 +593,18 @@ fn fetch(dir: &std::path::Path, device: &str, session: &str, what: FetchWhat) ->
 }
 
 fn handoff(paths: &Paths, dir: &std::path::Path, session: &str, device: &str, rest: &[&str]) -> Result<String, String> {
-    let continue_with = match rest {
-        ["--then", text @ ..] => Some(text.join(" ")),
-        [] => None,
-        _ => return Err("usage: handoff <session> <device> [--then <text>]".into()),
-    };
+    let (mut place, mut force, mut continue_with) = (None, false, None);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--to" => place = Some(it.next().ok_or("--to needs a place name")?.to_string()),
+            "--force" => force = true,
+            "--then" => {
+                continue_with = Some(it.by_ref().copied().collect::<Vec<_>>().join(" "));
+            }
+            _ => return Err("usage: handoff <session> <device> [--to <place>] [--force] [--then <text>]".into()),
+        }
+    }
     let snaps = crate::detect::claude::discover_sessions(Some(paths.statusline_dir()));
     let snap = snaps
         .iter()
@@ -502,7 +612,7 @@ fn handoff(paths: &Paths, dir: &std::path::Path, session: &str, device: &str, re
         .ok_or_else(|| format!("no running session matches {session}; see `nerve --list`"))?;
     let (sid, cwd) = (snap.id.as_str().to_string(), snap.cwd.clone());
     let device = device.to_string();
-    oneshot(dir, move |_| vec![Request::Handoff { session_id: sid, cwd, device, continue_with }], 120)
+    oneshot(dir, move |_| vec![Request::Handoff { session_id: sid, cwd, device, continue_with, place, force }], 120)
 }
 
 fn job(dir: &std::path::Path, rest: &[&str]) -> Result<String, String> {
@@ -532,4 +642,132 @@ fn job(dir: &std::path::Path, rest: &[&str]) -> Result<String, String> {
     spec.title = if title.is_empty() { prompt.chars().take(40).collect() } else { title.join(" ") };
     spec.prompt = prompt;
     oneshot(dir, move |_| vec![Request::Job { spec, device }], 20)
+}
+
+/// `nerve sync run <device> [--place P | --cwd DIR] [--timeout S] [--wait] -- <argv>`
+fn run_cmd(dir: &std::path::Path, device: &str, rest: &[&str]) -> Result<String, String> {
+    let split = rest.iter().position(|a| *a == "--").ok_or("run needs `-- <command> [args...]`")?;
+    let (flags, argv) = (&rest[..split], &rest[split + 1..]);
+    if argv.is_empty() {
+        return Err("run needs a command after `--`".into());
+    }
+    let mut spec = RunSpec { id: protocol::new_id(), argv: argv.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+    let mut wait = false;
+    let mut it = flags.iter();
+    while let Some(f) = it.next() {
+        let mut val = || it.next().map(|s| s.to_string()).ok_or(format!("{f} needs a value"));
+        match *f {
+            "--place" => spec.place = Some(val()?),
+            "--cwd" => spec.cwd = Some(val()?),
+            "--timeout" => spec.timeout_secs = Some(val()?.parse().map_err(|_| "--timeout takes seconds")?),
+            "--wait" => wait = true,
+            other => return Err(format!("unknown flag {other}")),
+        }
+    }
+    if spec.place.is_some() && spec.cwd.is_some() {
+        return Err("give --place or --cwd, not both".into());
+    }
+    let id = spec.id.clone();
+    let device = device.to_string();
+    let req = move |_: &Fleet| vec![Request::Run { spec, device }];
+    if !wait {
+        return match drive(dir, req, Until::Id(id.clone()), Duration::from_secs(30), false)? {
+            Some(Ended { ok: true, .. }) => Ok(format!("run {id} started; follow it with `nerve sync status`, or use --wait")),
+            Some(_) => Err(format!("run {id} was not started")),
+            None => Err(format!("run {id}: no answer within 30s (is the agent running on that device?)")),
+        };
+    }
+    let max = Duration::from_secs(rest_timeout(flags).map(|t| t + 330).unwrap_or(24 * 3600));
+    match drive(dir, req, Until::RunEnd(id.clone()), max, false)? {
+        Some(Ended { code: Some(c), .. }) => Ok(format!("{EXIT_PREFIX}{c}")),
+        _ => {
+            eprintln!("nerve sync: run {id}: no result before the wait ran out");
+            Ok(format!("{EXIT_PREFIX}{NOT_RUN}"))
+        }
+    }
+}
+
+fn rest_timeout(flags: &[&str]) -> Option<u64> {
+    flags.iter().position(|f| *f == "--timeout").and_then(|i| flags.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+/// How long a waited-on transfer may take before the CLI gives up.
+const XFER_WAIT: Duration = Duration::from_secs(30 * 60);
+
+fn follow_xfer(dir: &std::path::Path, id: String, req: Request, wait: bool) -> Result<String, String> {
+    let until = Until::Id(id.clone());
+    match drive(dir, move |_| vec![req], until, XFER_WAIT, !wait)? {
+        Some(Ended { ok: true, .. }) => Ok(String::new()),
+        Some(_) => Err(format!("transfer {id} failed")),
+        None if !wait => Ok(format!("queued as {id} with the running agent; its outcome goes to {}", agent::activity_file(dir).display())),
+        None => Err(format!("transfer {id}: no outcome within {} minutes", XFER_WAIT.as_secs() / 60)),
+    }
+}
+
+/// `put|get <device> <place> <path>... [--delete] [--wait]`
+fn xfer_files(dir: &std::path::Path, device: &str, place: &str, rest: &[&str], pull: bool) -> Result<String, String> {
+    let (mut delete, mut wait, mut roots) = (false, false, Vec::new());
+    for a in rest {
+        match *a {
+            "--delete" => delete = true,
+            "--wait" => wait = true,
+            f if f.starts_with("--") => return Err(format!("unknown flag {f}")),
+            p => roots.push(super::places::norm_root(p).map(|_| p.to_string())?),
+        }
+    }
+    if roots.is_empty() {
+        return Err(format!("{} needs at least one path relative to the place (`.` for all of it)", if pull { "get" } else { "put" }));
+    }
+    let id = protocol::new_id();
+    let offer = XferOffer { place: place.to_string(), what: XferWhat::Files { roots, delete }, for_req: None };
+    follow_xfer(dir, id.clone(), Request::Xfer { id, device: device.to_string(), offer, pull }, wait)
+}
+
+/// `refs <device> <place> [--pull] [--wait] <src>:<dst>...`
+fn xfer_refs(dir: &std::path::Path, device: &str, place: &str, rest: &[&str]) -> Result<String, String> {
+    let (mut pull, mut wait, mut map) = (false, false, Vec::new());
+    for a in rest {
+        match *a {
+            "--pull" => pull = true,
+            "--wait" => wait = true,
+            f if f.starts_with("--") => return Err(format!("unknown flag {f}")),
+            pair => {
+                let (src, dst) = pair.split_once(':').ok_or_else(|| format!("{pair}: give <src-ref>:<dst-ref>"))?;
+                if src.is_empty() || !dst.starts_with("refs/") {
+                    return Err(format!("{pair}: the destination must be a full ref, e.g. main:refs/remotes/mac/main"));
+                }
+                map.push(RefMap { src: src.to_string(), dst: dst.to_string() });
+            }
+        }
+    }
+    if map.is_empty() {
+        return Err("refs needs at least one <src-ref>:<dst-ref>".into());
+    }
+    let id = protocol::new_id();
+    let offer = XferOffer { place: place.to_string(), what: XferWhat::Refs { map, repo_id: String::new() }, for_req: None };
+    follow_xfer(dir, id.clone(), Request::Xfer { id, device: device.to_string(), offer, pull }, wait)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_end_is_read_from_outcome_lines_not_output() {
+        let u = Until::RunEnd("ab12".into());
+        assert!(u.feed("10:00:00Z pi \u{2502} ab12 \u{2713} looks like an outcome").is_none());
+        assert!(u.feed("10:00:00Z pi \u{2713} ab12: run accepted: node x in /h").is_none(), "accepted is not the end");
+        let e = u.feed("10:00:01Z pi \u{2717} ab12: run finished: exit 3 (exit 3 after 0.1s)").unwrap();
+        assert_eq!((e.ok, e.code), (false, Some(3)));
+        let r = u.feed("10:00:00Z pi \u{2717} ab12: not allowed on pi: …").unwrap();
+        assert_eq!(r.code, Some(NOT_RUN));
+        assert!(u.feed("10:00:00Z pi \u{2717} other: run finished: exit 0 (x)").is_none(), "other ids are ignored");
+    }
+
+    #[test]
+    fn transfers_end_on_their_own_id() {
+        let u = Until::Id("x1".into());
+        assert!(u.feed("10:00:00Z mac \u{2713} y2: something else").is_none());
+        assert!(u.feed("10:00:00Z pi \u{2713} x1: pi place h: 1 file(s) written").unwrap().ok);
+    }
 }

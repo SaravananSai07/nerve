@@ -79,7 +79,16 @@ pub(crate) enum Body {
     /// a key that is not yet a peer.
     PairRequest { secret: String, name: String, relays: Vec<String> },
     JobSubmit(JobSpec),
+    /// Progress of a job or a run; runs carry `kind = "run"`.
     JobUpdate(JobStatus),
+    /// Run one allowlisted command (`nerve sync run`).
+    RunSubmit(RunSpec),
+    /// Send files or git refs into a named place on the recipient. The
+    /// exchange is the hand-off's: `HandoffHave` → `HandoffManifest` →
+    /// `ChunkWant`/`ChunkData` → `Ack`.
+    XferOffer(XferOffer),
+    /// Ask the recipient to send this back as an `XferOffer` (pull).
+    XferGet(XferOffer),
     Ack { re: String, ok: bool, msg: String },
 }
 
@@ -182,6 +191,61 @@ pub(crate) struct HandoffOffer {
     pub(crate) branch: String,
     /// Typed into the resumed session once it is ready.
     pub(crate) continue_with: Option<String>,
+    /// A place on the target to land in (`--to`), instead of `path_map`.
+    #[serde(default)]
+    pub(crate) place: Option<String>,
+    /// Switch an existing checkout that is on another branch.
+    #[serde(default)]
+    pub(crate) force: bool,
+}
+
+/// One allowlisted command, run with argv as given (no shell unless the
+/// matching `[run] allow` entry says so).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct RunSpec {
+    pub(crate) id: String,
+    pub(crate) argv: Vec<String>,
+    /// Run inside this place (its path on the executing device).
+    pub(crate) place: Option<String>,
+    /// Or inside this absolute directory on the executing device.
+    pub(crate) cwd: Option<String>,
+    /// Kill the command after this long; it may otherwise run past the
+    /// 5-minute window, which only bounds *starting* it.
+    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) submitted_by: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct XferOffer {
+    /// Names a directory in each device's `[places]`: senders never need
+    /// to know the remote path.
+    pub(crate) place: String,
+    pub(crate) what: XferWhat,
+    /// The recipient's `XferGet` this answers.
+    #[serde(default)]
+    pub(crate) for_req: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum XferWhat {
+    /// Paths relative to the place. `delete` removes files under the
+    /// directories among them that the sender no longer has.
+    Files { roots: Vec<String>, delete: bool },
+    /// Git refs of the place's repo: sender ref → receiver ref.
+    Refs { map: Vec<RefMap>, repo_id: String },
+}
+
+impl Default for XferWhat {
+    fn default() -> Self {
+        Self::Files { roots: Vec::new(), delete: false }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct RefMap {
+    pub(crate) src: String,
+    pub(crate) dst: String,
 }
 
 /// The target's answer to an offer: commits its copy of the repo
@@ -256,6 +320,15 @@ pub(crate) struct JobStatus {
     pub(crate) tail: Vec<String>,
     pub(crate) result: Option<String>,
     pub(crate) updated_at: u64,
+    /// "" for a Claude job, "run" for a command run.
+    #[serde(default)]
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) exit_code: Option<i32>,
+    /// Output lines seen so far, so a viewer can tell how many of `tail`
+    /// are new since the last update.
+    #[serde(default)]
+    pub(crate) lines: u64,
 }
 
 impl Envelope {
@@ -267,6 +340,11 @@ impl Envelope {
             sent_at: now_secs(),
             body,
         }
+    }
+
+    /// With an id the caller chose, so a CLI can follow its outcome.
+    pub(crate) fn with_id(from: &str, id: &str, body: Body) -> Self {
+        Self { id: id.to_string(), ..Self::new(from, body) }
     }
 
     pub(crate) fn encode(&self) -> String {

@@ -24,10 +24,12 @@ use super::jobs;
 use super::mailbox::Mailbox;
 use super::modhub::{HubEvent, ModHub};
 use super::pairing;
+use super::places::{self, XferPack};
 use super::protocol::{
     self, Blob, Body, DeviceState, Envelope, FetchWhat, HandoffHave, HandoffManifest, HandoffOffer, JobSpec,
-    JobStatus, Reassembly, RemoteSession, TransferStats,
+    JobStatus, Reassembly, RemoteSession, RunSpec, TransferStats, XferOffer, XferWhat,
 };
+use super::runs;
 use super::transport::{Inbound, RelayHealth, Seen, Transport};
 use crate::detect::claude::{discover_sessions_with, ScanCaches};
 use crate::detect::process::ProcessTable;
@@ -107,9 +109,28 @@ pub(crate) fn clock(secs: u64) -> String {
 pub(crate) enum Request {
     To { device: String, body: Body },
     SyncNow,
-    Handoff { session_id: String, cwd: PathBuf, device: String, continue_with: Option<String> },
+    Handoff { session_id: String, cwd: PathBuf, device: String, continue_with: Option<String>, place: Option<String>, force: bool },
     Job { spec: JobSpec, device: Option<String> },
+    /// `spec.id` names the run in the activity log.
+    Run { spec: RunSpec, device: String },
+    /// Files or refs into a place on `device` (`pull`: from it into ours).
+    /// `id` names the transfer in the activity log.
+    Xfer { id: String, device: String, offer: XferOffer, pull: bool },
     SetAway(bool),
+}
+
+/// An outcome line in the activity log: `<clock> <device> ✓|✗ <id>: <msg>`.
+/// Parsed by position, so a ✓ inside command output never counts.
+pub(crate) fn outcome(line: &str) -> Option<(&str, bool, &str)> {
+    let mut it = line.splitn(4, ' ');
+    let (_clock, _from, mark, rest) = (it.next()?, it.next()?, it.next()?, it.next()?);
+    let ok = match mark {
+        "\u{2713}" => true,
+        "\u{2717}" => false,
+        _ => return None,
+    };
+    let (id, msg) = rest.split_once(": ").unwrap_or((rest.trim_end_matches(':'), ""));
+    Some((id, ok, msg))
 }
 
 pub(crate) struct AgentHandle {
@@ -209,33 +230,88 @@ struct Agent {
     mod_cmds: HashMap<String, PublicKey>,
     open_sub: Option<nostr_sdk::prelude::SubscriptionId>,
     fleet_mtime: Option<std::time::SystemTime>,
+    /// Pulls this device asked for: get id → the peer asked.
+    pending_gets: HashMap<String, PublicKey>,
+    /// Runs this device submitted: id → output lines already logged.
+    my_runs: HashMap<String, u64>,
 }
 
-/// A finished pack from the packing thread: (offer id, pack + its index).
-type Packed = (String, Result<(Pack, FileRef), String>);
+/// A finished pack from the packing thread: (offer id, its files + index).
+type Packed = (String, Result<(Vec<FileRef>, FileRef), String>);
+
+#[derive(Clone)]
+enum OutJob {
+    Handoff { session_id: String, cwd: PathBuf },
+    Xfer { offer: XferOffer, base: PathBuf },
+}
 
 struct Outgoing {
     to: PublicKey,
     device: String,
-    session_id: String,
-    cwd: PathBuf,
+    label: String,
+    job: OutJob,
     started: Instant,
     /// Every chunk id the pack (and its index) uses.
     ids: Vec<String>,
     stats: TransferStats,
 }
 
+enum InJob {
+    Handoff(HandoffOffer),
+    Xfer(XferOffer),
+}
+
+impl InJob {
+    fn label(&self) -> String {
+        match self {
+            Self::Handoff(o) => o.name.clone(),
+            Self::Xfer(o) => format!("place {}", o.place),
+        }
+    }
+
+    fn for_req(&self) -> Option<String> {
+        match self {
+            Self::Handoff(_) => None,
+            Self::Xfer(o) => o.for_req.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Parsed {
+    Handoff(Pack),
+    Xfer(XferPack),
+}
+
+impl Parsed {
+    fn files(&self) -> Vec<FileRef> {
+        match self {
+            Self::Handoff(p) => p.files.clone(),
+            Self::Xfer(p) => p.file_refs(),
+        }
+    }
+}
+
 struct Incoming {
     from: PublicKey,
-    offer: HandoffOffer,
+    job: InJob,
     dest: PathBuf,
     index: Option<FileRef>,
-    pack: Option<Pack>,
+    pack: Option<Parsed>,
     /// The sender said it has pushed everything it thinks we lack.
     pushed: bool,
     asks: u32,
     started: Instant,
     unpacking: bool,
+    /// Chunks (and their bytes) that came over the wire for this transfer.
+    got_chunks: usize,
+    got_bytes: u64,
+}
+
+impl Incoming {
+    fn new(from: PublicKey, job: InJob, dest: PathBuf) -> Self {
+        Self { from, job, dest, index: None, pack: None, pushed: false, asks: 0, started: Instant::now(), unpacking: false, got_chunks: 0, got_bytes: 0 }
+    }
 }
 
 const HEARTBEAT: Duration = Duration::from_secs(60);
@@ -333,6 +409,8 @@ async fn run(ctx: Ctx, view: Arc<Mutex<SyncView>>, rx: Receiver<Request>) {
         mod_cmds: HashMap::new(),
         open_sub: None,
         fleet_mtime: None,
+        pending_gets: HashMap::new(),
+        my_runs: HashMap::new(),
     };
     let mut notifications = a.t.client.notifications();
     let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -557,9 +635,19 @@ impl Agent {
                 | Body::HandoffManifest(_)
                 | Body::ChunkData { .. }
                 | Body::JobSubmit(_)
+                | Body::RunSubmit(_)
+                | Body::XferOffer(_)
+                | Body::XferGet(_)
                 | Body::PairRequest { .. }
         );
-        if is_work && !self.ctx.long_lived {
+        // Except the replies to a pull this very agent asked for.
+        let asked_for = match &inb.envelope.body {
+            Body::XferOffer(o) => o.for_req.as_ref().is_some_and(|r| self.pending_gets.get(r) == Some(&inb.sender)),
+            Body::HandoffManifest(m) => self.incoming.contains_key(&m.re),
+            Body::ChunkData { re, .. } => self.incoming.contains_key(re),
+            _ => false,
+        };
+        if is_work && !asked_for && !self.ctx.long_lived {
             return;
         }
         if !self.seen.first(&id) {
@@ -653,15 +741,22 @@ impl Agent {
             // Already paired (the joiner re-ran setup): just confirm.
             Body::PairRequest { .. } => self.ack(&inb.sender, &id, true, format!("{} already trusts '{from}'", self.ctx.fleet.device)).await,
             Body::JobSubmit(spec) => self.accept_job(&inb.sender, &id, spec).await,
+            Body::RunSubmit(spec) => {
+                let age = now.saturating_sub(inb.envelope.sent_at.min(inb.created_at));
+                self.accept_run(&inb.sender, &id, age, spec).await;
+            }
+            Body::XferOffer(offer) => self.on_xfer_offer(&inb.sender, &from, id.clone(), offer).await,
+            Body::XferGet(offer) => self.on_xfer_get(inb.sender, &from, &id, offer).await,
             Body::JobUpdate(st) => {
                 if let Ok(mut v) = self.view.lock() {
                     if let Some(p) = v.peers.iter_mut().find(|p| p.name == from) {
                         p.jobs.insert(st.id.clone(), st.clone());
                     }
-                    if st.phase == "done" || st.phase == "failed" {
+                    if st.kind != "run" && (st.phase == "done" || st.phase == "failed") {
                         v.note(format!("job '{}' on {from}: {}", st.title, st.phase));
                     }
                 }
+                self.on_run_update(&from, &st);
             }
             Body::Ack { re, ok, msg } => {
                 // A finished hand-off: the target now holds every chunk of
@@ -673,6 +768,14 @@ impl Agent {
                     self.refresh_transfers();
                 }
                 self.note(format!("{from} {} {re}: {msg}", if ok { "✓" } else { "✗" }));
+                // The sender gave up on a pull we asked for: report it
+                // under the pull's id, which is what the CLI follows.
+                if let Some(get) = self.incoming.remove(&re).and_then(|i| i.job.for_req()) {
+                    self.pending_gets.remove(&get);
+                    self.note(format!("{from} ✗ {get}: {msg}"));
+                    self.refresh_transfers();
+                }
+                self.pending_gets.remove(&re);
             }
         }
     }
@@ -772,7 +875,8 @@ impl Agent {
     // ---- hand-off: offer → have → manifest → want → data → ack ----
 
     /// Source, step 1: tell the target what's coming and which repo it is.
-    async fn start_handoff(&mut self, pk: PublicKey, device: String, session_id: String, cwd: PathBuf, continue_with: Option<String>) {
+    /// `asks` carries what the user chose: `continue_with`, `place`, `force`.
+    async fn start_handoff(&mut self, pk: PublicKey, device: String, session_id: String, cwd: PathBuf, asks: HandoffOffer) {
         let m = match tokio::task::spawn_blocking({
             let cwd = cwd.clone();
             move || handoff::describe(&cwd)
@@ -790,7 +894,7 @@ impl Agent {
             repo_name: m.repo_name,
             repo_id: m.repo_id,
             branch: m.branch,
-            continue_with,
+            ..asks
         };
         let env = Envelope::new(&self.ctx.fleet.device, Body::HandoffOffer(offer));
         let offer_id = env.id.clone();
@@ -798,17 +902,19 @@ impl Agent {
             return self.note(format!("handoff offer failed: {e}"));
         }
         self.note(format!("offered '{session_id:.8}' to {device}; waiting for it to say what it has"));
+        let label = format!("handoff '{session_id:.8}'");
         self.outgoing.insert(
             offer_id,
-            Outgoing { to: pk, device, session_id, cwd, started: Instant::now(), ids: Vec::new(), stats: TransferStats::default() },
+            Outgoing { to: pk, device, label, job: OutJob::Handoff { session_id, cwd }, started: Instant::now(), ids: Vec::new(), stats: TransferStats::default() },
         );
     }
 
     /// Target, step 2: report the commits our copy of the repo has.
     async fn on_offer(&mut self, from: &PublicKey, name: &str, offer_id: String, offer: HandoffOffer) {
-        let mapped = self.ctx.fleet.map_path(&offer.src_cwd);
-        let meta = handoff::Manifest { repo_name: offer.repo_name.clone(), ..Default::default() };
-        let dest = handoff::destination(&meta, mapped, &self.ctx.fleet.handoff_root());
+        let dest = match handoff::destination(&offer, &self.ctx.fleet, &Fleet::file(&self.ctx.sync_dir)) {
+            Ok(d) => d,
+            Err(e) => return self.ack(from, &offer_id, false, e).await,
+        };
         let (d, rid) = (dest.clone(), offer.repo_id.clone());
         let tips = tokio::task::spawn_blocking(move || handoff::local_tips(&d, &rid)).await.unwrap_or_default();
         self.note(format!(
@@ -817,24 +923,30 @@ impl Agent {
             dest.display(),
             if tips.is_empty() { "new checkout".to_string() } else { format!("have {} commit tip(s)", tips.len()) }
         ));
-        self.incoming.insert(
-            offer_id.clone(),
-            Incoming { from: *from, offer, dest, index: None, pack: None, pushed: false, asks: 0, started: Instant::now(), unpacking: false },
-        );
+        self.incoming.insert(offer_id.clone(), Incoming::new(*from, InJob::Handoff(offer), dest));
         self.reply(from, Body::HandoffHave(HandoffHave { re: offer_id, tips })).await;
     }
 
     /// Source, step 3: pack against what the target has, off the loop.
     fn on_have(&mut self, from: &PublicKey, have: HandoffHave) {
         let Some(o) = self.outgoing.get(&have.re).filter(|o| o.to == *from) else { return };
-        let (cwd, sid, store, tx, re) = (o.cwd.clone(), o.session_id.clone(), self.store.clone(), self.pack_tx.clone(), have.re.clone());
+        let (job, store, tx, re) = (o.job.clone(), self.store.clone(), self.pack_tx.clone(), have.re.clone());
         std::thread::spawn(move || {
-            let roots = crate::detect::claude_roots();
-            let res = handoff::pack(&cwd, &sid, &roots, &have.tips, &store).and_then(|p| {
-                let json = serde_json::to_vec(&p).map_err(|e| e.to_string())?;
-                let index = store.add_file("index", &json).map_err(|e| e.to_string())?;
-                Ok((p, index))
-            });
+            let index = |json: Vec<u8>| store.add_file("index", &json).map_err(|e| e.to_string());
+            let res = match job {
+                OutJob::Handoff { session_id, cwd } => {
+                    let roots = crate::detect::claude_roots();
+                    handoff::pack(&cwd, &session_id, &roots, &have.tips, &store)
+                        .and_then(|p| Ok((p.files.clone(), index(serde_json::to_vec(&p).map_err(|e| e.to_string())?)?)))
+                }
+                OutJob::Xfer { offer, base } => {
+                    let pack = match &offer.what {
+                        XferWhat::Files { roots, delete } => places::pack_files(&base, roots, *delete, &store),
+                        XferWhat::Refs { map, .. } => places::pack_refs(&base, map, &have.tips, &store),
+                    };
+                    pack.and_then(|p| Ok((p.file_refs(), index(serde_json::to_vec(&p).map_err(|e| e.to_string())?)?)))
+                }
+            };
             let _ = tx.send((re, res));
         });
     }
@@ -844,20 +956,20 @@ impl Agent {
     async fn drain_packs(&mut self) {
         while let Ok((re, res)) = self.pack_rx.try_recv() {
             let Some(o) = self.outgoing.get_mut(&re) else { continue };
-            let (pack, index) = match res {
+            let (files, index) = match res {
                 Ok(x) => x,
                 Err(e) => {
                     let to = o.to;
                     self.outgoing.remove(&re);
-                    self.note(format!("handoff pack failed: {e}"));
+                    self.note(format!("{} \u{2717} {re}: could not pack: {e}", self.ctx.fleet.device));
                     self.reply(&to, Body::Ack { re, ok: false, msg: format!("sender could not pack: {e}") }).await;
                     continue;
                 }
             };
-            let mut all: Vec<FileRef> = pack.files.clone();
+            o.stats.files = files.len();
+            let mut all: Vec<FileRef> = files;
             all.push(index.clone());
             o.ids = chunks::needed(&all, &Default::default());
-            o.stats.files = pack.files.len();
             // The index travels too, so it counts towards the total.
             o.stats.total_bytes = all.iter().map(|f| f.size).sum();
             o.stats.chunks = o.ids.len();
@@ -908,8 +1020,8 @@ impl Agent {
             o.stats.sent_chunks += sent_chunks;
             let st = o.stats;
             format!(
-                "handoff '{:.8}' → {}: sent {} of {} ({} of {} chunks) in {:.1}s",
-                o.session_id,
+                "{} → {}: sent {} of {} ({} of {} chunks) in {:.1}s",
+                o.label,
                 o.device,
                 human(st.sent_bytes),
                 human(st.total_bytes),
@@ -945,9 +1057,13 @@ impl Agent {
         if last {
             inc.pushed = true;
         }
+        inc.got_chunks += data.len();
         for (id, b64) in data {
             match protocol::base64_decode(&b64) {
                 Ok(bytes) => {
+                    if let Some(i) = self.incoming.get_mut(re) {
+                        i.got_bytes += bytes.len() as u64;
+                    }
                     if let Err(e) = self.store.put_verified(&id, &bytes) {
                         self.note(format!("dropped a chunk: {e}"));
                     }
@@ -969,14 +1085,20 @@ impl Agent {
         let Some(index) = inc.index.clone() else { return };
         if inc.pack.is_none() {
             match store.assemble(&index) {
-                Ok(bytes) => match serde_json::from_slice::<Pack>(&bytes) {
-                    Ok(p) => inc.pack = Some(p),
-                    Err(e) => {
-                        let (from, why) = (inc.from, format!("bad hand-off index: {e}"));
-                        self.incoming.remove(re);
-                        return self.ack(&from, re, false, why).await;
+                Ok(bytes) => {
+                    let parsed = match &inc.job {
+                        InJob::Handoff(_) => serde_json::from_slice::<Pack>(&bytes).map(Parsed::Handoff),
+                        InJob::Xfer(_) => serde_json::from_slice::<XferPack>(&bytes).map(Parsed::Xfer),
+                    };
+                    match parsed {
+                        Ok(p) => inc.pack = Some(p),
+                        Err(e) => {
+                            let (from, why) = (inc.from, format!("bad transfer index: {e}"));
+                            self.incoming.remove(re);
+                            return self.ack(&from, re, false, why).await;
+                        }
                     }
-                },
+                }
                 Err(missing) => {
                     if inc.pushed {
                         self.want(re, missing).await;
@@ -985,8 +1107,9 @@ impl Agent {
                 }
             }
         }
-        let pack = inc.pack.clone().unwrap_or_default();
-        let missing = chunks::needed(&pack.files, &Default::default()).into_iter().filter(|c| !store.has(c)).collect::<Vec<_>>();
+        let Some(pack) = inc.pack.clone() else { return };
+        let files = pack.files();
+        let missing = chunks::needed(&files, &Default::default()).into_iter().filter(|c| !store.has(c)).collect::<Vec<_>>();
         if !missing.is_empty() {
             if inc.pushed {
                 self.want(re, missing).await;
@@ -995,40 +1118,69 @@ impl Agent {
             return;
         }
         inc.unpacking = true;
-        let (from, offer, dest, started) = (inc.from, inc.offer.clone(), inc.dest.clone(), inc.started);
+        let (from, dest, started) = (inc.from, inc.dest.clone(), inc.started);
         // Everything is here: the sender may assume we hold these from now on.
-        let mut ids = chunks::needed(&pack.files, &Default::default());
+        let mut ids = chunks::needed(&files, &Default::default());
         ids.extend(index.chunks.iter().cloned());
-        let _ = store.mark_known(&from.to_hex(), ids);
+        let _ = store.mark_known(&from.to_hex(), ids.clone());
+        let total = {
+            let mut u: std::collections::HashSet<&String> = ids.iter().collect();
+            u.extend(index.chunks.iter());
+            u.len()
+        };
+        let moved = format!(
+            "received {} in {} of {} chunks ({} reused)",
+            human(inc.got_bytes),
+            inc.got_chunks.min(total),
+            total,
+            total.saturating_sub(inc.got_chunks)
+        );
+        let for_req = inc.job.for_req();
+        let job = match &inc.job {
+            InJob::Handoff(o) => InJob::Handoff(o.clone()),
+            InJob::Xfer(o) => InJob::Xfer(o.clone()),
+        };
         let fleet = self.ctx.fleet.clone();
         let sync_dir = self.ctx.sync_dir.clone();
         let tx = self.handoff_tx.clone();
         let claude_root = crate::detect::claude_roots().into_iter().next().unwrap_or_else(|| PathBuf::from(".claude"));
         let me = self.ctx.fleet.device.clone();
         let re = re.to_string();
-        let mod_ready = super::modhub::socket_path(&sync_dir);
         std::thread::spawn(move || {
-            let msg = (|| -> Result<String, String> {
-                let inst = handoff::unpack(&pack, &dest, &store, &claude_root)?;
-                let settings = sync_dir.join("claude-settings.json");
-                let tmux = handoff::resume_in_tmux(&inst, &claude_root, &settings)?;
-                if fleet.auto_trust_handoffs {
-                    handoff::accept_trust_dialog(&tmux);
+            let msg = match (job, pack) {
+                (InJob::Handoff(offer), Parsed::Handoff(pack)) => (|| -> Result<String, String> {
+                    let inst = handoff::unpack(&pack, &dest, &store, &claude_root, offer.force)?;
+                    let settings = sync_dir.join("claude-settings.json");
+                    let tmux = handoff::resume_in_tmux(&inst, &claude_root, &settings)?;
+                    if fleet.auto_trust_handoffs {
+                        handoff::accept_trust_dialog(&tmux);
+                    }
+                    if let Some(text) = offer.continue_with.as_deref().filter(|t| !t.trim().is_empty()) {
+                        // Give the TUI time to load the conversation first.
+                        std::thread::sleep(Duration::from_secs(4));
+                        let pane = inject::InputTarget::TmuxPane(format!("{tmux}:"));
+                        inject::type_into(&pane, text)?;
+                    }
+                    Ok(format!("{me} resumed '{}' in tmux session {tmux} at {} ({:.1}s)", offer.name, inst.cwd.display(), started.elapsed().as_secs_f64()))
+                })()
+                .map_err(|e| format!("handoff failed: {e}")),
+                (InJob::Xfer(offer), Parsed::Xfer(pack)) => {
+                    let done = match (&offer.what, &pack) {
+                        (XferWhat::Files { .. }, XferPack::Files { .. }) => places::apply_files(&pack, &dest, &store)
+                            .map(|a| format!("{} file(s) written, {} unchanged, {} deleted", a.written, a.unchanged, a.deleted)),
+                        (XferWhat::Refs { .. }, XferPack::Refs { .. }) => places::apply_refs(&pack, &dest, &store).map(|l| l.join("; ")),
+                        _ => Err("transfer index does not match its offer".into()),
+                    };
+                    done.map(|d| format!("{me} place {}: {d}; {moved} in {:.1}s", offer.place, started.elapsed().as_secs_f64()))
+                        .map_err(|e| format!("{me} place {}: {e}", offer.place))
                 }
-                if let Some(text) = offer.continue_with.as_deref().filter(|t| !t.trim().is_empty()) {
-                    // Give the TUI time to load the conversation first.
-                    std::thread::sleep(Duration::from_secs(4));
-                    let pane = inject::InputTarget::TmuxPane(format!("{tmux}:"));
-                    inject::type_into(&pane, text)?;
-                }
-                let _ = mod_ready;
-                Ok(format!("{me} resumed '{}' in tmux session {tmux} at {} ({:.1}s)", offer.name, inst.cwd.display(), started.elapsed().as_secs_f64()))
-            })();
+                _ => Err("transfer index does not match its offer".into()),
+            };
             let (ok, text) = match msg {
                 Ok(t) => (true, t),
-                Err(e) => (false, format!("handoff failed: {e}")),
+                Err(e) => (false, e),
             };
-            let _ = tx.send(serde_json::json!({"to": from.to_hex(), "re": re, "ok": ok, "msg": text}).to_string());
+            let _ = tx.send(serde_json::json!({"to": from.to_hex(), "re": re, "ok": ok, "msg": text, "for_req": for_req}).to_string());
         });
         self.refresh_transfers();
     }
@@ -1050,12 +1202,12 @@ impl Agent {
     fn refresh_transfers(&self) {
         let mut t: Vec<(String, usize, usize)> = Vec::new();
         for o in self.outgoing.values() {
-            t.push((format!("→ {} {:.8}", o.device, o.session_id), o.stats.sent_chunks, o.stats.chunks));
+            t.push((format!("→ {} {}", o.device, o.label), o.stats.sent_chunks, o.stats.chunks));
         }
         for i in self.incoming.values() {
-            let total = i.pack.as_ref().map(|p| chunks::needed(&p.files, &Default::default())).unwrap_or_default();
+            let total = i.pack.as_ref().map(|p| chunks::needed(&p.files(), &Default::default())).unwrap_or_default();
             let have = total.iter().filter(|c| self.store.has(c)).count();
-            t.push((format!("← {}", i.offer.name), have, total.len()));
+            t.push((format!("← {}", i.job.label()), have, total.len()));
         }
         if let Ok(mut v) = self.view.lock() {
             v.transfers = t;
@@ -1195,7 +1347,155 @@ impl Agent {
             self.incoming.remove(re);
             self.refresh_transfers();
             self.publish_now = true;
-            self.ack(&pk, re, ok, msg).await;
+            self.ack(&pk, re, ok, msg.clone()).await;
+            // A pull this device asked for: its CLI follows the get's id.
+            if let Some(get) = v["for_req"].as_str() {
+                self.pending_gets.remove(get);
+                let from = self.peer_name(&pk).unwrap_or_default();
+                self.note(format!("{from} {} {get}: {msg}", if ok { "\u{2713}" } else { "\u{2717}" }));
+            }
+        }
+    }
+
+    // ---- places: files and refs ----
+
+    /// Source: offer files or refs from one of our places to `pk`.
+    async fn start_xfer(&mut self, pk: PublicKey, device: &str, id: &str, mut offer: XferOffer) -> Result<(), String> {
+        let base = self.ctx.fleet.place(&offer.place, &Fleet::file(&self.ctx.sync_dir))?;
+        let label = match &mut offer.what {
+            XferWhat::Files { roots, delete } => {
+                for r in roots.iter() {
+                    let rel = places::norm_root(r)?;
+                    let p = if rel.is_empty() { base.clone() } else { base.join(&rel) };
+                    if std::fs::symlink_metadata(&p).is_err() {
+                        return Err(format!("{r} does not exist in place {} ({})", offer.place, base.display()));
+                    }
+                }
+                format!("files {} in {}{}", roots.join(" "), offer.place, if *delete { " (--delete)" } else { "" })
+            }
+            XferWhat::Refs { map, repo_id } => {
+                let b = base.clone();
+                let repo = tokio::task::spawn_blocking(move || places::place_repo(&b).map(|r| (places::this_repo_id(&r), r)))
+                    .await
+                    .map_err(|e| e.to_string())??;
+                *repo_id = repo.0;
+                let pairs: Vec<String> = map.iter().map(|m| format!("{}:{}", m.src, m.dst)).collect();
+                format!("refs {} in {}", pairs.join(" "), offer.place)
+            }
+        };
+        // The id in the label puts it on every progress line the CLI follows.
+        let label = format!("{label} [{id}]");
+        let env = Envelope::with_id(&self.ctx.fleet.device, id, Body::XferOffer(offer.clone()));
+        self.t.send(&pk, &env).await?;
+        self.note(format!("offered {label} to {device}"));
+        self.outgoing.insert(
+            id.to_string(),
+            Outgoing { to: pk, device: device.to_string(), label, job: OutJob::Xfer { offer, base }, started: Instant::now(), ids: Vec::new(), stats: TransferStats::default() },
+        );
+        self.refresh_transfers();
+        Ok(())
+    }
+
+    /// Target: check the place and what it may receive, then report what
+    /// it already has (commit tips, for refs) so the sender packs less.
+    async fn on_xfer_offer(&mut self, from: &PublicKey, name: &str, offer_id: String, offer: XferOffer) {
+        let fleet = self.ctx.fleet.clone();
+        let file = Fleet::file(&self.ctx.sync_dir);
+        let o = offer.clone();
+        let checked = tokio::task::spawn_blocking(move || -> Result<(PathBuf, Vec<String>), String> {
+            let dest = fleet.place(&o.place, &file)?;
+            match &o.what {
+                XferWhat::Files { roots, .. } => {
+                    for r in roots {
+                        places::norm_root(r)?;
+                    }
+                    Ok((dest, Vec::new()))
+                }
+                XferWhat::Refs { map, repo_id } => {
+                    let repo = places::place_repo(&dest)?;
+                    let mine = places::this_repo_id(&repo);
+                    if !repo_id.is_empty() && !mine.is_empty() && *repo_id != mine {
+                        return Err(format!("place '{}' on {} holds a different repository", o.place, fleet.device));
+                    }
+                    for m in map {
+                        places::check_dst(&repo, &m.dst)?;
+                    }
+                    Ok((dest, places::repo_tips(&repo)))
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        let (dest, tips) = match checked {
+            Ok(x) => x,
+            Err(e) => {
+                if let Some(get) = &offer.for_req {
+                    self.pending_gets.remove(get);
+                    self.note(format!("{} \u{2717} {get}: {e}", self.ctx.fleet.device));
+                }
+                return self.ack(from, &offer_id, false, e).await;
+            }
+        };
+        self.note(format!("{name} is sending into place {} → {}", offer.place, dest.display()));
+        self.incoming.insert(offer_id.clone(), Incoming::new(*from, InJob::Xfer(offer), dest));
+        self.refresh_transfers();
+        self.reply(from, Body::HandoffHave(HandoffHave { re: offer_id, tips })).await;
+    }
+
+    /// Source of a pull: send it back as an ordinary offer.
+    async fn on_xfer_get(&mut self, from: PublicKey, name: &str, get_id: &str, offer: XferOffer) {
+        let offer = XferOffer { for_req: Some(get_id.to_string()), ..offer };
+        let id = protocol::new_id();
+        if let Err(e) = self.start_xfer(from, name, &id, offer).await {
+            self.ack(&from, get_id, false, e).await;
+        }
+    }
+
+    // ---- runs ----
+
+    async fn accept_run(&mut self, from: &PublicKey, id: &str, age_secs: u64, mut spec: RunSpec) {
+        // Starting is what expires: a replayed request must not start a
+        // command, though a started one may run as long as it needs.
+        if age_secs > SEND_MAX_AGE_SECS {
+            return self.ack(from, id, false, "run request is older than 5 minutes; not started").await;
+        }
+        spec.id = id.to_string();
+        let plan = match runs::authorize(&self.ctx.fleet, &Fleet::file(&self.ctx.sync_dir), &spec) {
+            Ok(p) => p,
+            Err(e) => return self.ack(from, id, false, e).await,
+        };
+        self.ack(from, id, true, format!("run accepted: {} in {}", spec.argv.join(" "), plan.cwd.display())).await;
+        let tx = self.job_tx.clone();
+        let device = self.ctx.fleet.device.clone();
+        self.jobs.insert(spec.id.clone(), (runs::queued(&spec, &device), Some(*from)));
+        std::thread::spawn(move || runs::run(&spec, &plan, &device, &tx));
+        self.publish_now = true;
+    }
+
+    /// A run this device submitted: log its new output lines and, once,
+    /// how it ended.
+    fn on_run_update(&mut self, from: &str, st: &JobStatus) {
+        let Some(seen) = self.my_runs.get_mut(&st.id) else { return };
+        let new = st.lines.saturating_sub(*seen) as usize;
+        *seen = (*seen).max(st.lines);
+        let shown = new.min(st.tail.len());
+        let mut lines = Vec::new();
+        if new > shown {
+            lines.push(format!("{from} \u{2502} {} … {} line(s) not shown", st.id, new - shown));
+        }
+        for l in &st.tail[st.tail.len() - shown..] {
+            lines.push(format!("{from} \u{2502} {} {}", st.id, Sanitised::new(l.clone()).as_str()));
+        }
+        let finished = st.phase == "done" || st.phase == "failed";
+        if finished {
+            self.my_runs.remove(&st.id);
+            let code = st.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "none".into());
+            let why = Sanitised::new(st.result.clone().unwrap_or_default()).as_str().to_string();
+            let mark = if st.exit_code == Some(0) { "\u{2713}" } else { "\u{2717}" };
+            lines.push(format!("{from} {mark} {}: run finished: exit {code} ({why})", st.id));
+        }
+        for l in lines {
+            self.note(l);
         }
     }
 
@@ -1213,7 +1513,9 @@ impl Agent {
     fn start_job(&mut self, spec: JobSpec, reply_to: Option<PublicKey>) {
         let tx = self.job_tx.clone();
         let device = self.ctx.fleet.device.clone();
-        let root = self.ctx.fleet.handoff_root();
+        // A job without --cwd gets its own directory: under handoff_root
+        // when one is set, else inside nerve's own config.
+        let root = self.ctx.fleet.handoff_root.clone().unwrap_or_else(|| self.ctx.sync_dir.join("jobs"));
         let claude_root = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
         let queued = JobStatus {
             id: spec.id.clone(),
@@ -1233,17 +1535,27 @@ impl Agent {
             updates.push(st);
         }
         for st in updates {
-            let reply_to = self.jobs.get(&st.id).and_then(|(_, r)| *r);
+            let (reply_to, phase_changed) = match self.jobs.get(&st.id) {
+                Some((j, r)) => (*r, j.phase != st.phase),
+                None => (None, true),
+            };
             if st.phase == "done" || st.phase == "failed" {
-                self.note(format!("job '{}' {}", st.title, st.phase));
+                let how = st.exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default();
+                self.note(format!("{} '{}' {}{how}", if st.kind == "run" { "run" } else { "job" }, st.title, st.phase));
             }
             self.jobs.insert(st.id.clone(), (st.clone(), reply_to));
             if let Some(pk) = reply_to {
                 if pk != self.t.keys.public_key() {
                     self.reply(&pk, Body::JobUpdate(st)).await;
+                } else {
+                    let me = self.ctx.fleet.device.clone();
+                    self.on_run_update(&me, &st);
                 }
             }
-            self.publish_now = true;
+            // Output alone rides the next regular publish.
+            if phase_changed {
+                self.publish_now = true;
+            }
         }
     }
 
@@ -1273,11 +1585,51 @@ impl Agent {
                 }
                 None => self.note(format!("unknown device {device}")),
             },
-            Request::Handoff { session_id, cwd, device, continue_with } => {
+            Request::Handoff { session_id, cwd, device, continue_with, place, force } => {
                 let Some(pk) = self.peer_key(&device) else {
                     return self.note(format!("unknown device {device}"));
                 };
-                self.start_handoff(pk, device, session_id, cwd, continue_with).await;
+                let asks = HandoffOffer { continue_with, place, force, ..Default::default() };
+                self.start_handoff(pk, device, session_id, cwd, asks).await;
+            }
+            Request::Run { mut spec, device } => {
+                let me = self.ctx.fleet.device.clone();
+                let Some(pk) = self.peer_key(&device) else {
+                    return self.note(format!("{me} \u{2717} {}: unknown device {device}", spec.id));
+                };
+                spec.submitted_by = me.clone();
+                let id = spec.id.clone();
+                self.my_runs.insert(id.clone(), 0);
+                let env = Envelope::with_id(&me, &id, Body::RunSubmit(spec));
+                match self.t.send(&pk, &env).await {
+                    Ok(_) => self.note(format!("sent run {id} to {device}")),
+                    Err(e) => {
+                        self.my_runs.remove(&id);
+                        self.note(format!("{me} \u{2717} {id}: send to {device} failed: {e}"));
+                    }
+                }
+            }
+            Request::Xfer { id, device, offer, pull } => {
+                let me = self.ctx.fleet.device.clone();
+                let Some(pk) = self.peer_key(&device) else {
+                    return self.note(format!("{me} \u{2717} {id}: unknown device {device}"));
+                };
+                if pull {
+                    if let Err(e) = self.ctx.fleet.place(&offer.place, &Fleet::file(&self.ctx.sync_dir)) {
+                        return self.note(format!("{me} \u{2717} {id}: {e}"));
+                    }
+                    self.pending_gets.insert(id.clone(), pk);
+                    let env = Envelope::with_id(&me, &id, Body::XferGet(offer));
+                    match self.t.send(&pk, &env).await {
+                        Ok(_) => self.note(format!("asked {device} to send {id}")),
+                        Err(e) => {
+                            self.pending_gets.remove(&id);
+                            self.note(format!("{me} \u{2717} {id}: send to {device} failed: {e}"));
+                        }
+                    }
+                } else if let Err(e) = self.start_xfer(pk, &device, &id, offer).await {
+                    self.note(format!("{me} \u{2717} {id}: {e}"));
+                }
             }
             Request::Job { mut spec, device } => {
                 if spec.id.is_empty() {

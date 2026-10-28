@@ -17,7 +17,8 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use super::chunks::{FileRef, Store};
-use super::protocol::project_slug;
+use super::fleet::Fleet;
+use super::protocol::{project_slug, HandoffOffer};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Manifest {
@@ -44,7 +45,7 @@ pub(crate) struct Pack {
     pub(crate) files: Vec<FileRef>,
 }
 
-fn run(dir: &Path, argv: &[&str]) -> Result<Vec<u8>, String> {
+pub(crate) fn run(dir: &Path, argv: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new(argv[0])
         .args(&argv[1..])
         .current_dir(dir)
@@ -57,11 +58,11 @@ fn run(dir: &Path, argv: &[&str]) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-fn text(dir: &Path, argv: &[&str]) -> Result<String, String> {
+pub(crate) fn text(dir: &Path, argv: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&run(dir, argv)?).trim().to_string())
 }
 
-fn git_root(cwd: &Path) -> Result<PathBuf, String> {
+pub(crate) fn git_root(cwd: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(text(cwd, &["git", "rev-parse", "--show-toplevel"])?))
 }
 
@@ -96,7 +97,7 @@ pub(crate) fn local_tips(dest: &Path, repo_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn is_sha(s: &str) -> bool {
+pub(crate) fn is_sha(s: &str) -> bool {
     (40..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -110,7 +111,7 @@ pub(crate) fn find_transcript(roots: &[PathBuf], session_id: &str) -> Option<Pat
     })
 }
 
-fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
+pub(crate) fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -176,13 +177,27 @@ pub(crate) fn pack(cwd: &Path, session_id: &str, roots: &[PathBuf], have: &[Stri
     Ok(Pack { meta, files })
 }
 
-/// Where the repo lands on the target: the mapped source path when the
-/// fleet maps it, else under handoff_root.
-pub(crate) fn destination(m: &Manifest, mapped: Option<PathBuf>, handoff_root: &Path) -> PathBuf {
-    if let Some(p) = mapped {
-        return p;
+/// Where the repo lands on the target, in order: the place named with
+/// `--to`, the `path_map`-mapped source path, or under an explicitly set
+/// `handoff_root`. With none of them the hand-off is refused, naming the
+/// config to add, rather than landing somewhere nobody chose.
+pub(crate) fn destination(offer: &HandoffOffer, fleet: &Fleet, fleet_file: &Path) -> Result<PathBuf, String> {
+    if let Some(p) = &offer.place {
+        return fleet.place(p, fleet_file);
     }
-    handoff_root.join(&m.repo_name)
+    if let Some(p) = fleet.map_path(&offer.src_cwd) {
+        return Ok(p);
+    }
+    if let Some(root) = &fleet.handoff_root {
+        return Ok(root.join(&offer.repo_name));
+    }
+    Err(format!(
+        "no place for '{}' on {}: hand off with --to <place> and add `<place> = \"/abs/path\"` under [places], or map {} under [path_map], in {}",
+        offer.repo_name,
+        fleet.device,
+        offer.src_cwd,
+        fleet_file.display()
+    ))
 }
 
 #[derive(Debug)]
@@ -192,7 +207,7 @@ pub(crate) struct Installed {
 }
 
 /// A relative path from the wire that stays inside its directory.
-fn safe_rel(rel: &str) -> Option<&str> {
+pub(crate) fn safe_rel(rel: &str) -> Option<&str> {
     let ok = !rel.is_empty()
         && !rel.starts_with('/')
         && Path::new(rel).components().all(|c| matches!(c, std::path::Component::Normal(_)));
@@ -201,7 +216,9 @@ fn safe_rel(rel: &str) -> Option<&str> {
 
 /// Restore the repo state at `dest` and install the transcript under the
 /// target cwd's slug in `claude_root`. Every chunk must be in `store`.
-pub(crate) fn unpack(pack: &Pack, dest: &Path, store: &Store, claude_root: &Path) -> Result<Installed, String> {
+/// An existing checkout keeps its branch: one on another branch, or
+/// whose branch has commits the hand-off lacks, is refused unless `force`.
+pub(crate) fn unpack(pack: &Pack, dest: &Path, store: &Store, claude_root: &Path, force: bool) -> Result<Installed, String> {
     let manifest = pack.meta.clone();
     if !valid_session_id(&manifest.session_id) || !is_sha(&manifest.head) {
         return Err("bad session id or head in manifest".into());
@@ -233,11 +250,29 @@ pub(crate) fn unpack(pack: &Pack, dest: &Path, store: &Store, claude_root: &Path
         if !dirty.is_empty() {
             return Err(format!("{} has uncommitted changes; commit or stash them first", dest.display()));
         }
+        let current = text(dest, &["git", "rev-parse", "--abbrev-ref", "HEAD"])?;
+        if current != handoff_branch(&manifest) && !force {
+            return Err(format!(
+                "{} is on branch '{current}', not '{}'; switch it yourself or hand off with --force",
+                dest.display(),
+                handoff_branch(&manifest)
+            ));
+        }
     }
     if bundle.is_some() {
         run(dest, &["git", "fetch", "-q", &bundle_s, "+refs/heads/*:refs/remotes/nerve-handoff/*"])?;
     }
-    let branch = if manifest.branch == "HEAD" { "nerve-handoff" } else { manifest.branch.as_str() };
+    let branch = handoff_branch(&manifest);
+    // `checkout -B` resets the branch: never past commits only the target has.
+    let tip = text(dest, &["git", "rev-parse", "-q", "--verify", &format!("refs/heads/{branch}")]).ok();
+    if let Some(tip) = tip.filter(|t| !force && *t != manifest.head) {
+        if run(dest, &["git", "merge-base", "--is-ancestor", &tip, &manifest.head]).is_err() {
+            return Err(format!(
+                "branch '{branch}' in {} has commits the hand-off doesn't; merge them on the source first, or hand off with --force",
+                dest.display()
+            ));
+        }
+    }
     run(dest, &["git", "checkout", "-q", "-B", branch, &manifest.head])?;
     if let Some(patch) = file("worktree.patch")?.filter(|p| !p.is_empty()) {
         let p = stage.path().join("worktree.patch");
@@ -264,6 +299,15 @@ pub(crate) fn unpack(pack: &Pack, dest: &Path, store: &Store, claude_root: &Path
     let transcript = file("transcript.jsonl")?.ok_or("pack has no transcript")?;
     std::fs::write(proj.join(format!("{}.jsonl", manifest.session_id)), transcript).map_err(|e| e.to_string())?;
     Ok(Installed { cwd: dest, manifest })
+}
+
+/// The branch a hand-off checks out; a detached source gets its own.
+fn handoff_branch(m: &Manifest) -> &str {
+    if m.branch == "HEAD" {
+        "nerve-handoff"
+    } else {
+        m.branch.as_str()
+    }
 }
 
 pub(crate) fn valid_session_id(id: &str) -> bool {
@@ -343,10 +387,10 @@ pub(crate) fn accept_trust_dialog(tmux_session: &str) -> bool {
     false
 }
 
-struct TempDir(PathBuf);
+pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 }
@@ -357,7 +401,7 @@ impl Drop for TempDir {
     }
 }
 
-fn tempdir() -> Result<TempDir, String> {
+pub(crate) fn tempdir() -> Result<TempDir, String> {
     let p = std::env::temp_dir().join(format!("nerve-handoff-{}", super::protocol::new_id()));
     std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
     Ok(TempDir(p))
@@ -438,7 +482,7 @@ mod tests {
 
         let root_b = f.tmp.path().join("claudeB");
         let dest = f.tmp.path().join("other/place/proj");
-        let inst = unpack(&pack1, &dest, &store_b, &root_b).unwrap();
+        let inst = unpack(&pack1, &dest, &store_b, &root_b, false).unwrap();
         assert_eq!(std::fs::read_to_string(inst.cwd.join("f0.txt")).unwrap(), "edited\n");
         assert_eq!(std::fs::read_to_string(inst.cwd.join("new.txt")).unwrap(), "fresh\n");
         let installed = root_b.join("projects").join(project_slug(&inst.cwd.to_string_lossy()));
@@ -446,7 +490,7 @@ mod tests {
         assert!(installed.join(f.sid).join("subagents/agent-1.jsonl").is_file());
 
         // A second hand-off onto now-dirty work is refused, not merged.
-        assert!(unpack(&pack1, &dest, &store_b, &root_b).unwrap_err().contains("uncommitted"));
+        assert!(unpack(&pack1, &dest, &store_b, &root_b, false).unwrap_err().contains("uncommitted"));
 
         // The second hand-off after one more commit and one more turn: the
         // target reports its tips, so only the new commit and the tail of
@@ -464,7 +508,7 @@ mod tests {
         let pack2 = pack(&f.src, f.sid, std::slice::from_ref(&f.root_a), &tips, &store_a).unwrap();
         let second = transfer(&pack2, &store_a, &store_b);
         assert!(second * 10 < first, "second hand-off moved {second} bytes, first {first}");
-        let inst2 = unpack(&pack2, &dest, &store_b, &root_b).unwrap();
+        let inst2 = unpack(&pack2, &dest, &store_b, &root_b, false).unwrap();
         assert_eq!(std::fs::read_to_string(inst2.cwd.join("f0.txt")).unwrap(), "edited\n");
         assert_eq!(text(&inst2.cwd, &["git", "log", "-1", "--format=%s"]).unwrap(), "next");
     }
@@ -491,10 +535,54 @@ mod tests {
     }
 
     #[test]
-    fn destination_prefers_path_map() {
-        let m = Manifest { repo_name: "nerve".into(), ..Default::default() };
-        assert_eq!(destination(&m, Some("/srv/x".into()), Path::new("/h")), PathBuf::from("/srv/x"));
-        assert_eq!(destination(&m, None, Path::new("/h")), PathBuf::from("/h/nerve"));
+    fn destination_is_a_place_then_path_map_then_an_explicit_root_else_refused() {
+        let file = Path::new("/cfg/sync/fleet.toml");
+        let offer = HandoffOffer { repo_name: "nerve".into(), src_cwd: "/Users/me/SS/nerve".into(), ..Default::default() };
+        let mut f = Fleet { device: "pi".into(), ..Default::default() };
+        let e = destination(&offer, &f, file).unwrap_err();
+        assert!(e.contains("--to <place>") && e.contains("[places]") && e.contains("[path_map]") && e.contains("/cfg/sync/fleet.toml"), "{e}");
+        f.handoff_root = Some("/h".into());
+        assert_eq!(destination(&offer, &f, file).unwrap(), PathBuf::from("/h/nerve"));
+        f.path_map.insert("/Users/me/SS".into(), "/srv/ss".into());
+        assert_eq!(destination(&offer, &f, file).unwrap(), PathBuf::from("/srv/ss/nerve"));
+        let to = HandoffOffer { place: Some("harness".into()), ..offer.clone() };
+        assert!(destination(&to, &f, file).unwrap_err().contains("no place 'harness'"));
+        f.places.insert("harness".into(), "/srv/harness".into());
+        assert_eq!(destination(&to, &f, file).unwrap(), PathBuf::from("/srv/harness"));
+    }
+
+    #[test]
+    fn an_existing_checkout_keeps_its_branch_unless_forced() {
+        let f = fixture();
+        let (store_a, store_b) = (Store::new(&f.tmp.path().join("syncA")), Store::new(&f.tmp.path().join("syncB")));
+        let root_b = f.tmp.path().join("claudeB");
+        let dest = f.tmp.path().join("b/proj");
+        let p = pack(&f.src, f.sid, std::slice::from_ref(&f.root_a), &[], &store_a).unwrap();
+        transfer(&p, &store_a, &store_b);
+        let inst = unpack(&p, &dest, &store_b, &root_b, false).unwrap();
+        git(&inst.cwd, &["checkout", "-q", "--", "."]);
+        std::fs::remove_file(inst.cwd.join("new.txt")).unwrap();
+
+        // The target's checkout is on another branch: refused, HEAD stays.
+        git(&dest, &["checkout", "-qb", "mine"]);
+        let e = unpack(&p, &dest, &store_b, &root_b, false).unwrap_err();
+        assert!(e.contains("on branch 'mine'") && e.contains("--force"), "{e}");
+        assert_eq!(text(&dest, &["git", "rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "mine");
+
+        // The target's branch has a commit the hand-off lacks: refused.
+        git(&dest, &["checkout", "-q", "main"]);
+        std::fs::write(dest.join("local.txt"), "only here\n").unwrap();
+        git(&dest, &["add", "local.txt"]);
+        git(&dest, &["commit", "-qm", "target-only"]);
+        let e = unpack(&p, &dest, &store_b, &root_b, false).unwrap_err();
+        assert!(e.contains("has commits the hand-off doesn't"), "{e}");
+        assert_eq!(text(&dest, &["git", "log", "-1", "--format=%s"]).unwrap(), "target-only");
+
+        // --force does what it always did.
+        git(&dest, &["checkout", "-q", "mine"]);
+        let inst = unpack(&p, &dest, &store_b, &root_b, true).unwrap();
+        assert_eq!(text(&inst.cwd, &["git", "rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "main");
+        assert_eq!(std::fs::read_to_string(inst.cwd.join("f0.txt")).unwrap(), "edited\n");
     }
 
     #[test]
