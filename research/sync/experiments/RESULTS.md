@@ -2,7 +2,7 @@
 
 Setup, 2026-10-09/10:
 - **Mac:** M-series, macOS 27.0.1, Claude Code 2.1.295, LAN address 192.168.1.18, Tailscale address 100.100.98.51.
-- **Pi:** Raspberry Pi 5 (8 GB), Debian 13, Claude Code 2.1.288 logged in with a claude.ai Max account, LAN address 192.168.1.17, Tailscale address 100.73.26.46. Same home LAN as the Mac.
+- **Pi:** Raspberry Pi 5 (8 GB), Debian 13, Claude Code 2.1.288 logged in with a claude.ai Max account, LAN address <lan-ip>, Tailscale address <tailscale-ip>. Same home LAN as the Mac.
 - **Harness:** `research/sync/lab` (`nsync-lab`), built natively and for linux/arm64 in Docker.
 - **How RTT is measured:** every RTT is a ping→pong→ping round trip measured on one clock. Clock skew between the two machines therefore can't distort the numbers.
 
@@ -44,7 +44,7 @@ Publish acknowledgements (relay `OK`) arrive in 200–430 ms.
 
 | path | payload | RTT p50 | RTT p95 | loss |
 |---|---|---|---|---|
-| ws://100.73.26.46:7777, over Tailscale | 512 B | 15.8 ms | 27.5 ms | 0% |
+| ws://<relay-host>:7777, over Tailscale | 512 B | 15.8 ms | 27.5 ms | 0% |
 | same, NIP-59 gift wrap | 512 B | 15.0 ms | 18.6 ms | 0% |
 | same | 60 KB | rejected | | `max_event_size` 65536 (configurable) |
 
@@ -56,7 +56,7 @@ That is 40–45× faster than public relays, with no third party and no rate lim
 
 | path | RTT p50 | RTT p95 | bulk |
 |---|---|---|---|
-| direct path (iroh discovered and selected the LAN address 192.168.1.17 on its own) | 8.5 ms | 9.3 ms | 64 MiB at 14.7 MiB/s |
+| direct path (iroh discovered and selected the LAN address <lan-ip> on its own) | 8.5 ms | 9.3 ms | 64 MiB at 14.7 MiB/s |
 | relay-only (`clear_ip_transports`), via aps1-1.relay.n0.iroh.link | 197 ms | 231 ms | 16 MiB at 1.1 MiB/s |
 | baseline: scp over Tailscale | — | — | 64 MiB at 13.8 MiB/s |
 
@@ -83,7 +83,7 @@ The pack is a git bundle of all refs, a `git diff --binary HEAD` working-tree pa
 
 Steps that worked:
 1. On the Mac, `claude -p` created a session that was told a codeword and made an *uncommitted* edit.
-2. The pack was copied to the Pi and unpacked to a **different absolute path** (`/home/sspi/nerve-lab/ho-plain`). The transcript was installed under the slug for *that* path, without rewriting any paths inside it.
+2. The pack was copied to the Pi and unpacked to a **different absolute path** (`/home/user/nerve-lab/ho-plain`). The transcript was installed under the slug for *that* path, without rewriting any paths inside it.
 3. On the Pi, `claude --resume <id> --fork-session` in that directory recalled `PINEAPPLE-42` and correctly edited `calc.py` in the *new* path, which already carried the Mac's uncommitted change.
 
 **Finding:** the cwd slug is the only path that has to match. Old absolute paths inside the transcript did not confuse the next turn. Path rewriting is offered as an option but is not needed.
@@ -115,7 +115,7 @@ These runs use the real nerve binary on both machines (the Pi build is cross-com
 | E10c | `nerve sync answer pi <id> allow` | same | ✓ ack "answered"; the file appeared on the Pi ~3 s later. The transcript says "Allowed by PermissionRequest hook" |
 | E10d | `nerve sync fetch pi <session> diff` | same | ✓ git status and diff of the Pi checkout printed on the Mac |
 | E11 | AskUserQuestion answered from the Mac (Pi in away mode) | same | ✓ question with options [Namaste, Hola] seen on the Mac; answered "Namaste"; the following Write permission was also answered remotely; `greet.txt` = Namaste |
-| E12 | `nerve sync handoff <mac session> pi --then "<question>"` | same | ✓ 730 KiB pack in **0.6 s** over the private relay (20.7 s when sent through a public relay); resumed in tmux `nerve-cc6fb097` at `/home/sspi/nerve-handoff/demo2`; answered "The secret project codename is BLUE-HERON" (set on the Mac) and added `mul()` on top of the Mac's uncommitted `sub()` |
+| E12 | `nerve sync handoff <mac session> pi --then "<question>"` | same | ✓ 730 KiB pack in **0.6 s** over the private relay (20.7 s when sent through a public relay); resumed in tmux `nerve-cc6fb097` at `/home/user/nerve-handoff/demo2`; answered "The secret project codename is BLUE-HERON" (set on the Mac) and added `mul()` on top of the Mac's uncommitted `sub()` |
 | E13 | three jobs: `--needs linux`, `--needs macos`, `--needs gpu,cuda` | same | ✓ linux job routed to the Pi, ran, verify passed (`fizzbuzz.py` line 15 == FizzBuzz), 3 turns, $0.003. ✓ macos job ran on the Mac, verified. ✓ gpu job refused: "no device has [gpu, cuda]" |
 | TUI | `D` → select Pi session → `m` → type → Enter → request appears → `a` | same | ✓ `tui.txt` written on the Pi with the exact text; ack shown in the Devices log. Found and fixed bug D12: a reorder sent the instruction to the wrong session |
 | E14 | full loop with **no Tailscale**: relays primal + snort only | public internet | ✓ send → prompt visible → answer → file written. Answer-to-file took 1.1 s |

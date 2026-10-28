@@ -537,13 +537,13 @@ mod tests {
     #[test]
     fn destination_is_a_place_then_path_map_then_an_explicit_root_else_refused() {
         let file = Path::new("/cfg/sync/fleet.toml");
-        let offer = HandoffOffer { repo_name: "nerve".into(), src_cwd: "/Users/me/SS/nerve".into(), ..Default::default() };
-        let mut f = Fleet { device: "pi".into(), ..Default::default() };
+        let offer = HandoffOffer { repo_name: "nerve".into(), src_cwd: "/Users/me/code/nerve".into(), ..Default::default() };
+        let mut f = Fleet { device: "server".into(), ..Default::default() };
         let e = destination(&offer, &f, file).unwrap_err();
         assert!(e.contains("--to <place>") && e.contains("[places]") && e.contains("[path_map]") && e.contains("/cfg/sync/fleet.toml"), "{e}");
         f.handoff_root = Some("/h".into());
         assert_eq!(destination(&offer, &f, file).unwrap(), PathBuf::from("/h/nerve"));
-        f.path_map.insert("/Users/me/SS".into(), "/srv/ss".into());
+        f.path_map.insert("/Users/me/code".into(), "/srv/ss".into());
         assert_eq!(destination(&offer, &f, file).unwrap(), PathBuf::from("/srv/ss/nerve"));
         let to = HandoffOffer { place: Some("harness".into()), ..offer.clone() };
         assert!(destination(&to, &f, file).unwrap_err().contains("no place 'harness'"));

@@ -116,6 +116,6 @@ e21.txt: twentyone
 chunk store sizes: beta 936K, alpha 936K
 
 === done
-research/sync/experiments/e17_mod_e2e.sh: line 28: 72975 Terminated: 15          "$nerve" sync serve-relay --port "$port" > "$st/relay.log" 2>&1  (wd: ~/SS/nerve)
-research/sync/experiments/e17_mod_e2e.sh: line 28: 72992 Terminated: 15          NERVE_CONFIG_DIR="$st/$dev" "$nerve" sync agent > "$st/$dev-agent.log" 2>&1  (wd: ~/SS/nerve)
+research/sync/experiments/e17_mod_e2e.sh: line 28: 72975 Terminated: 15          "$nerve" sync serve-relay --port "$port" > "$st/relay.log" 2>&1  (wd: ~/src/nerve)
+research/sync/experiments/e17_mod_e2e.sh: line 28: 72992 Terminated: 15          NERVE_CONFIG_DIR="$st/$dev" "$nerve" sync agent > "$st/$dev-agent.log" 2>&1  (wd: ~/src/nerve)
 research/sync/experiments/e17_mod_e2e.sh: line 28: 75952 Terminated: 15          NERVE_CONFIG_DIR="$st/$dev" "$nerve" sync agent > "$st/$dev-agent.log" 2>&1

@@ -1,7 +1,7 @@
 # Cross-device sync (`--features sync`)
 
 Watch and drive Claude Code sessions running on your other devices: a
-laptop, a Raspberry Pi, a server. From any device you can:
+laptop, a desktop, a small always-on server. From any device you can:
 
 - see every device's sessions and when each device last synced;
 - type an instruction into a session running elsewhere;
@@ -67,7 +67,7 @@ socket (`<config>/sync/agent.sock`, mode 0600) and:
   devices while Claude's own dialog stays on screen. The first answer
   wins, and an answer at the keyboard withdraws the request;
 - reports each turn's duration and token use;
-- shows `⇄ nerve · pi 4s · 1 waiting on another device` under the prompt.
+- shows `⇄ nerve · server 4s · 1 waiting on another device` under the prompt.
 
 Sessions without the mod (older Claude, `--bare`, started before
 setup) fall back to tmux/Ghostty paste and the settings hook, as before.
@@ -78,7 +78,7 @@ The Devices view tags each session `mod`, `tty` or `view`.
 | setup | how | measured RTT | notes |
 |---|---|---|---|
 | Public relays (default) | what `nerve setup` configures | **0.5–0.9 s** | No VPN at all. Relays see metadata. |
-| + private relay | `nerve sync serve-relay` on the Pi, then `nerve sync relay add ws://<pi-tailscale-ip>:7777` on each device | **~16 ms** | Bulk data (hand-offs, diffs) goes only here when connected. In memory. |
+| + private relay | `nerve sync serve-relay` on an always-on device, then `nerve sync relay add ws://<relay-host>:7777` on each device | **~16 ms** | Bulk data (hand-offs, diffs) goes only here when connected. In memory. |
 
 Public relays that worked for fresh keys in testing:
 - relay.primal.net
@@ -92,7 +92,7 @@ nos.lol and nostr.mom acknowledged events but never delivered them.
 `nerve setup` installs the agent as a service, so there is nothing to
 start by hand. The TUI attaches to that agent as a viewer; on a device
 without the service, `nerve` starts an agent itself. The status bar
-shows `⇄ pi 4s · 1 needs you`.
+shows `⇄ server 4s · 1 needs you`.
 
 Run only **one agent per device key**. Two agents holding the same key
 both act on every command.
@@ -105,19 +105,19 @@ terminals (a phone over SSH) the list becomes a tab strip:
 
 ```
 ╭ Devices  1 needs you ─────────────────────────────────────────────────────────╮
-│ ● mac  published 2s ago  · 1 session(s) via mod                     relays ●● │
-│                              │ ● pi  synced 3s ago  linux aarch64             │
-│▌● pi                         │   can run: linux aarch64 tmux git cargo        │
+│ ● laptop  published 2s ago  · 1 session(s) via mod                     relays ●● │
+│                              │ ● server  synced 3s ago  linux aarch64         │
+│▌● server                     │   can run: linux aarch64 tmux git cargo        │
 │    synced 3s ago · 1 waiting │                                                │
 │    2 sessions, 1 active      │ NEEDS YOU                                      │
 │                              │ ▶ demo wants to run Write  12s                 │
-│ ● pixel                      │       /home/pi/demo/tui.txt                    │
+│ ● pixel                      │       /home/user/demo/tui.txt                  │
 │    synced 1m ago             │                                                │
 │    0 sessions                │ SESSIONS  2                                    │
 │                              │   ● demo        waiting: permission  ⎇ main  mod│
-│ → pi 4153487f                │   ● notes       idle                       tty │
+│ → server 4153487f            │   ● notes       idle                       tty │
 │ ██████████████░░░░░░░ 61/101 │                                                │
-│ 13:52:00Z pi ✓ …: answered 46bf0e3df7a5a6b7                                   │
+│ 13:52:00Z server ✓ …: answered 46bf0e3df7a5a6b7                                   │
 │ a allow  x deny  Tab device  r sync  Esc close                                │
 ╰───────────────────────────────────────────────────────────────────────────────╯
 ```
@@ -143,16 +143,16 @@ The same features are available from the CLI:
 nerve sync doctor                               # is this device set up and talking?
 nerve sync invite                               # a one-time code for another device
 nerve sync status                               # last synced, sessions, pending prompts
-nerve sync send pi 4c14e2fb "run the tests again"
-nerve sync answer pi 15a12dee3382bc05 allow     # or deny, or an option label
-nerve sync fetch pi 4c14e2fb diff
-nerve sync handoff cc6fb097 pi --to v2-harness --then "carry on with the next step"
+nerve sync send server 4c14e2fb "run the tests again"
+nerve sync answer server 15a12dee3382bc05 allow     # or deny, or an option label
+nerve sync fetch server 4c14e2fb diff
+nerve sync handoff cc6fb097 server --to proj --then "carry on with the next step"
 nerve sync job --needs macos --verify 'xcodebuild test ...' "ios tests" -- "fix the failing UI test"
-nerve sync put pi v2-harness ignored/v2-build --delete --wait
-nerve sync get pi v2-harness ignored/v2-build/units/S5 --wait
-nerve sync refs pi v2-harness v2-build:refs/remotes/mac/v2-build --wait
-nerve sync refs pi v2-harness --pull main:refs/remotes/pi/main
-nerve sync run pi --place v2-harness --timeout 1800 --wait -- node bin/v2.mjs verify S5
+nerve sync put server proj build --delete --wait
+nerve sync get server proj build/reports --wait
+nerve sync refs server proj feature:refs/remotes/laptop/feature --wait
+nerve sync refs server proj --pull main:refs/remotes/server/main
+nerve sync run server --place proj --timeout 1800 --wait -- make test
 nerve sync away on
 ```
 
@@ -279,13 +279,13 @@ A place is a name for a directory, defined on each device in its own
 `fleet.toml`:
 
 ```toml
-[places]                        # on the Mac
-v2-harness = "/Users/me/SS/theerv-app"
+[places]                        # on the laptop
+proj = "/Users/me/code/proj"
 ```
 
 ```toml
-[places]                        # on the Pi
-v2-harness = "/home/pi/SS/theerv-app"
+[places]                        # on the server
+proj = "/srv/proj"
 ```
 
 Commands name the place. Each side resolves its own path, so a sender
@@ -295,8 +295,8 @@ refused, with the line to add.
 ### Files: `put` and `get`
 
 ```bash
-nerve sync put pi v2-harness ignored/v2-build bin/v2.mjs --wait
-nerve sync get pi v2-harness ignored/v2-build/units --delete --wait
+nerve sync put server proj build scripts/check.sh --wait
+nerve sync get server proj build/reports --delete --wait
 ```
 
 `put` sends files and directories, given relative to the place (`.` is
@@ -335,15 +335,15 @@ the files go over rsync on ssh.
 
 ```toml
 [ssh]
-pi = "theerv-pi"        # this device reaches the peer "pi" at this ssh host
+server = "user@server.example"   # this device reaches the peer "server" at this ssh host
 
 [xfer]
 bulk_over = 67108864    # bytes
 ```
 
-- **One route is enough.** rsync runs on whichever side has one. A Pi
-  the Mac can reach but not the other way round still sends: the Mac
-  pulls from the path the Pi gives. With no route on either side the
+- **One route is enough.** rsync runs on whichever side has one. A
+  device that can be reached but cannot reach back still sends: the
+  peer with the route pulls from the path the sender gives. With no route on either side the
   transfer is refused, naming the setting to add.
 - **Same rules.** Roots stay inside the place, symlinks are skipped
   (`-rtp`, no `-l`), nothing is written through one on the receiver,
@@ -369,8 +369,8 @@ stays well under the service's memory cap.
 ### Git refs: `refs`
 
 ```bash
-nerve sync refs pi v2-harness v2-build:refs/remotes/mac/v2-build --wait
-nerve sync refs pi v2-harness --pull main:refs/remotes/pi/main --wait
+nerve sync refs server proj feature:refs/remotes/laptop/feature --wait
+nerve sync refs server proj --pull main:refs/remotes/server/main --wait
 ```
 
 Each pair is `<src-ref>:<dst-ref>`. The source is a branch, tag or `HEAD`
@@ -394,7 +394,7 @@ and the destination is here.
 ### Runs
 
 ```bash
-nerve sync run pi --place v2-harness --timeout 1800 --wait -- node bin/v2.mjs verify S5
+nerve sync run server --place proj --timeout 1800 --wait -- make test
 ```
 
 `run` starts one command on a peer. The command runs only if the peer's
@@ -403,8 +403,8 @@ nerve sync run pi --place v2-harness --timeout 1800 --wait -- node bin/v2.mjs ve
 ```toml
 [run]
 allow = [
-  { place = "v2-harness", argv = ["node", "bin/v2.mjs", "*"] },
-  { cwd = "/home/pi/SS/theerv-server", argv = ["make", "test"] },
+  { place = "proj", argv = ["make", "*"] },
+  { cwd = "/srv/api", argv = ["make", "test"] },
 ]
 ```
 
@@ -458,8 +458,8 @@ All under `<nerve config>/sync/`:
 `fleet.toml` options:
 
 ```toml
-device = "mac"
-relays = ["ws://100.73.26.46:7777", "wss://relay.primal.net"]
+device = "laptop"
+relays = ["ws://192.0.2.10:7777", "wss://relay.primal.net"]
 caps = ["ios-sim"]                 # extra, on top of detected ones
 handoff_root = "/Users/me/nerve-handoff"   # optional; unset, unplaced hand-offs are refused
 remote_questions = "away"          # away | always | never
@@ -468,16 +468,22 @@ auto_trust_handoffs = true         # accept Claude's folder-trust prompt for han
 hook_timeout_secs = 600
 
 [peers]
-pi = "npub1..."
+server = "npub1..."
 
 [path_map]                         # source prefix = local prefix
-"/Users/me/SS" = "/home/pi/SS"
+"/Users/me/code" = "/home/user/code"
 
 [places]                           # name = absolute path on this device
-v2-harness = "/Users/me/SS/theerv-app"
+proj = "/Users/me/code/proj"
 
 [run]                              # commands peers may run here
-allow = [{ place = "v2-harness", argv = ["node", "bin/v2.mjs", "*"] }]
+allow = [{ place = "proj", argv = ["make", "*"] }]
+
+[ssh]                              # peer = ssh host; big files go over rsync on it
+server = "user@server.example"
+
+[xfer]
+bulk_over = 67108864               # bytes from which files skip the relay
 ```
 
 ### The agent's PATH
@@ -509,7 +515,7 @@ still isn't found, the error lists every directory searched. Re-run
   only devices you control. Treat `device.key` like an SSH private key.
 - **What relays see.** Public relays can see which public keys talk, and
   when, and the size of each message. They cannot see content. Use a
-  private relay on the tailnet if that metadata matters.
+  private relay on a private network if that metadata matters.
 - **Invites.** A code is a one-hour, single-use credential. A stranger's
   `PairRequest` is read only while an invite is open, and only that
   message type.

@@ -16,8 +16,8 @@
 set -uo pipefail
 repo="$(cd "$(dirname "$0")/../../.." && pwd)"
 nerve="$repo/target/release/nerve"
-PI="${PI:-sspi@100.73.26.46}"
-PI_KEY="${PI_KEY:-$HOME/.ssh/m5_sspi}"
+PI="${PI:?set PI=user@host}"
+PI_KEY="${PI_KEY:?set PI_KEY=path to its ssh key}"
 mac="${TMPDIR:-/tmp}/nerve-e23"
 pidir='$HOME/nerve-e23'
 pinerve='$HOME/nerve-src/target/release/nerve'

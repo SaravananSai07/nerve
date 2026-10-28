@@ -489,7 +489,7 @@ mod tests {
             let hub = Arc::new(ModHub::default());
             let poll = format!("/v1/poll?sid={SID}");
             hub.route("GET", &poll, &Value::Null).await; // first poll hands over the (empty) status
-            hub.set_status("⇄ nerve · pi 1s · 1 waiting on another device".into());
+            hub.set_status("⇄ nerve · server 1s · 1 waiting on another device".into());
             let h = hub.clone();
             let t = Instant::now();
             let got = tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await }).await.unwrap();
@@ -498,9 +498,9 @@ mod tests {
             let h = hub.clone();
             let waiter = tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await });
             tokio::time::sleep(Duration::from_millis(100)).await;
-            hub.set_status("⇄ nerve · pi 2s".into());
+            hub.set_status("⇄ nerve · server 2s".into());
             let got = tokio::time::timeout(Duration::from_secs(1), waiter).await.expect("woken by the change").unwrap();
-            assert_eq!(got["status"], "⇄ nerve · pi 2s");
+            assert_eq!(got["status"], "⇄ nerve · server 2s");
         });
     }
 

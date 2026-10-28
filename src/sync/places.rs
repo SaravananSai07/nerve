@@ -1,4 +1,4 @@
-//! Named places: `[places] v2-harness = "/abs/path"` on every device,
+//! Named places: `[places] proj = "/abs/path"` on every device,
 //! so a sender names the place and each side resolves its own path.
 //!
 //! Two things move into a place:
@@ -393,17 +393,17 @@ mod tests {
             let body: String = (0..400).map(|j| format!("unit {i} line {j}\n")).collect();
             std::fs::write(a.join(format!("units/S5/f{i}.md")), body).unwrap();
         }
-        std::fs::write(a.join("bin/v2.mjs"), "#!/usr/bin/env node\n").unwrap();
-        std::fs::set_permissions(a.join("bin/v2.mjs"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(a.join("bin/check.mjs"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::set_permissions(a.join("bin/check.mjs"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let (sa, sb) = (Store::new(&t.path().join("sa")), Store::new(&t.path().join("sb")));
-        let roots = vec!["units".to_string(), "bin/v2.mjs".to_string()];
+        let roots = vec!["units".to_string(), "bin/check.mjs".to_string()];
 
         let p1 = pack_files(&a, &roots, false, &sa).unwrap();
         let (first_n, first_bytes) = move_chunks(&p1, &sa, &sb);
         let got = apply_files(&p1, &b, &sb).unwrap();
         assert_eq!((got.written, got.unchanged), (41, 0));
         assert_eq!(std::fs::read(b.join("units/S5/f7.md")).unwrap(), std::fs::read(a.join("units/S5/f7.md")).unwrap());
-        assert_eq!(mode(&b.join("bin/v2.mjs")), 0o755);
+        assert_eq!(mode(&b.join("bin/check.mjs")), 0o755);
 
         // One file changes: only its chunks move, only it is rewritten.
         let mut body = std::fs::read_to_string(a.join("units/S5/f3.md")).unwrap();
@@ -492,23 +492,23 @@ mod tests {
             git(&a, &["commit", "-qm", &format!("c{i}")]);
         }
         git(t.path(), &["clone", "-q", &a.to_string_lossy(), &b.to_string_lossy()]);
-        git(&a, &["checkout", "-qb", "v2-build"]);
+        git(&a, &["checkout", "-qb", "feature"]);
         std::fs::write(a.join("g"), "new\n").unwrap();
         git(&a, &["add", "."]);
-        git(&a, &["commit", "-qm", "on v2-build"]);
+        git(&a, &["commit", "-qm", "on feature"]);
         std::fs::write(b.join("f"), "local edit\n").unwrap(); // dirty worktree on the target
         let head_before = text(&b, &["git", "rev-parse", "HEAD"]).unwrap();
         let refs_before = text(&b, &["git", "for-each-ref", "--format=%(refname)"]).unwrap();
         let (sa, sb) = (Store::new(&t.path().join("sa")), Store::new(&t.path().join("sb")));
 
-        let map = vec![RefMap { src: "v2-build".into(), dst: "refs/remotes/mac/v2-build".into() }];
+        let map = vec![RefMap { src: "feature".into(), dst: "refs/remotes/laptop/feature".into() }];
         let tips = repo_tips(&b);
         let p = pack_refs(&a, &map, &tips, &sa).unwrap();
         let (n, _) = move_chunks(&p, &sa, &sb);
         assert!(n >= 1);
         let lines = apply_refs(&p, &b, &sb).unwrap();
-        assert!(lines[0].contains("refs/remotes/mac/v2-build") && lines[0].contains("(new)"), "{lines:?}");
-        assert_eq!(text(&b, &["git", "rev-parse", "refs/remotes/mac/v2-build"]).unwrap(), text(&a, &["git", "rev-parse", "v2-build"]).unwrap());
+        assert!(lines[0].contains("refs/remotes/laptop/feature") && lines[0].contains("(new)"), "{lines:?}");
+        assert_eq!(text(&b, &["git", "rev-parse", "refs/remotes/laptop/feature"]).unwrap(), text(&a, &["git", "rev-parse", "feature"]).unwrap());
         assert_eq!(text(&b, &["git", "rev-parse", "HEAD"]).unwrap(), head_before, "HEAD did not move");
         assert_eq!(std::fs::read_to_string(b.join("f")).unwrap(), "local edit\n", "worktree untouched");
         assert!(!b.join("g").exists());

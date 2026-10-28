@@ -300,20 +300,20 @@ mod tests {
     #[test]
     fn argv_copies_one_root_without_links_and_deletes_only_inside_named_dirs() {
         let src = End::Local("/h/place".into());
-        let dst = End::Remote { host: "pi".into(), path: "/home/p/it's here".into() };
+        let dst = End::Remote { host: "server".into(), path: "/home/p/it's here".into() };
         let a = argv(&src, &dst, "out/units", true, true, true);
         assert_eq!(&a[..5], ["rsync", "-rtp", "--partial", "-e", SSH]);
         assert!(!a.iter().any(|x| x == "-a" || x == "-l" || x == "-L" || x == "--relative"), "{a:?}");
         assert!(a.contains(&"--delete".to_string()));
         assert_eq!(a[a.len() - 2], "/h/place/out/units/");
-        assert_eq!(a[a.len() - 1], r"pi:'/home/p/it'\''s here/out/units/'");
+        assert_eq!(a[a.len() - 1], r"server:'/home/p/it'\''s here/out/units/'");
         // A file root never deletes, and a GNU client is given the path as it is.
         let f = argv(&src, &dst, "LOG.md", false, true, false);
         assert!(!f.contains(&"--delete".to_string()));
-        assert_eq!(f[f.len() - 1], "pi:/home/p/it's here/LOG.md");
+        assert_eq!(f[f.len() - 1], "server:/home/p/it's here/LOG.md");
         // The whole place.
         let all = argv(&dst, &End::Local("/m/p".into()), "", true, false, false);
-        assert_eq!(all[all.len() - 2..], ["pi:/home/p/it's here/", "/m/p/"]);
+        assert_eq!(all[all.len() - 2..], ["server:/home/p/it's here/", "/m/p/"]);
     }
 
     #[test]

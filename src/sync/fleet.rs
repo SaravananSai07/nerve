@@ -17,8 +17,8 @@ use crate::paths::Paths;
 pub(crate) struct Fleet {
     /// This device's name as peers see it.
     pub(crate) device: String,
-    /// `wss://` public relays and/or `ws://` self-hosted ones (a Pi on
-    /// the tailnet). Messages go to all; the first copy wins.
+    /// `wss://` public relays and/or `ws://` self-hosted ones (a small always-on box on
+    /// a private network). Messages go to all; the first copy wins.
     pub(crate) relays: Vec<String>,
     /// name → npub/hex of every device allowed to talk to this one.
     pub(crate) peers: BTreeMap<String, String>,
@@ -34,7 +34,7 @@ pub(crate) struct Fleet {
     /// Commands peers may run here (`nerve sync run`).
     #[serde(skip_serializing_if = "RunConfig::is_empty")]
     pub(crate) run: RunConfig,
-    /// Source path prefix → local prefix, e.g. "/Users/me/SS" = "/home/pi/SS".
+    /// Source path prefix → local prefix, e.g. "/Users/me/code" = "/home/user/code".
     pub(crate) path_map: BTreeMap<String, String>,
     /// When Claude's AskUserQuestion may be answered remotely:
     /// "away" (only while away mode is on), "always", or "never".
@@ -271,11 +271,11 @@ mod tests {
     #[test]
     fn path_map_prefers_longest_prefix_and_respects_boundaries() {
         let mut f = Fleet::default();
-        f.path_map.insert("/Users/me".into(), "/home/pi".into());
-        f.path_map.insert("/Users/me/SS".into(), "/srv/ss".into());
-        assert_eq!(f.map_path("/Users/me/SS/nerve"), Some(PathBuf::from("/srv/ss/nerve")));
-        assert_eq!(f.map_path("/Users/me/x"), Some(PathBuf::from("/home/pi/x")));
-        assert_eq!(f.map_path("/Users/me"), Some(PathBuf::from("/home/pi")));
+        f.path_map.insert("/Users/me".into(), "/home/user".into());
+        f.path_map.insert("/Users/me/code".into(), "/srv/ss".into());
+        assert_eq!(f.map_path("/Users/me/code/nerve"), Some(PathBuf::from("/srv/ss/nerve")));
+        assert_eq!(f.map_path("/Users/me/x"), Some(PathBuf::from("/home/user/x")));
+        assert_eq!(f.map_path("/Users/me"), Some(PathBuf::from("/home/user")));
         assert_eq!(f.map_path("/Users/meow/x"), None, "prefix must end at a path boundary");
     }
 
@@ -292,13 +292,13 @@ mod tests {
     #[test]
     fn fleet_round_trips_through_toml() {
         let dir = tempfile::tempdir().unwrap();
-        let mut f = Fleet { device: "mac".into(), ..Default::default() };
-        f.peers.insert("pi".into(), "npub1x".into());
-        f.relays.push("ws://100.73.26.46:7777".into());
+        let mut f = Fleet { device: "laptop".into(), ..Default::default() };
+        f.peers.insert("server".into(), "npub1x".into());
+        f.relays.push("ws://192.0.2.10:7777".into());
         f.save(dir.path()).unwrap();
         let g = Fleet::load(dir.path()).unwrap();
-        assert_eq!(g.device, "mac");
-        assert_eq!(g.peers["pi"], "npub1x");
+        assert_eq!(g.device, "laptop");
+        assert_eq!(g.peers["server"], "npub1x");
         assert_eq!(g.remote_questions, "away");
         let body = std::fs::read_to_string(Fleet::file(dir.path())).unwrap();
         assert!(!body.contains("[places]") && !body.contains("[run]"), "empty tables stay out of the file");
@@ -308,22 +308,22 @@ mod tests {
     fn places_and_run_rules_parse_from_toml() {
         let f: Fleet = toml::from_str(
             r#"
-device = "pi"
+device = "server"
 [places]
-v2-harness = "/home/pi/SS/theerv-app"
+proj = "/srv/proj"
 rel = "not/absolute"
 [run]
-allow = [{ place = "v2-harness", argv = ["node", "bin/v2.mjs", "*"] }, { cwd = "/srv", argv = ["make"], shell = true }]
+allow = [{ place = "proj", argv = ["node", "bin/check.mjs", "*"] }, { cwd = "/srv", argv = ["make"], shell = true }]
 "#,
         )
         .unwrap();
         let file = Path::new("/c/fleet.toml");
-        assert_eq!(f.place("v2-harness", file).unwrap(), PathBuf::from("/home/pi/SS/theerv-app"));
+        assert_eq!(f.place("proj", file).unwrap(), PathBuf::from("/srv/proj"));
         assert!(f.place("rel", file).unwrap_err().contains("absolute"));
         let e = f.place("nope", file).unwrap_err();
         assert!(e.contains("[places]") && e.contains("/c/fleet.toml"), "{e}");
         assert_eq!(f.run.allow.len(), 2);
-        assert_eq!(f.run.allow[0].argv, ["node", "bin/v2.mjs", "*"]);
+        assert_eq!(f.run.allow[0].argv, ["node", "bin/check.mjs", "*"]);
         assert!(f.run.allow[1].shell && f.run.allow[1].place.is_none());
     }
 }

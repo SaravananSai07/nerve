@@ -200,7 +200,7 @@ mod tests {
     use super::*;
 
     // Shapes taken from a real `claude -p --output-format stream-json`
-    // run on the Pi (2.1.288).
+    // run on Linux arm64 (2.1.288).
     #[test]
     fn stream_json_drives_status() {
         let mut st = JobStatus::default();

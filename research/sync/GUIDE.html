@@ -184,7 +184,7 @@ The code works once, for the next hour. Anyone holding it can pair a device, so 
                 ▼                                                    ▼
       ┌───────────────────────────────────────────────────────────────────────┐
       │ relays: wss://relay.primal.net, wss://relay.snort.social (public)     │
-      │         ws://&lt;pi-tailscale-ip&gt;:7777 (optional private, nerve sync serve-relay) │
+      │         ws://&lt;relay-host&gt;:7777 (optional private, nerve sync serve-relay) │
       └───────────────────────────────────────────────────────────────────────┘
                 ▲
       phone: SSH (Tailscale) into the Pi → `nerve` → D        Android: Termux can also be a device</div>
@@ -390,7 +390,7 @@ The code works once, for the next hour. Anyone holding it can pair a device, so 
 <table>
 <tr><th>Setup</th><th>Round trip</th><th>Upside</th><th>Downside</th></tr>
 <tr><td><b>Public relays only</b> (the default)</td><td>0.5–0.9 s</td><td>Zero setup, no VPN, works from anywhere</td><td>Rate limits; first hand-offs of big repos are slow; relays see metadata</td></tr>
-<tr><td><b>+ private relay on the Pi</b> (<code>nerve sync serve-relay</code>, then <code>nerve sync relay add ws://&lt;pi-tailscale-ip&gt;:7777</code>)</td><td>~16 ms</td><td>No third party; bulk data (hand-offs, diffs) goes there</td><td>Every device must be on your tailnet; the relay is in memory, so a restart drops queued messages (public relays cover for it)</td></tr>
+<tr><td><b>+ private relay on the Pi</b> (<code>nerve sync serve-relay</code>, then <code>nerve sync relay add ws://&lt;relay-host&gt;:7777</code>)</td><td>~16 ms</td><td>No third party; bulk data (hand-offs, diffs) goes there</td><td>Every device must be on your tailnet; the relay is in memory, so a restart drops queued messages (public relays cover for it)</td></tr>
 </table>
 <details><summary>Alternatives considered (48 surveyed in round 1)</summary>
 <ul>
@@ -433,7 +433,7 @@ research/sync/demo/demo.sh --check    # non-interactive; prints status and exits
 <h3>C. Mac + Pi</h3>
 <div class="steps">
 <div class="step">On the Mac: <code>./install.sh --sync</code>. Keep the code it prints.</div>
-<div class="step">On the Pi: get the source there (<code>rsync -a --exclude target ~/SS/nerve/ pi@&lt;pi&gt;:nerve/</code>, since the branch isn't pushed), then <code>cd nerve &amp;&amp; ./install.sh nerve1…</code>. It builds (4.5 min on a Pi 5), joins and installs the service.</div>
+<div class="step">On the Pi: get the source there (<code>rsync -a --exclude target ~/src/nerve/ &lt;user&gt;@&lt;host&gt;:nerve/</code>, since the branch isn't pushed), then <code>cd nerve &amp;&amp; ./install.sh nerve1…</code>. It builds (4.5 min on a Pi 5), joins and installs the service.</div>
 <div class="step">Start Claude on the Pi in any repo (<code>tmux new -s work claude</code>). On the Mac run <code>nerve</code> and press <code>D</code>.</div>
 </div>
 <table>
@@ -448,7 +448,7 @@ research/sync/demo/demo.sh --check    # non-interactive; prints status and exits
 </table>
 
 <h3>D. Mac + Pi, scripted (E23–E26)</h3>
-<pre><code>PI=you@&lt;pi&gt; PI_KEY=~/.ssh/&lt;key&gt; research/sync/experiments/e23_pi_e2e.sh</code></pre>
+<pre><code>PI=&lt;user&gt;@&lt;host&gt; PI_KEY=~/.ssh/&lt;key&gt; research/sync/experiments/e23_pi_e2e.sh</code></pre>
 <p>This uses throwaway configs on both machines and only the two public relays. It installs and then removes a test systemd service on the Pi.</p>
 
 <h2 id="phone">10. Phones: Android and iPhone</h2>
@@ -466,14 +466,14 @@ research/sync/demo/demo.sh --check    # non-interactive; prints status and exits
 git clone &lt;your fork&gt; nerve &amp;&amp; cd nerve &amp;&amp; ./install.sh nerve1…</code></pre>
 <p>or copy the prebuilt static binary (no compiler needed on the phone):</p>
 <pre><code># on the Pi, once:  cargo build --release --features sync --target aarch64-unknown-linux-musl
-scp pi:nerve-src/target/aarch64-unknown-linux-musl/release/nerve $PREFIX/bin/
+scp &lt;host&gt;:nerve-src/target/aarch64-unknown-linux-musl/release/nerve $PREFIX/bin/
 nerve setup nerve1…</code></pre>
 <p>That's all you need: setup uses public relays, so the phone needs no Tailscale. Because Termux has no service manager, setup starts the agent as a detached process, takes a wake-lock, and writes <code>~/.termux/boot/nerve-sync</code> for Termux:Boot. Android may still kill background apps, so exempt Termux from battery optimisation. <span class="warn">This path is built but not yet run on a real phone.</span></p>
 
 <h3>iPhone</h3>
 <div class="steps">
 <div class="step">Install <b>Tailscale</b> and an SSH app (<b>Blink Shell</b> supports mosh, which survives sleep and network changes).</div>
-<div class="step"><code>ssh you@&lt;pi-tailscale-ip&gt;</code>, then <code>nerve</code>, then <code>D</code>. The Pi's service agent keeps running, and the TUI attaches to it.</div>
+<div class="step"><code>ssh you@&lt;relay-host&gt;</code>, then <code>nerve</code>, then <code>D</code>. The Pi's service agent keeps running, and the TUI attaches to it.</div>
 <div class="step">Below 90 columns the view switches to tabs (<code>Tab</code> moves between devices). Landscape helps.</div>
 </div>
 <p>SSHing into the Mac works for <code>nerve sync …</code> commands. A second <code>nerve</code> TUI is refused while the Mac's own TUI is open, because nerve allows one instance at a time.</p>

@@ -630,7 +630,7 @@ pub(crate) fn render_handoff_picker(frame: &mut Frame, theme: &Theme, view: &Syn
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Status-bar summary: "⇄ pi 12s · 1 needs you".
+/// Status-bar summary: "⇄ server 12s · 1 needs you".
 pub(crate) fn status_hint(view: &SyncView) -> Option<String> {
     if !view.running && view.error.is_none() {
         return None;
@@ -673,8 +673,8 @@ mod tests {
         SyncView {
             running: true,
             peers: vec![
-                PeerView { name: "mac".into(), ..Default::default() },
-                PeerView { name: "pi".into(), state_generated_at: Some(now_secs() - 5), state: Some(st), ..Default::default() },
+                PeerView { name: "laptop".into(), ..Default::default() },
+                PeerView { name: "server".into(), state_generated_at: Some(now_secs() - 5), state: Some(st), ..Default::default() },
             ],
             ..Default::default()
         }
@@ -684,11 +684,11 @@ mod tests {
     fn opens_on_the_device_that_needs_you_and_cycles() {
         let v = view();
         let mut ui = DevicesState::new();
-        assert_eq!(ui.current(&v).unwrap().name, "pi");
+        assert_eq!(ui.current(&v).unwrap().name, "server");
         ui.cycle(&v, true);
-        assert_eq!(ui.current(&v).unwrap().name, "mac");
+        assert_eq!(ui.current(&v).unwrap().name, "laptop");
         ui.cycle(&v, false);
-        assert_eq!(ui.current(&v).unwrap().name, "pi");
+        assert_eq!(ui.current(&v).unwrap().name, "server");
     }
 
     #[test]
@@ -719,7 +719,7 @@ mod tests {
     fn status_hint_shows_age_and_pending() {
         let mut v = view();
         v.peers.remove(0);
-        assert_eq!(status_hint(&v).unwrap(), "⇄ pi 5s · 1 needs you");
+        assert_eq!(status_hint(&v).unwrap(), "⇄ server 5s · 1 needs you");
         assert_eq!(status_hint(&SyncView::default()), None);
     }
 
@@ -732,13 +732,13 @@ mod tests {
             let mut ui = DevicesState::new();
             term.draw(|f| render(f, &theme, &view(), &mut ui)).unwrap();
             let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-            assert!(text.contains("pi"), "{w}x{h}");
+            assert!(text.contains("server"), "{w}x{h}");
             assert!(text.contains("NEEDS YOU"), "{w}x{h} shows what needs you");
             if w <= 60 {
                 assert!(!text.contains("can run:"), "{w}: phone layout drops the detail line");
             }
             if w < NARROW {
-                assert!(text.contains("● mac") && text.contains("pi (1)"), "{w}: tab strip with the waiting count");
+                assert!(text.contains("● laptop") && text.contains("server (1)"), "{w}: tab strip with the waiting count");
             }
         }
         let backend = ratatui::backend::TestBackend::new(60, 20);

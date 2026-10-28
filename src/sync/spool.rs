@@ -85,16 +85,16 @@ mod tests {
         let spool = dir.path().join("spool");
         std::fs::create_dir_all(&spool).unwrap();
         let reqs = [
-            Request::To { device: "pi".into(), body: Body::Answer { request: "ab".into(), answer: Answer::Allow } },
+            Request::To { device: "server".into(), body: Body::Answer { request: "ab".into(), answer: Answer::Allow } },
             Request::SetAway(true),
             Request::Xfer {
                 id: "x1".into(),
-                device: "pi".into(),
+                device: "server".into(),
                 offer: XferOffer { place: "h".into(), what: crate::sync::protocol::XferWhat::Files { roots: vec!["a".into()], delete: true }, for_req: None, bulk: None },
                 pull: true,
             },
-            Request::Run { spec: RunSpec { id: "r1".into(), argv: vec!["ls".into()], ..Default::default() }, device: "pi".into() },
-            Request::Handoff { session_id: "s".into(), cwd: "/x".into(), device: "pi".into(), continue_with: None, place: Some("h".into()), force: true },
+            Request::Run { spec: RunSpec { id: "r1".into(), argv: vec!["ls".into()], ..Default::default() }, device: "server".into() },
+            Request::Handoff { session_id: "s".into(), cwd: "/x".into(), device: "server".into(), continue_with: None, place: Some("h".into()), force: true },
         ];
         for (i, r) in reqs.iter().enumerate() {
             std::fs::write(spool.join(format!("{i}.json")), encode(r).to_string()).unwrap();
@@ -102,7 +102,7 @@ mod tests {
         }
         let got = drain(dir.path());
         assert_eq!(got.len(), 5);
-        assert!(matches!(&got[0], Request::To { device, .. } if device == "pi"));
+        assert!(matches!(&got[0], Request::To { device, .. } if device == "server"));
         assert!(matches!(got[1], Request::SetAway(true)));
         assert!(matches!(&got[2], Request::Xfer { id, pull: true, offer, .. } if id == "x1" && offer.place == "h"));
         assert!(matches!(&got[3], Request::Run { spec, .. } if spec.argv == ["ls"]));

@@ -881,8 +881,8 @@ mod tests {
     #[test]
     fn project_dir_encoding_matches_claude() {
         assert_eq!(
-            encode_project_dir(Path::new("/Users/me/SS/nyan/.claude/worktrees/wt-1")),
-            "-Users-me-SS-nyan--claude-worktrees-wt-1"
+            encode_project_dir(Path::new("/Users/me/code/web/.claude/worktrees/wt-1")),
+            "-Users-me-code-web--claude-worktrees-wt-1"
         );
         assert_eq!(encode_project_dir(Path::new("/a/b_c d")), "-a-b-c-d");
     }

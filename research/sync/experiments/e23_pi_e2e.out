@@ -8,13 +8,13 @@ nerve setup
   ✓ created device 'pi' (npub1twc6jr9…kdajun), relays: wss://relay.primal.net wss://relay.snort.social
   … asking mac to pair back
   ✓ paired with mac: mac now trusts 'pi'
-Created symlink '/home/sspi/.config/systemd/user/default.target.wants/nerve-sync.2fa65c5e.service' → '/home/sspi/.config/systemd/user/nerve-sync.2fa65c5e.service'.
+Created symlink '/home/user/.config/systemd/user/default.target.wants/nerve-sync.2fa65c5e.service' → '/home/user/.config/systemd/user/nerve-sync.2fa65c5e.service'.
   ✓ background agent runs as systemd user service nerve-sync.2fa65c5e (also while logged out)
 join + service install took 4 s
   nerve-sync.2fa65c5e.service loaded active running nerve sync agent
   ✓ device 'pi', 1 peer(s), 2 relay(s)
   ✓ sync agent running
-  ✓ mod socket /home/sspi/nerve-e23/sync/agent.sock
+  ✓ mod socket /home/user/nerve-e23/sync/agent.sock
   ✗ nerve mod missing or stale: run `nerve setup`
   ✓ 1 Claude session(s) on this device
   ✓ relay wss://relay.primal.net connected
@@ -55,7 +55,7 @@ prompt visible on the Mac after 149 s: NEVER
 13:49:22Z ok 4312cabb9c7c2c05: submitted to the session
 13:51:52Z pi ✗ 2d11141988d3ffb7: request already resolved
 answer → ack: 1.070589000 s
-cat: /home/sspi/nerve-e23-work/e25.txt: No such file or directory
+cat: /home/user/nerve-e23-work/e25.txt: No such file or directory
 
 === E26 hand the Pi session to the Mac, twice
 13:52:03Z mac ✓ 4944bc64b3692344: mac resumed 'nerve-e23-work' in tmux session nerve-b7bf812c at /private/var/folders/xb/p9pmqml919d6f8cq7l1ttp140000gn/T/nerve-e23/handoff/nerve-e23-work (6.3s)

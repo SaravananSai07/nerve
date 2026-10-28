@@ -133,14 +133,14 @@ mod tests {
         let mut snap = DiscoverySnapshot::for_test("78240abc-845e-4", SessionState::WaitingForInput);
         snap.name = Sanitised::new("Analyze repository");
         snap.kind = SessionKind::Background;
-        snap.cwd = "/Users/me/ape".into();
+        snap.cwd = "/Users/me/app".into();
         snap.claude_root = "/Users/me/.claude".into();
         snap.waiting_for = Some(Sanitised::new("reload app, open mic, Connect, ask a question"));
         let s = Session::from_snapshot(snap);
-        assert_eq!(s.project().as_ref().map(Sanitised::as_str), Some("ape"));
+        assert_eq!(s.project().as_ref().map(Sanitised::as_str), Some("app"));
         let rows = rows(&s);
         let get = |k| rows.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("folder"), Some("/Users/me/ape"));
+        assert_eq!(get("folder"), Some("/Users/me/app"));
         assert_eq!(get("job id"), Some("78240abc"));
         assert_eq!(get("waiting for"), Some("reload app, open mic, Connect, ask a question"));
         assert_eq!(get("reach it"), Some("CLAUDE_CONFIG_DIR='/Users/me/.claude' claude attach 78240abc"));

@@ -27,8 +27,8 @@ nerve sync — share agent progress across your devices over Nostr
   pair <name> <npub>                 trust a peer device
   relay <add|rm> <url>               edit the relay list
   install-hooks                      write Claude settings for remote answers
-  serve-relay [--port 7777]          run a private Nostr relay (e.g. on a Pi)
-  agent                              run the sync agent headless (Pi, server)
+  serve-relay [--port 7777]          run a private Nostr relay (on an always-on device)
+  agent                              run the sync agent headless (a server)
   status [--json]                    peers: last synced, sessions, pending
   sync                               republish now and ask peers to
   send <device> <session> <text>     type an instruction into a session
@@ -893,19 +893,19 @@ mod tests {
     #[test]
     fn run_end_is_read_from_outcome_lines_not_output() {
         let u = Until::RunEnd("ab12".into());
-        assert!(u.feed("10:00:00Z pi \u{2502} ab12 \u{2713} looks like an outcome").is_none());
-        assert!(u.feed("10:00:00Z pi \u{2713} ab12: run accepted: node x in /h").is_none(), "accepted is not the end");
-        let e = u.feed("10:00:01Z pi \u{2717} ab12: run finished: exit 3 (exit 3 after 0.1s)").unwrap();
+        assert!(u.feed("10:00:00Z server \u{2502} ab12 \u{2713} looks like an outcome").is_none());
+        assert!(u.feed("10:00:00Z server \u{2713} ab12: run accepted: node x in /h").is_none(), "accepted is not the end");
+        let e = u.feed("10:00:01Z server \u{2717} ab12: run finished: exit 3 (exit 3 after 0.1s)").unwrap();
         assert_eq!((e.ok, e.code), (false, Some(3)));
-        let r = u.feed("10:00:00Z pi \u{2717} ab12: not allowed on pi: …").unwrap();
+        let r = u.feed("10:00:00Z server \u{2717} ab12: not allowed on server: …").unwrap();
         assert_eq!(r.code, Some(NOT_RUN));
-        assert!(u.feed("10:00:00Z pi \u{2717} other: run finished: exit 0 (x)").is_none(), "other ids are ignored");
+        assert!(u.feed("10:00:00Z server \u{2717} other: run finished: exit 0 (x)").is_none(), "other ids are ignored");
     }
 
     #[test]
     fn transfers_end_on_their_own_id() {
         let u = Until::Id("x1".into());
         assert!(u.feed("10:00:00Z mac \u{2713} y2: something else").is_none());
-        assert!(u.feed("10:00:00Z pi \u{2713} x1: pi place h: 1 file(s) written").unwrap().ok);
+        assert!(u.feed("10:00:00Z server \u{2713} x1: server place h: 1 file(s) written").unwrap().ok);
     }
 }

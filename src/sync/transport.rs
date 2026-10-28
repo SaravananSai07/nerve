@@ -148,7 +148,7 @@ impl Transport {
 
     /// Bulk (handoff packs, diffs): only via connected self-hosted relays
     /// when there are any. Public relays rate-limit chunk trains (and
-    /// store them for everyone), a private relay on the tailnet does not.
+    /// store them for everyone), a private relay on a private network does not.
     pub(crate) async fn send_bulk(&self, to: &PublicKey, env: &Envelope) -> Result<(usize, EventId), String> {
         let private: Vec<String> = self
             .health()

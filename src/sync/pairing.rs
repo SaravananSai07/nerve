@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn code_round_trips_and_rejects_damage() {
-        let inv = Invite { v: 1, n: "mac".into(), k: "ab".repeat(32), s: "0f".repeat(16), r: vec!["wss://relay.primal.net".into()] };
+        let inv = Invite { v: 1, n: "laptop".into(), k: "ab".repeat(32), s: "0f".repeat(16), r: vec!["wss://relay.primal.net".into()] };
         let code = inv.encode();
         assert!(code.starts_with("nerve1") && !code.contains('=') && !code.contains('/'));
         assert_eq!(Invite::decode(&format!("  {code}\n")).unwrap(), inv);
@@ -145,14 +145,14 @@ mod tests {
     #[test]
     fn invites_are_single_use_and_expire() {
         let d = tempfile::tempdir().unwrap();
-        let inv = create(d.path(), "mac", &"ab".repeat(32), &[]).unwrap();
+        let inv = create(d.path(), "laptop", &"ab".repeat(32), &[]).unwrap();
         assert!(any_open(d.path()));
         assert!(!consume(d.path(), &"0".repeat(32)), "unknown secret");
         assert!(consume(d.path(), &inv.s));
         assert!(!consume(d.path(), &inv.s), "second use");
         assert!(!any_open(d.path()));
 
-        let old = create(d.path(), "mac", &"ab".repeat(32), &[]).unwrap();
+        let old = create(d.path(), "laptop", &"ab".repeat(32), &[]).unwrap();
         std::fs::write(d.path().join("invites").join(&old.s), "1").unwrap();
         assert!(!any_open(d.path()), "expired invites don't count and are removed");
         assert!(!consume(d.path(), &old.s));

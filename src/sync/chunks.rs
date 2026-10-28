@@ -350,12 +350,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::new(dir.path());
         let (a, b) = (id_of(b"a"), id_of(b"b"));
-        s.mark_known("pi00000000000000aa", [a.clone(), b.clone()]).unwrap();
-        assert_eq!(s.known("pi00000000000000aa").len(), 2);
+        s.mark_known("peer000000000000aa", [a.clone(), b.clone()]).unwrap();
+        assert_eq!(s.known("peer000000000000aa").len(), 2);
         assert!(s.known("mac0000000000000bb").is_empty());
-        s.forget_known("pi00000000000000aa", std::slice::from_ref(&a)).unwrap();
-        assert_eq!(s.known("pi00000000000000aa"), HashSet::from([b]));
-        s.mark_known("pi00000000000000aa", ["../../etc/passwd".to_string()]).unwrap();
-        assert_eq!(s.known("pi00000000000000aa").len(), 1, "junk ids are ignored");
+        s.forget_known("peer000000000000aa", std::slice::from_ref(&a)).unwrap();
+        assert_eq!(s.known("peer000000000000aa"), HashSet::from([b]));
+        s.mark_known("peer000000000000aa", ["../../etc/passwd".to_string()]).unwrap();
+        assert_eq!(s.known("peer000000000000aa").len(), 1, "junk ids are ignored");
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two-device nerve sync demo on one machine, no Pi, Tailscale or internet.
+# Two-device nerve sync demo on one machine, no second device, VPN or internet.
 #
 #   research/sync/demo/demo.sh           relay + "beta" agent, then the TUI as "alpha" (press D)
 #   research/sync/demo/demo.sh --job     also run a headless Claude job on beta (spends a few cents)

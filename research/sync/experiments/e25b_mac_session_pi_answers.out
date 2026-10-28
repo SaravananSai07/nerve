@@ -24,4 +24,4 @@ e25.txt on the Mac: mac-ok
   ⏸ manual mode on · ? for shortcuts · ← 1 agent
 
 === done
-research/sync/experiments/e25b_mac_session_pi_answers.sh: line 19: 67474 Terminated: 15          NERVE_CONFIG_DIR="$mac" "$nerve" sync agent > "$mac/agent.log" 2>&1  (wd: ~/SS/nerve)
+research/sync/experiments/e25b_mac_session_pi_answers.sh: line 19: 67474 Terminated: 15          NERVE_CONFIG_DIR="$mac" "$nerve" sync agent > "$mac/agent.log" 2>&1  (wd: ~/src/nerve)

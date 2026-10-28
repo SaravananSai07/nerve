@@ -714,12 +714,12 @@ mod tests {
     // say which repo it is. Worktrees name the repo, not the worktree.
     #[test]
     fn project_names_the_repo_unless_the_name_does() {
-        let mut s = Session::new("id1".into(), PathBuf::from("/home/u/ape"));
+        let mut s = Session::new("id1".into(), PathBuf::from("/home/u/app"));
         assert!(s.project().is_none(), "default name is already the folder");
         s.rename_to("Analyze repository".into());
-        assert_eq!(s.project().unwrap(), "ape");
-        s.cwd = PathBuf::from("/home/u/nyan/.claude/worktrees/design-files-09cbde");
-        assert_eq!(s.project().unwrap(), "nyan");
+        assert_eq!(s.project().unwrap(), "app");
+        s.cwd = PathBuf::from("/home/u/web/.claude/worktrees/design-files-09cbde");
+        assert_eq!(s.project().unwrap(), "web");
     }
 
     #[test]

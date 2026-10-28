@@ -39,12 +39,12 @@ A="$state/alpha-harness" B="$state/beta-harness"
 mkdir -p "$A"
 (cd "$A" && g init -q && echo harness >README && g add . && g commit -qm base)
 g clone -q "$A" "$B"
-mkdir -p "$A/units/S5" "$A/bin"
+mkdir -p "$A/notes/part1" "$A/bin"
 for i in $(seq 1 60); do
-  for j in $(seq 1 300); do echo "unit $i line $j: some plan text that goes on for a while"; done >"$A/units/S5/u$i.md"
+  for j in $(seq 1 300); do echo "unit $i line $j: some plan text that goes on for a while"; done >"$A/notes/part1/u$i.md"
 done
-printf '#!/bin/sh\necho "v2 $*"; [ "$1" = verify ] && exit 3; exit 0\n' >"$A/bin/v2.sh"
-chmod 755 "$A/bin/v2.sh"
+printf '#!/bin/sh\necho "check $*"; [ "$1" = verify ] && exit 3; exit 0\n' >"$A/bin/check.sh"
+chmod 755 "$A/bin/check.sh"
 
 alpha sync init --name alpha --relay "$relay" >/dev/null
 beta sync init --name beta --relay "$relay" >/dev/null
@@ -59,7 +59,7 @@ cat >>"$state/beta/sync/fleet.toml" <<EOF
 harness = "$B"
 
 [run]
-allow = [{ place = "harness", argv = ["./bin/v2.sh", "*"] }]
+allow = [{ place = "harness", argv = ["./bin/check.sh", "*"] }]
 EOF
 alpha sync pair beta "$(beta sync id)" >/dev/null
 beta sync pair alpha "$(alpha sync id)" >/dev/null
@@ -70,17 +70,17 @@ sleep 3
 
 step "alpha → beta: put units bin (first send)"
 alpha sync put beta harness units bin --wait 2>&1 | grep -E "✓|✗" | tail -1
-cmp -s "$A/units/S5/u7.md" "$B/units/S5/u7.md" || fail "u7 differs"
-[ -x "$B/bin/v2.sh" ] || fail "mode not kept"
+cmp -s "$A/notes/part1/u7.md" "$B/notes/part1/u7.md" || fail "u7 differs"
+[ -x "$B/bin/check.sh" ] || fail "mode not kept"
 
 step "alpha → beta: put again after changing one file"
-echo "one more line" >>"$A/units/S5/u3.md"
+echo "one more line" >>"$A/notes/part1/u3.md"
 alpha sync put beta harness units bin --wait 2>&1 | grep -E "✓|✗" | tail -1
-cmp -s "$A/units/S5/u3.md" "$B/units/S5/u3.md" || fail "u3 differs"
+cmp -s "$A/notes/part1/u3.md" "$B/notes/part1/u3.md" || fail "u3 differs"
 
 step "alpha runs beta's allowlisted script; --wait exits with its code"
 set +e
-alpha sync run beta --place harness --wait -- ./bin/v2.sh verify S5 2>/dev/null
+alpha sync run beta --place harness --wait -- ./bin/check.sh verify unit-1 2>/dev/null
 code=$?
 set -e
 echo "exit code: $code"
@@ -92,16 +92,16 @@ echo "$out" | grep -o "not allowed on beta.*" | head -1
 [ -d "$B/units" ] || fail "units deleted"
 
 step "beta pulls from alpha with --delete (beta initiates)"
-rm "$A/units/S5/u60.md"
-echo "stray" >"$B/units/S5/stray.md"
+rm "$A/notes/part1/u60.md"
+echo "stray" >"$B/notes/part1/stray.md"
 beta sync get alpha harness units --delete --wait 2>&1 | grep -E "✓|✗" | tail -1
-[ ! -e "$B/units/S5/u60.md" ] && [ ! -e "$B/units/S5/stray.md" ] || fail "--delete left files"
+[ ! -e "$B/notes/part1/u60.md" ] && [ ! -e "$B/notes/part1/stray.md" ] || fail "--delete left files"
 
-step "alpha sends a branch into beta's refs/remotes/alpha/v2-build"
-(cd "$A" && g checkout -qb v2-build && echo x >x.txt && g add x.txt && g commit -qm "on v2-build")
+step "alpha sends a branch into beta's refs/remotes/alpha/feature"
+(cd "$A" && g checkout -qb feature && echo x >x.txt && g add x.txt && g commit -qm "on feature")
 head_before=$(git -C "$B" rev-parse HEAD)
-alpha sync refs beta harness v2-build:refs/remotes/alpha/v2-build --wait 2>&1 | grep -E "✓|✗" | tail -1
-[ "$(git -C "$B" rev-parse refs/remotes/alpha/v2-build)" = "$(git -C "$A" rev-parse v2-build)" ] || fail "ref not set"
+alpha sync refs beta harness feature:refs/remotes/alpha/feature --wait 2>&1 | grep -E "✓|✗" | tail -1
+[ "$(git -C "$B" rev-parse refs/remotes/alpha/feature)" = "$(git -C "$A" rev-parse feature)" ] || fail "ref not set"
 [ "$(git -C "$B" rev-parse HEAD)" = "$head_before" ] || fail "beta HEAD moved"
 [ ! -e "$B/x.txt" ] || fail "worktree touched"
 
@@ -114,14 +114,14 @@ alpha sync status | grep -E "run " | head -2
 
 step "without an agent on alpha: the CLI runs its own for the exchange"
 kill "$alpha_pid"; sleep 1
-echo "two" >>"$A/units/S5/u2.md"
+echo "two" >>"$A/notes/part1/u2.md"
 alpha sync put beta harness units --wait 2>&1 | grep -E "✓|✗" | tail -1
-cmp -s "$A/units/S5/u2.md" "$B/units/S5/u2.md" || fail "u2 differs"
-echo "from beta" >"$B/units/S5/beta-note.md"
-alpha sync get beta harness units/S5/beta-note.md --wait 2>&1 | grep -E "✓|✗" | tail -1
-cmp -s "$B/units/S5/beta-note.md" "$A/units/S5/beta-note.md" || fail "get without agent"
+cmp -s "$A/notes/part1/u2.md" "$B/notes/part1/u2.md" || fail "u2 differs"
+echo "from beta" >"$B/notes/part1/beta-note.md"
+alpha sync get beta harness notes/part1/beta-note.md --wait 2>&1 | grep -E "✓|✗" | tail -1
+cmp -s "$B/notes/part1/beta-note.md" "$A/notes/part1/beta-note.md" || fail "get without agent"
 set +e
-alpha sync run beta --place harness --wait -- ./bin/v2.sh build 2>/dev/null
+alpha sync run beta --place harness --wait -- ./bin/check.sh build 2>/dev/null
 code=$?
 set -e
 [ "$code" = 0 ] || fail "expected 0, got $code"

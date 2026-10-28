@@ -40,20 +40,20 @@ See `docs/SYNC.md` for the full guide. In short:
 
 ```bash
 cargo build --release --features sync
-nerve sync init --name mac --relay wss://relay.primal.net --relay wss://relay.snort.social
-nerve sync pair pi npub1…            # and the reverse on the Pi
-nerve sync agent                     # on the Pi
-nerve                                # on the Mac: press D
+nerve sync init --name laptop --relay wss://relay.primal.net --relay wss://relay.snort.social
+nerve sync pair server npub1…        # and the reverse on the server
+nerve sync agent                     # on the server
+nerve                                # on the laptop: press D
 ```
 
-To add a private relay over Tailscale (about 16 ms instead of 0.5–1 s), run `nerve sync serve-relay` on the Pi. Then run `nerve sync relay add ws://<pi-tailscale-ip>:7777` on both devices.
+To add a private relay over Tailscale (about 16 ms instead of 0.5–1 s), run `nerve sync serve-relay` on an always-on device. Then run `nerve sync relay add ws://<relay-host>:7777` on both devices.
 
 ## What was verified, and where
 
 | claim | evidence |
 |---|---|
-| Every requirement end to end, Mac ⇄ Pi | `experiments/RESULTS.md` E10–E16 |
+| Every requirement end to end, laptop ⇄ server | `experiments/RESULTS.md` E10–E16 |
 | Public relays only, no Tailscale | E14 |
 | Offline store-and-forward | E15 |
-| A Mac agent delegating a verified job to the Pi | E16 |
+| A laptop agent delegating a verified job to the server | E16 |
 | This one-machine demo | `demo.sh --check`, run 2026-10-10. It found and fixed a same-second state-publish collision; the regression test is `transport::tests::back_to_back_state_publishes_are_both_accepted` |

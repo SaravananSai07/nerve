@@ -304,7 +304,7 @@ fn is_termux() -> bool {
 fn install_service(paths: &Paths, dir: &Path) -> Result<String, String> {
     let exe = exe()?;
     let log = dir.join("agent.log");
-    // Services start with a bare PATH; without ~/.local/bin a Pi's agent
+    // Services start with a bare PATH; without ~/.local/bin a server's agent
     // can't find claude for hand-offs and jobs.
     let path_env = super::bins::service_path(&std::env::var("PATH").unwrap_or_default(), &super::bins::extra_dirs());
     let cfg_env = std::env::var("NERVE_CONFIG_DIR").ok().filter(|s| !s.is_empty());
@@ -362,7 +362,7 @@ fn install_service(paths: &Paths, dir: &Path) -> Result<String, String> {
         if !(sc(&["daemon-reload"]) && sc(&["enable", &format!("{name}.service")]) && sc(&["restart", &format!("{name}.service")])) {
             return Err("systemctl --user failed".into());
         }
-        // Without lingering, user services stop at logout: a headless Pi
+        // Without lingering, user services stop at logout: a headless server
         // would lose its agent when the SSH session ends.
         let user = std::env::var("USER").unwrap_or_default();
         let linger = Command::new("loginctl").args(["enable-linger", &user]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn invite_codes_fit_a_terminal_qr() {
-        let inv = Invite { v: 1, n: "macbook".into(), k: "ab".repeat(32), s: "0f".repeat(16), r: vec!["ws://100.73.26.46:7777".into(), DEFAULT_RELAYS[0].into(), DEFAULT_RELAYS[1].into()] };
+        let inv = Invite { v: 1, n: "laptop".into(), k: "ab".repeat(32), s: "0f".repeat(16), r: vec!["ws://192.0.2.10:7777".into(), DEFAULT_RELAYS[0].into(), DEFAULT_RELAYS[1].into()] };
         let q = qr(&inv.encode()).expect("fits");
         assert!(q.lines().count() < 45, "{} rows", q.lines().count());
     }

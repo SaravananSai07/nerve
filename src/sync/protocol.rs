@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn envelope_round_trips_and_rejects_other_versions() {
-        let e = Envelope::new("mac", Body::Send { session: "s1".into(), text: "hi\nthere".into() });
+        let e = Envelope::new("laptop", Body::Send { session: "s1".into(), text: "hi\nthere".into() });
         let back = Envelope::decode(&e.encode()).unwrap();
         assert_eq!(back, e);
         let future = e.encode().replacen("\"v\":2", "\"v\":9", 1);
@@ -575,17 +575,17 @@ mod tests {
 
     #[test]
     fn slug_matches_claude_project_dirs() {
-        assert_eq!(project_slug("/home/sspi/nerve-lab/ho-plain"), "-home-sspi-nerve-lab-ho-plain");
+        assert_eq!(project_slug("/home/user/lab/ho-plain"), "-home-user-lab-ho-plain");
         assert_eq!(project_slug("/Users/a/SS/x.y"), "-Users-a-SS-x-y");
     }
 
     #[test]
     fn job_goes_to_least_busy_capable_device() {
-        let mac = ["xcode".to_string(), "ios-sim".to_string()];
-        let pi = ["linux".to_string(), "arm64".to_string()];
-        let devs = [("mac", &mac[..], 3), ("pi", &pi[..], 0)];
-        assert_eq!(pick_device(devs, &["ios-sim".into()]), Some("mac"));
-        assert_eq!(pick_device(devs, &[]), Some("pi"));
+        let laptop = ["xcode".to_string(), "ios-sim".to_string()];
+        let server = ["linux".to_string(), "arm64".to_string()];
+        let devs = [("laptop", &laptop[..], 3), ("server", &server[..], 0)];
+        assert_eq!(pick_device(devs, &["ios-sim".into()]), Some("laptop"));
+        assert_eq!(pick_device(devs, &[]), Some("server"));
         assert_eq!(pick_device(devs, &["gpu".into()]), None);
     }
 }

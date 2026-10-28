@@ -253,9 +253,9 @@ mod tests {
 
     #[test]
     fn only_a_final_star_globs() {
-        let p = v(&["node", "bin/v2.mjs", "*"]);
-        assert!(rule_matches(&p, &v(&["node", "bin/v2.mjs"])));
-        assert!(rule_matches(&p, &v(&["node", "bin/v2.mjs", "verify", "S5"])));
+        let p = v(&["node", "bin/check.mjs", "*"]);
+        assert!(rule_matches(&p, &v(&["node", "bin/check.mjs"])));
+        assert!(rule_matches(&p, &v(&["node", "bin/check.mjs", "verify", "S5"])));
         assert!(!rule_matches(&p, &v(&["node", "other.mjs", "x"])));
         assert!(!rule_matches(&p, &v(&["node"])));
         assert!(rule_matches(&v(&["make", "test"]), &v(&["make", "test"])));
@@ -266,7 +266,7 @@ mod tests {
     }
 
     fn fleet_with(dir: &Path) -> Fleet {
-        let mut f = Fleet { device: "pi".into(), ..Default::default() };
+        let mut f = Fleet { device: "server".into(), ..Default::default() };
         f.places.insert("harness".into(), dir.to_string_lossy().into_owned());
         f.run.allow.push(RunRule { place: Some("harness".into()), argv: v(&["echo", "*"]), ..Default::default() });
         f
@@ -299,7 +299,7 @@ mod tests {
         let (tx, rx) = channel();
         let spec = RunSpec { id: "r1".into(), argv: v(&["sh", "-c", "echo out; echo err >&2; pwd; exit 3"]), ..Default::default() };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
-        run(&spec, &plan, "pi", &tx);
+        run(&spec, &plan, "server", &tx);
         let last = rx.try_iter().last().unwrap();
         assert_eq!((last.phase.as_str(), last.exit_code, last.kind.as_str()), ("failed", Some(3), "run"));
         assert_eq!(last.lines, 3);
@@ -314,7 +314,7 @@ mod tests {
         let (tx, rx) = channel();
         let spec = RunSpec { id: "r2".into(), argv: v(&["echo", "$HOME; touch pwned"]), ..Default::default() };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
-        run(&spec, &plan, "pi", &tx);
+        run(&spec, &plan, "server", &tx);
         let last = rx.try_iter().last().unwrap();
         assert_eq!(last.exit_code, Some(0));
         assert_eq!(last.tail, vec!["$HOME; touch pwned".to_string()]);
@@ -331,7 +331,7 @@ mod tests {
         let (tx, rx) = channel();
         let spec = RunSpec { id: "r4".into(), argv: v(&["./bin/v2.sh", "verify", "S5"]), ..Default::default() };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
-        run(&spec, &plan, "pi", &tx);
+        run(&spec, &plan, "server", &tx);
         let last = rx.try_iter().last().unwrap();
         assert_eq!((last.exit_code, last.tail.clone()), (Some(0), vec!["v2 verify S5".to_string()]));
     }
@@ -343,7 +343,7 @@ mod tests {
         let spec = RunSpec { id: "r3".into(), argv: v(&["sleep", "30"]), timeout_secs: Some(1), ..Default::default() };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
         let t = Instant::now();
-        run(&spec, &plan, "pi", &tx);
+        run(&spec, &plan, "server", &tx);
         assert!(t.elapsed() < Duration::from_secs(10));
         let last = rx.try_iter().last().unwrap();
         assert_eq!(last.exit_code, Some(TIMED_OUT));

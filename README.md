@@ -230,7 +230,7 @@ nerve statusline [-- <cmd>]   # Claude statusLine hook (see above)
 ## Cross-device sync (experimental)
 
 Built with `--features sync`, nerve can follow and drive sessions on your
-other devices (a laptop, a Raspberry Pi) over Nostr relays, with or
+other devices (a laptop, a home server) over Nostr relays, with or
 without Tailscale: see progress and when each device last synced, type
 instructions into a remote session, answer its permission prompts and
 questions, read its diff, hand a session to another device to carry on,

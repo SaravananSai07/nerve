@@ -75,16 +75,16 @@ mod tests {
 
     #[test]
     fn service_path_keeps_order_and_adds_missing_dirs_once() {
-        let extra = [PathBuf::from("/home/pi/.local/bin"), PathBuf::from("/usr/bin")];
-        assert_eq!(service_path("/usr/bin:/bin", &extra), "/usr/bin:/bin:/usr/sbin:/sbin:/home/pi/.local/bin");
+        let extra = [PathBuf::from("/home/user/.local/bin"), PathBuf::from("/usr/bin")];
+        assert_eq!(service_path("/usr/bin:/bin", &extra), "/usr/bin:/bin:/usr/sbin:/sbin:/home/user/.local/bin");
         assert_eq!(service_path("", &[]), "/usr/bin:/bin:/usr/sbin:/sbin");
     }
 
     #[test]
     fn candidates_cover_user_and_homebrew_dirs() {
-        let c = candidates(Some(Path::new("/home/pi")));
-        assert_eq!(c[0], PathBuf::from("/home/pi/.local/bin"));
-        assert!(c.contains(&PathBuf::from("/home/pi/.cargo/bin")) && c.contains(&PathBuf::from("/opt/homebrew/bin")));
+        let c = candidates(Some(Path::new("/home/user")));
+        assert_eq!(c[0], PathBuf::from("/home/user/.local/bin"));
+        assert!(c.contains(&PathBuf::from("/home/user/.cargo/bin")) && c.contains(&PathBuf::from("/opt/homebrew/bin")));
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub(crate) struct RenderContext<'a> {
     pub(crate) update_banner: Option<&'a str>,
     pub(crate) search_query: Option<&'a str>,
     pub(crate) claude_installed: bool,
-    /// "⇄ pi 12s · 1 pending" when cross-device sync is on.
+    /// "⇄ server 12s · 1 pending" when cross-device sync is on.
     pub(crate) sync_hint: Option<String>,
 }
 
