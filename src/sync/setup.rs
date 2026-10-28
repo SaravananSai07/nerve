@@ -225,7 +225,7 @@ pub(crate) fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
 }
 
 fn claude_version() -> Option<(u32, u32, u32)> {
-    let out = Command::new("claude").arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = Command::new(super::bins::find("claude").ok()?).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     parse_version(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -264,8 +264,9 @@ fn install_mod(dir: &Path) -> Result<(), String> {
     let sock = super::modhub::socket_path(dir);
     let cfg = serde_json::json!({ "socket": sock.to_string_lossy() });
     std::fs::write(root.join("nerve/nerve.json"), cfg.to_string()).map_err(|e| e.to_string())?;
+    let exe = super::bins::find("claude")?;
     let claude = |args: &[&str]| -> Result<String, String> {
-        let out = Command::new("claude").args(args).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+        let out = Command::new(&exe).args(args).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if out.status.success() { Ok(text) } else { Err(text.trim().to_string()) }
     };
@@ -303,7 +304,9 @@ fn is_termux() -> bool {
 fn install_service(paths: &Paths, dir: &Path) -> Result<String, String> {
     let exe = exe()?;
     let log = dir.join("agent.log");
-    let path_env = std::env::var("PATH").unwrap_or_default();
+    // Services start with a bare PATH; without ~/.local/bin a Pi's agent
+    // can't find claude for hand-offs and jobs.
+    let path_env = super::bins::service_path(&std::env::var("PATH").unwrap_or_default(), &super::bins::extra_dirs());
     let cfg_env = std::env::var("NERVE_CONFIG_DIR").ok().filter(|s| !s.is_empty());
     let _ = paths;
     if cfg!(target_os = "macos") {

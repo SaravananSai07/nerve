@@ -9,9 +9,11 @@
 //! - `inject`: typing into a session's tmux pane / Ghostty tab
 //! - `handoff`: pack/unpack/resume a session on another device
 //! - `jobs`: headless capability-routed jobs
+//! - `bins`: executable lookup that survives a service's bare PATH
 //! - `cli`: `nerve sync ...`
 
 pub(crate) mod agent;
+pub(crate) mod bins;
 pub(crate) mod chunks;
 pub(crate) mod cli;
 pub(crate) mod fleet;

@@ -100,7 +100,16 @@ pub(crate) fn run(spec: JobSpec, device: &str, handoff_root: &Path, claude_root:
         send(&mut st);
         return;
     }
-    let mut cmd = Command::new("claude");
+    let claude = match super::bins::find("claude") {
+        Ok(c) => c,
+        Err(e) => {
+            st.phase = "failed".into();
+            st.result = Some(e);
+            send(&mut st);
+            return;
+        }
+    };
+    let mut cmd = Command::new(claude);
     cmd.args(["-p", "--output-format", "stream-json", "--verbose", "--permission-mode"])
         .arg(if spec.permission_mode.is_empty() { "acceptEdits" } else { spec.permission_mode.as_str() })
         // Nobody is at a headless job's keyboard: anything that would

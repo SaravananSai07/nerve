@@ -279,7 +279,7 @@ pub(crate) fn resume_in_tmux(inst: &Installed, claude_root: &Path, sync_settings
     let cwd = inst.cwd.to_string_lossy().into_owned();
     // The tmux server, not this process, runs the command, with the
     // server's environment: resolve claude here and pass env with -e.
-    let claude = which("claude").ok_or("claude not found on PATH")?;
+    let claude = super::bins::find("claude")?;
     let mut cmd = vec![
         claude.to_string_lossy().into_owned(),
         "--resume".into(),
@@ -341,14 +341,6 @@ pub(crate) fn accept_trust_dialog(tmux_session: &str) -> bool {
         }
     }
     false
-}
-
-fn which(bin: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|d| d.join(bin))
-        .find(|p| p.is_file())
 }
 
 struct TempDir(PathBuf);
