@@ -1,6 +1,7 @@
 //! Nostr transport: per-recipient NIP-44 encryption, state as addressable
 //! events, everything else as stored, expiring messages. Knows nothing
-//! about sessions; `agent` and `cli` give it envelopes.
+//! about sessions; `agent` and `cli` give it envelopes. Also hosts the
+//! fleet's own relay (`serve_relay`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -48,7 +49,7 @@ pub(crate) struct RelayHealth {
 impl Transport {
     pub(crate) async fn connect(keys: Keys, relays: &[String]) -> Result<Self, String> {
         if relays.is_empty() {
-            return Err("no relays configured (nerve sync init --relay ...)".into());
+            return Err("no relays configured (add one with `nerve sync relay add <url>`)".into());
         }
         let client = Client::builder().build();
         for r in relays {
@@ -174,10 +175,7 @@ impl Transport {
             .pubkey(me)
             .authors(authors.iter().copied())
             .since(Timestamp::from(since));
-        let states = Filter::new()
-            .kind(Kind::Custom(KIND_STATE))
-            .pubkey(me)
-            .authors(authors.iter().copied());
+        let states = Filter::new().kind(Kind::Custom(KIND_STATE)).pubkey(me).authors(authors.iter().copied());
         self.client.subscribe(msgs).await.map_err(|e| e.to_string())?;
         self.client.subscribe(states).await.map_err(|e| e.to_string())?;
         Ok(())
@@ -187,10 +185,7 @@ impl Transport {
     /// joining device's `PairRequest` gets through. The agent drops
     /// everything else from unknown keys.
     pub(crate) async fn subscribe_open(&self, since: u64) -> Result<SubscriptionId, String> {
-        let f = Filter::new()
-            .kind(Kind::Custom(KIND_MSG))
-            .pubkey(self.keys.public_key())
-            .since(Timestamp::from(since));
+        let f = Filter::new().kind(Kind::Custom(KIND_MSG)).pubkey(self.keys.public_key()).since(Timestamp::from(since));
         self.client.subscribe(f).await.map(|o| o.value).map_err(|e| e.to_string())
     }
 
@@ -226,11 +221,7 @@ impl Transport {
         }
         let plain = nip44::decrypt(self.keys.secret_key(), &event.pubkey, &event.content).ok()?;
         let envelope = Envelope::decode(&plain).ok()?;
-        Some(Inbound {
-            sender: event.pubkey,
-            created_at: event.created_at.as_secs(),
-            envelope,
-        })
+        Some(Inbound { sender: event.pubkey, created_at: event.created_at.as_secs(), envelope })
     }
 
     pub(crate) async fn disconnect(&self) {
@@ -238,28 +229,33 @@ impl Transport {
     }
 }
 
-/// Envelope ids already handled, bounded, persisted so a restart doesn't
-/// replay a stored `Send` into a live session twice.
+/// Envelope ids already handled, bounded, persisted so restart doesn't
+/// replay a stored `Send` into a live session twice. The file only
+/// grows by one line per id, and is rewritten once it holds twice the
+/// bound.
 pub(crate) struct Seen {
     path: std::path::PathBuf,
     order: VecDeque<String>,
     set: HashSet<String>,
+    /// Lines in the file, stale ones included.
+    on_disk: usize,
 }
 
 const SEEN_MAX: usize = 4000;
 
 impl Seen {
     pub(crate) fn load(path: std::path::PathBuf) -> Self {
-        let order: VecDeque<String> = std::fs::read_to_string(&path)
-            .unwrap_or_default()
-            .lines()
-            .map(String::from)
-            .collect();
+        let mut order: VecDeque<String> =
+            std::fs::read_to_string(&path).unwrap_or_default().lines().map(String::from).collect();
+        let on_disk = order.len();
+        while order.len() > SEEN_MAX {
+            order.pop_front();
+        }
         let set = order.iter().cloned().collect();
-        Self { path, order, set }
+        Self { path, order, set, on_disk }
     }
 
-    /// True the first time an id is seen.
+    /// True first time an id seen.
     pub(crate) fn first(&mut self, id: &str) -> bool {
         if self.set.contains(id) {
             return false;
@@ -271,15 +267,117 @@ impl Seen {
                 self.set.remove(&old);
             }
         }
-        let body: String = self.order.iter().map(|s| format!("{s}\n")).collect();
-        let _ = std::fs::write(&self.path, body);
+        if self.on_disk >= 2 * SEEN_MAX {
+            let body: String = self.order.iter().flat_map(|s| [s.as_str(), "\n"]).collect();
+            let _ = std::fs::write(&self.path, body);
+            self.on_disk = self.order.len();
+        } else {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+                let _ = writeln!(f, "{id}");
+            }
+            self.on_disk += 1;
+        }
         true
     }
+}
+
+/// `nerve sync serve-relay [--port N]`: run a private relay for the fleet.
+pub(crate) fn serve_relay(rest: &[&str]) -> Result<String, String> {
+    let port: u16 = match rest {
+        ["--port", p] => p.parse().map_err(|_| "bad port")?,
+        [] => 7777,
+        _ => return Err("usage: serve-relay [--port N]".into()),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        use nostr_sdk::prelude::*;
+        // Events up to 256 KiB. The library's default of 60 events a
+        // minute caps a transfer at ~2 MB a minute (32 KiB chunks); this
+        // relay only serves the fleet.
+        let db = relay_store();
+        let sweeper = db.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(RELAY_SWEEP);
+            loop {
+                every.tick().await;
+                let _ = sweep_expired(&sweeper).await;
+            }
+        });
+        let relay = LocalRelay::builder()
+            .database(db)
+            .rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 6_000 })
+            .addr("0.0.0.0".parse().map_err(|e: std::net::AddrParseError| e.to_string())?)
+            .port(port)
+            .max_event_size(256 * 1024)
+            .max_websocket_message_size(512 * 1024)
+            .build();
+        relay.run().await.map_err(|e| e.to_string())?;
+        eprintln!("nerve relay listening on ws://0.0.0.0:{port} (in-memory)");
+        let _ = tokio::signal::ctrl_c().await;
+        Ok::<_, String>(String::new())
+    })
+}
+
+/// The in-memory store hides expired events from readers but never
+/// drops them, so without a sweep it grows until the service's memory
+/// cap kills the relay (and every transfer in flight). The bound is the
+/// backstop for a burst within one sweep; the oldest go first.
+const RELAY_SWEEP: Duration = Duration::from_secs(10 * 60);
+const RELAY_MAX_EVENTS: usize = 4000;
+
+fn relay_store() -> std::sync::Arc<dyn nostr_sdk::prelude::NostrDatabase> {
+    use nostr_sdk::prelude::IntoNostrDatabase;
+    let max = std::num::NonZeroUsize::new(RELAY_MAX_EVENTS).unwrap_or(std::num::NonZeroUsize::MIN);
+    nostr_memory::MemoryDatabase::bounded(max).into_nostr_database()
+}
+
+/// Drop every event whose NIP-40 expiry has passed; how many went.
+async fn sweep_expired(db: &std::sync::Arc<dyn nostr_sdk::prelude::NostrDatabase>) -> Result<usize, String> {
+    use nostr_sdk::prelude::*;
+    let now = Timestamp::now();
+    let all = db.query(Filter::new()).await.map_err(|e| e.to_string())?;
+    let gone: Vec<EventId> = all.into_iter().filter(|e| e.is_expired_at(now)).map(|e| e.id).collect();
+    if !gone.is_empty() {
+        db.delete(Filter::new().ids(gone.iter().copied())).await.map_err(|e| e.to_string())?;
+    }
+    Ok(gone.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A running test relay and its url. `LocalRelay` finds a free port,
+    /// lets go of it and binds it again, so in a parallel run another test
+    /// can take it in between (AddrInUse): then a fresh relay tries again.
+    async fn start(build: impl Fn() -> LocalRelay) -> (LocalRelay, String) {
+        for _ in 0..10 {
+            let relay = build();
+            if relay.run().await.is_ok() {
+                let url = relay.url().await.to_string();
+                return (relay, url);
+            }
+        }
+        panic!("no free port for a test relay");
+    }
+
+    #[test]
+    fn seen_appends_and_compacts_without_forgetting_recent_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("seen");
+        let mut s = Seen::load(p.clone());
+        let total = 2 * SEEN_MAX + 10;
+        for i in 0..total {
+            assert!(s.first(&format!("id{i}")));
+        }
+        let lines = std::fs::read_to_string(&p).unwrap().lines().count();
+        assert!(lines <= 2 * SEEN_MAX, "compacted, not grown without bound: {lines}");
+        let mut again = Seen::load(p);
+        assert!(!again.first(&format!("id{}", total - 1)), "the newest survive a restart");
+        assert!(!again.first(&format!("id{}", total - SEEN_MAX)), "up to the bound");
+        assert!(again.first("id0"), "the oldest were dropped");
+    }
 
     #[test]
     fn seen_dedupes_across_restarts() {
@@ -299,9 +397,20 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let (a, b, c) = (Keys::generate(), Keys::generate(), Keys::generate());
-            let ta = Transport { client: Client::builder().build(), keys: a.clone(), paced: false, last_state: Default::default() };
-            let tb = Transport { client: Client::builder().build(), keys: b.clone(), paced: false, last_state: Default::default() };
-            let tc = Transport { client: Client::builder().build(), keys: c, paced: false, last_state: Default::default() };
+            let ta = Transport {
+                client: Client::builder().build(),
+                keys: a.clone(),
+                paced: false,
+                last_state: Default::default(),
+            };
+            let tb = Transport {
+                client: Client::builder().build(),
+                keys: b.clone(),
+                paced: false,
+                last_state: Default::default(),
+            };
+            let tc =
+                Transport { client: Client::builder().build(), keys: c, paced: false, last_state: Default::default() };
             let env = Envelope::new("a", protocol::Body::SyncNow);
             let ev = EventBuilder::new(Kind::Custom(KIND_MSG), ta.seal(&b.public_key(), &env).unwrap())
                 .tag(Tag::public_key(b.public_key()))
@@ -321,9 +430,7 @@ mod tests {
     fn back_to_back_state_publishes_are_both_accepted() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            let relay = LocalRelay::new();
-            relay.run().await.unwrap();
-            let url = relay.url().await.to_string();
+            let (relay, url) = start(LocalRelay::new).await;
             let t = Transport::connect(Keys::generate(), &[url]).await.unwrap();
             let to = Keys::generate().public_key();
             let env = Envelope::new("a", protocol::Body::SyncNow);
@@ -342,10 +449,8 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let db = nostr_memory::MemoryDatabase::unbounded().into_nostr_database();
-            let relay = LocalRelay::builder().database(db.clone()).build();
-            relay.run().await.unwrap();
-            let url = relay.url().await.to_string();
-            let t = Transport::connect(Keys::generate(), &[url]).await.unwrap();
+            let (relay, url) = start(|| LocalRelay::builder().database(db.clone()).build()).await;
+            let t = Transport::connect(Keys::generate(), std::slice::from_ref(&url)).await.unwrap();
             let to = Keys::generate().public_key();
             let env = Envelope::new("a", protocol::Body::SyncNow);
             let (_, kept) = t.send_bulk(&to, &env).await.unwrap();
@@ -359,7 +464,7 @@ mod tests {
             assert_eq!(held(vec![done]).await, 0, "deleted");
             assert_eq!(held(vec![kept]).await, 1, "only what was named");
             // Nobody else may delete our events.
-            let other = Transport::connect(Keys::generate(), &[relay.url().await.to_string()]).await.unwrap();
+            let other = Transport::connect(Keys::generate(), &[url]).await.unwrap();
             assert!(other.delete(&[kept]).await.is_err() || held(vec![kept]).await == 1);
             assert_eq!(held(vec![kept]).await, 1);
             relay.shutdown();
@@ -372,9 +477,8 @@ mod tests {
     fn a_train_longer_than_the_relay_limit_waits_instead_of_failing() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            let relay = LocalRelay::builder().rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 120 }).build();
-            relay.run().await.unwrap();
-            let url = relay.url().await.to_string();
+            let limit = RateLimit { max_reqs: 500, notes_per_minute: 120 };
+            let (relay, url) = start(|| LocalRelay::builder().rate_limit(limit.clone()).build()).await;
             let t = Transport::connect(Keys::generate(), &[url]).await.unwrap();
             let to = Keys::generate().public_key();
             let env = Envelope::new("a", protocol::Body::SyncNow);
@@ -382,6 +486,27 @@ mod tests {
                 assert_eq!(t.send_bulk(&to, &env).await.map(|(n, _)| n), Ok(1), "message {i}");
             }
             relay.shutdown();
+        });
+    }
+
+    #[test]
+    fn the_relay_sweep_drops_expired_events_and_keeps_live_ones() {
+        use nostr_sdk::prelude::*;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let db = relay_store();
+            let k = Keys::generate();
+            let ev =
+                |exp: Timestamp| EventBuilder::new(Kind::TextNote, "x").tag(Tag::expiration(exp)).finalize(&k).unwrap();
+            // The store refuses an event that is already expired, so this
+            // one expires after it is stored, as a relayed message does.
+            let (old, live) = (ev(Timestamp::now() + 1), ev(Timestamp::now() + 3600));
+            db.save_event(&old).await.unwrap();
+            db.save_event(&live).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+            assert_eq!(sweep_expired(&db).await, Ok(1));
+            let left = db.query(Filter::new()).await.unwrap();
+            assert_eq!(left.into_iter().map(|e| e.id).collect::<Vec<_>>(), vec![live.id]);
         });
     }
 }

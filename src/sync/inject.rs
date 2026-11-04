@@ -36,10 +36,7 @@ pub(crate) fn tmux_panes() -> Vec<(String, String)> {
 /// Match by tty: the pane's tty is the session's controlling tty.
 pub(crate) fn pane_for_tty(panes: &[(String, String)], tty: &str) -> Option<String> {
     let want = tty.trim_start_matches("/dev/");
-    panes
-        .iter()
-        .find(|(_, t)| t.trim_start_matches("/dev/") == want)
-        .map(|(id, _)| id.clone())
+    panes.iter().find(|(_, t)| t.trim_start_matches("/dev/") == want).map(|(id, _)| id.clone())
 }
 
 /// Resolve how to reach a session. Spawns tmux / osascript: worker only.
@@ -58,7 +55,6 @@ pub(crate) fn resolve(snap: &DiscoverySnapshot, panes: &[(String, String)]) -> O
             name: snap.name.as_str().to_string(),
             dir_name: snap.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             tty: Some(tty.to_string()),
-            kind: snap.kind,
         };
         if let Some(id) = crate::platform::ghostty::terminal_id_headless(&target) {
             return Some(InputTarget::Ghostty(id));
@@ -96,7 +92,11 @@ pub(crate) fn type_into(target: &InputTarget, text: &str) -> Result<(), String> 
                 .map_err(|e| format!("tmux: {e}"))?;
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write;
-                stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+                if let Err(e) = stdin.write_all(text.as_bytes()) {
+                    drop(stdin);
+                    let _ = child.wait();
+                    return Err(e.to_string());
+                }
             }
             if !child.wait().is_ok_and(|s| s.success()) {
                 return Err("tmux load-buffer failed".into());

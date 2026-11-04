@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 /// Per-user and Homebrew bin directories worth adding, in this order.
-fn candidates(home: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn candidates(home: Option<&Path>) -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(h) = home {
         v.push(h.join(".local/bin"));

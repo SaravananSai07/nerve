@@ -45,7 +45,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
-use super::protocol::{self, Answer, PendingRequest, Question, TurnInfo};
+use super::protocol::{Answer, PendingRequest, Question, TurnInfo};
 
 /// A mod that hasn't polled for this long is treated as gone (session
 /// closed, or Claude restarted without the mod).
@@ -57,13 +57,9 @@ const MAX_BODY: usize = 1024 * 1024;
 
 #[derive(Debug, Default)]
 struct ModSession {
-    cwd: String,
-    surface: String,
-    version: String,
     last_seen: Option<Instant>,
     queue: VecDeque<Value>,
     running: bool,
-    turn_started: Option<Instant>,
     /// The status line this session's mod last received.
     status_sent: String,
     last_turn: Option<TurnInfo>,
@@ -212,9 +208,6 @@ impl ModHub {
             ("POST", "/v1/hello") => {
                 let mut g = self.lock();
                 let s = g.sessions.entry(sid).or_default();
-                s.cwd = str_field(body, "cwd", 4096);
-                s.surface = str_field(body, "surface", 32);
-                s.version = str_field(body, "version", 32);
                 s.last_seen = Some(Instant::now());
                 g.events.push(HubEvent::Changed);
                 json!({"ok": true})
@@ -246,18 +239,19 @@ impl ModHub {
                 match body.get("kind").and_then(Value::as_str) {
                     Some("turn.start") => {
                         s.running = true;
-                        s.turn_started = Some(Instant::now());
                     }
                     Some("turn.complete") => {
                         s.running = false;
                         let u = body.get("usage").cloned().unwrap_or(Value::Null);
                         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                         s.last_turn = Some(TurnInfo {
-                            ended_at: protocol::now_secs(),
+                            ended_at: crate::util::now_secs(),
                             ms: body.get("ms").and_then(Value::as_u64).unwrap_or(0),
                             reason: str_field(body, "reason", 32),
                             model: u.get("model").and_then(Value::as_str).unwrap_or("").chars().take(64).collect(),
-                            input_tokens: n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens"),
+                            input_tokens: n("input_tokens")
+                                + n("cache_read_input_tokens")
+                                + n("cache_creation_input_tokens"),
                             output_tokens: n("output_tokens"),
                         });
                     }
@@ -278,7 +272,8 @@ impl ModHub {
                 json!({"ok": true})
             }
             ("GET", "/v1/wait") => {
-                let id: String = query.split('&').find_map(|kv| kv.strip_prefix("id=")).unwrap_or("").chars().take(32).collect();
+                let id: String =
+                    query.split('&').find_map(|kv| kv.strip_prefix("id=")).unwrap_or("").chars().take(32).collect();
                 let deadline = Instant::now() + ANSWER_WAIT;
                 loop {
                     let wake = self.wake.notified();
@@ -339,7 +334,7 @@ fn to_request(id: &str, sid: &str, body: &Value) -> PendingRequest {
     let tool = str_field(body, "tool", 128);
     let input = body.get("input").cloned().unwrap_or(Value::Null);
     let hook_like = json!({"tool_name": tool, "tool_input": input, "session_id": sid});
-    let mut r = super::mailbox::to_request(id, &hook_like, protocol::now_secs());
+    let mut r = super::mailbox::to_request(id, &hook_like, crate::util::now_secs());
     r.questions.iter_mut().for_each(|q: &mut Question| q.options.truncate(9));
     r
 }
@@ -376,7 +371,8 @@ async fn handle(mut s: UnixStream, hub: Arc<ModHub>) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
     let head_end = loop {
-        let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut tmp)).await.map_err(std::io::Error::other)??;
+        let n =
+            tokio::time::timeout(Duration::from_secs(10), s.read(&mut tmp)).await.map_err(std::io::Error::other)??;
         if n == 0 {
             return Ok(());
         }
@@ -402,7 +398,8 @@ async fn handle(mut s: UnixStream, hub: Arc<ModHub>) -> std::io::Result<()> {
     }
     let mut body = buf[head_end + 4..].to_vec();
     while body.len() < len {
-        let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut tmp)).await.map_err(std::io::Error::other)??;
+        let n =
+            tokio::time::timeout(Duration::from_secs(10), s.read(&mut tmp)).await.map_err(std::io::Error::other)??;
         if n == 0 {
             break;
         }
@@ -443,7 +440,11 @@ mod tests {
             assert_eq!(got["cmds"][0]["t"], "prompt");
             assert_eq!(got["cmds"][0]["text"], "run the tests[A", "control keys are stripped");
             hub.route("POST", "/v1/ack", &json!({"sid": SID, "cmd": "c1", "ok": true, "msg": "submitted"})).await;
-            assert!(hub.drain_events().contains(&HubEvent::Ack { cmd: "c1".into(), ok: true, msg: "submitted".into() }));
+            assert!(hub.drain_events().contains(&HubEvent::Ack {
+                cmd: "c1".into(),
+                ok: true,
+                msg: "submitted".into()
+            }));
         });
     }
 
@@ -476,7 +477,12 @@ mod tests {
     fn a_request_whose_hook_stops_waiting_is_withdrawn() {
         rt().block_on(async {
             let hub = ModHub::default();
-            hub.route("POST", "/v1/request", &json!({"sid": SID, "id": "ef56", "tool": "Bash", "input": {"command": "ls"}})).await;
+            hub.route(
+                "POST",
+                "/v1/request",
+                &json!({"sid": SID, "id": "ef56", "tool": "Bash", "input": {"command": "ls"}}),
+            )
+            .await;
             hub.lock().requests.get_mut("ef56").unwrap().last_wait = Instant::now() - WAIT_GONE;
             assert!(hub.drain_events().contains(&HubEvent::Changed));
             assert!(hub.pending().is_empty());
@@ -492,11 +498,14 @@ mod tests {
             hub.set_status("⇄ nerve · server 1s · 1 waiting on another device".into());
             let h = hub.clone();
             let t = Instant::now();
-            let got = tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await }).await.unwrap();
+            let got = tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await })
+                .await
+                .unwrap();
             assert!(t.elapsed() < Duration::from_secs(1), "returned at once");
             assert!(got["status"].as_str().unwrap().contains("1 waiting"));
             let h = hub.clone();
-            let waiter = tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await });
+            let waiter =
+                tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await });
             tokio::time::sleep(Duration::from_millis(100)).await;
             hub.set_status("⇄ nerve · server 2s".into());
             let got = tokio::time::timeout(Duration::from_secs(1), waiter).await.expect("woken by the change").unwrap();

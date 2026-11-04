@@ -14,17 +14,33 @@
 //!   objects the target unbundles before pointing exactly the named
 //!   destination refs at them. Nothing checks out, and HEAD, the index,
 //!   the working tree and every other ref stay as they were.
+//!
+//! Big files take a third way, **bulk**: files at or over `[xfer] bulk_over`
+//! (and any transfer the relay fails to carry) go straight between the
+//! devices over rsync/ssh, run by whichever side has a route (`[ssh]`). The
+//! relay carries only the offer, the other side's path and the outcome.
+//! The rules above hold here too: roots are relative and stay inside the
+//! place, symlinks are neither followed nor sent, and `--delete` reaches
+//! only into the directories that were named. Each root is its own rsync,
+//! so neither the path nor `--delete` depends on `--relative`, which
+//! macOS's openrsync implements without the `/./` anchor.
 
 use std::collections::{BTreeSet, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::chunks::{FileRef, Store};
-use super::handoff::{git_root, is_sha, repo_id, run, safe_rel, tempdir, text, walk};
-use super::protocol::RefMap;
+use super::protocol::{BulkOffer, RefMap};
+use crate::detect::git::{git_root, is_sha, repo_id};
+use crate::util::fs::{safe_rel, tempdir, walk};
+use crate::util::text::{format_bytes, shell_quote};
+use crate::util::{run, text};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct PlaceFile {
@@ -74,7 +90,9 @@ pub(crate) fn norm_root(root: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     let r = r.strip_prefix("./").unwrap_or(r);
-    safe_rel(r).map(String::from).ok_or_else(|| format!("{root}: paths must be relative to the place and stay inside it"))
+    safe_rel(r)
+        .map(String::from)
+        .ok_or_else(|| format!("{root}: paths must be relative to the place and stay inside it"))
 }
 
 fn join(base: &Path, rel: &str) -> PathBuf {
@@ -85,12 +103,13 @@ fn join(base: &Path, rel: &str) -> PathBuf {
     }
 }
 
-/// Sender: chunk every regular file under `roots` into `store`.
-/// Symlinks are not followed and not sent.
-pub(crate) fn pack_files(base: &Path, roots: &[String], delete: bool, store: &Store) -> Result<XferPack, String> {
-    if !base.is_dir() {
-        return Err(format!("{} is not a directory", base.display()));
-    }
+/// Files as (path relative to the place, full path).
+pub(crate) type Picked = Vec<(String, PathBuf)>;
+
+/// Sender: the regular files under `roots`, each once and sorted by path
+/// relative to the place, and which roots were directories. A symlinked
+/// root is refused; symlinks inside one are skipped.
+pub(crate) fn pick(base: &Path, roots: &[String]) -> Result<(Picked, Vec<String>), String> {
     let mut picked: Vec<(String, PathBuf)> = Vec::new();
     let mut dirs = Vec::new();
     for root in roots {
@@ -109,6 +128,16 @@ pub(crate) fn pack_files(base: &Path, roots: &[String], delete: bool, store: &St
     let mut seen = HashSet::new();
     picked.retain(|(rel, _)| seen.insert(rel.clone()));
     picked.sort();
+    Ok((picked, dirs))
+}
+
+/// Sender: chunk every regular file under `roots` into `store`.
+/// Symlinks are not followed and not sent.
+pub(crate) fn pack_files(base: &Path, roots: &[String], delete: bool, store: &Store) -> Result<XferPack, String> {
+    if !base.is_dir() {
+        return Err(format!("{} is not a directory", base.display()));
+    }
+    let (picked, dirs) = pick(base, roots)?;
     let mut files = Vec::with_capacity(picked.len());
     for (rel, p) in picked {
         let bytes = std::fs::read(&p).map_err(|e| format!("{rel}: {e}"))?;
@@ -134,7 +163,9 @@ fn check_parents(base: &Path, rel: &str, create: bool) -> Result<(), String> {
     for c in comps.iter().take(comps.len().saturating_sub(1)) {
         cur.push(c);
         match std::fs::symlink_metadata(&cur) {
-            Ok(m) if m.file_type().is_symlink() => return Err(format!("refusing to write through symlink {}", cur.display())),
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!("refusing to write through symlink {}", cur.display()))
+            }
             Ok(m) if m.is_dir() => {}
             Ok(_) => return Err(format!("{} is a file, not a directory", cur.display())),
             Err(_) if create => std::fs::create_dir(&cur).map_err(|e| format!("{}: {e}", cur.display()))?,
@@ -180,9 +211,9 @@ pub(crate) fn apply_files(pack: &XferPack, base: &Path, store: &Store) -> Result
         let bytes = store.assemble(&f.file).map_err(|m| format!("{} chunk(s) of {} missing", m.len(), f.file.name))?;
         let dest = base.join(&f.file.name);
         let mode = f.mode & 0o777;
-        let same = std::fs::symlink_metadata(&dest).is_ok_and(|m| {
-            m.is_file() && m.len() == bytes.len() as u64 && m.permissions().mode() & 0o777 == mode
-        }) && std::fs::read(&dest).is_ok_and(|b| b == bytes);
+        let same = std::fs::symlink_metadata(&dest)
+            .is_ok_and(|m| m.is_file() && m.len() == bytes.len() as u64 && m.permissions().mode() & 0o777 == mode)
+            && std::fs::read(&dest).is_ok_and(|b| b == bytes);
         if same {
             out.unchanged += 1;
             continue;
@@ -207,7 +238,10 @@ pub(crate) fn apply_files(pack: &XferPack, base: &Path, store: &Store) -> Result
         let keep: HashSet<&str> = files.iter().map(|f| f.file.name.as_str()).collect();
         for d in dirs {
             let root = join(&base, d);
-            if !d.is_empty() && (check_parents(&base, &format!("{d}/x"), false).is_err() || !std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir())) {
+            if !d.is_empty()
+                && (check_parents(&base, &format!("{d}/x"), false).is_err()
+                    || !std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()))
+            {
                 continue;
             }
             let mut have = Vec::new();
@@ -257,9 +291,20 @@ pub(crate) fn place_repo(place: &Path) -> Result<PathBuf, String> {
 /// Commits the target already has: its branch and remote-tracking tips,
 /// newest first, capped so the answer fits one message.
 pub(crate) fn repo_tips(repo: &Path) -> Vec<String> {
-    text(repo, &["git", "for-each-ref", "--sort=-committerdate", "--count=500", "--format=%(objectname)", "refs/heads", "refs/remotes"])
-        .map(|s| s.lines().filter(|l| is_sha(l)).map(String::from).collect())
-        .unwrap_or_default()
+    text(
+        repo,
+        &[
+            "git",
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--count=500",
+            "--format=%(objectname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )
+    .map(|s| s.lines().filter(|l| is_sha(l)).map(String::from).collect())
+    .unwrap_or_default()
 }
 
 pub(crate) fn this_repo_id(repo: &Path) -> String {
@@ -274,7 +319,10 @@ pub(crate) fn check_dst(repo: &Path, dst: &str) -> Result<(), String> {
         return Err(format!("{dst}: destination must be a full ref name such as refs/remotes/laptop/main"));
     }
     if text(repo, &["git", "symbolic-ref", "-q", "HEAD"]).is_ok_and(|h| h == dst) {
-        return Err(format!("{dst} is checked out in {}; pick a ref that isn't, such as refs/remotes/<peer>/…", repo.display()));
+        return Err(format!(
+            "{dst} is checked out in {}; pick a ref that isn't, such as refs/remotes/<peer>/…",
+            repo.display()
+        ));
     }
     Ok(())
 }
@@ -316,7 +364,11 @@ pub(crate) fn pack_refs(place: &Path, map: &[RefMap], have: &[String], store: &S
     }
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     let bundle = match run(&repo, &argv) {
-        Ok(_) => Some(store.add_file("refs.bundle", &std::fs::read(&file).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?),
+        Ok(_) => Some(
+            store
+                .add_file("refs.bundle", &std::fs::read(&file).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?,
+        ),
         Err(e) if e.contains("empty bundle") => None,
         Err(e) => return Err(e),
     };
@@ -346,7 +398,8 @@ pub(crate) fn apply_refs(pack: &XferPack, place: &Path, store: &Store) -> Result
     }
     let mut lines = Vec::new();
     for r in refs {
-        run(&repo, &["git", "cat-file", "-e", &format!("{}^{{commit}}", r.sha)]).map_err(|_| format!("commit {} for {} did not arrive", &r.sha[..12], r.dst))?;
+        run(&repo, &["git", "cat-file", "-e", &format!("{}^{{commit}}", r.sha)])
+            .map_err(|_| format!("commit {} for {} did not arrive", &r.sha[..12], r.dst))?;
         let old = text(&repo, &["git", "rev-parse", "-q", "--verify", &r.dst]).ok();
         if old.as_deref() == Some(r.sha.as_str()) {
             lines.push(format!("{} = {} (unchanged)", r.dst, &r.sha[..10]));
@@ -359,6 +412,229 @@ pub(crate) fn apply_refs(pack: &XferPack, place: &Path, store: &Store) -> Result
         });
     }
     Ok(lines)
+}
+
+// ---- bulk: big files over rsync ----
+
+const ATTEMPTS: u32 = 3;
+const SSH: &str = "ssh -o BatchMode=yes -o ConnectTimeout=15";
+/// How often a running rsync says it is still going, so a follower
+/// can tell a long copy from a stalled one.
+pub(crate) const HEARTBEAT: Duration = Duration::from_secs(60);
+
+/// Sender: what the roots hold. A symlinked root is refused, as the
+/// relay path refuses it.
+pub(crate) fn scan(base: &Path, roots: &[String]) -> Result<BulkOffer, String> {
+    let (picked, dirs) = pick(base, roots)?;
+    let bytes = picked.iter().filter_map(|(_, p)| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    Ok(BulkOffer { dirs, files: picked.len(), bytes, src: None })
+}
+
+/// One end of a copy: a local directory, or one on an ssh host.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum End {
+    Local(PathBuf),
+    Remote { host: String, path: PathBuf },
+}
+
+/// The rsync for one root. `quote`: the client passes remote paths
+/// through the remote shell as they are (openrsync, rsync < 3.2.4).
+pub(crate) fn argv(src: &End, dst: &End, rel: &str, is_dir: bool, delete: bool, quote: bool) -> Vec<String> {
+    let spec = |e: &End| {
+        let (host, base) = match e {
+            End::Local(p) => (None, p),
+            End::Remote { host, path } => (Some(host), path),
+        };
+        let mut s = if rel.is_empty() { base.display().to_string() } else { base.join(rel).display().to_string() };
+        if is_dir {
+            s.push('/');
+        }
+        match host {
+            Some(h) => format!("{h}:{}", if quote { shell_quote(&s) } else { s }),
+            None => s,
+        }
+    };
+    // -rtp, not -a: no -l (symlinks are skipped, never sent), no -D, and
+    // owners stay whoever the receiving user is.
+    let mut a: Vec<String> = ["rsync", "-rtp", "--partial", "-e", SSH].iter().map(|s| s.to_string()).collect();
+    if delete && is_dir {
+        a.push("--delete".into());
+    }
+    a.push(spec(src));
+    a.push(spec(dst));
+    a
+}
+
+/// Whether this device's rsync needs remote paths quoted for the
+/// remote shell: GNU rsync from 3.2.4 escapes them itself.
+fn rsync_quotes() -> bool {
+    static Q: OnceLock<bool> = OnceLock::new();
+    *Q.get_or_init(|| {
+        let v = Command::new("rsync")
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        needs_quoting(&v)
+    })
+}
+
+fn needs_quoting(version: &str) -> bool {
+    let first = version.lines().next().unwrap_or("");
+    if first.contains("openrsync") {
+        return true;
+    }
+    let ver = first.split_whitespace().skip_while(|w| *w != "version").nth(1).unwrap_or("0");
+    let n: Vec<u32> = ver.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    (n.first().copied().unwrap_or(0), n.get(1).copied().unwrap_or(0), n.get(2).copied().unwrap_or(0)) < (3, 2, 4)
+}
+
+/// Copy every root, each up to three times (`--partial` resumes a
+/// cut-off file). `beat` hears a line every `HEARTBEAT` while it runs.
+pub(crate) fn copy(
+    src: &End,
+    dst: &End,
+    roots: &[String],
+    offer: &BulkOffer,
+    delete: bool,
+    beat: &dyn Fn(String),
+) -> Result<String, String> {
+    let started = Instant::now();
+    let quote = rsync_quotes();
+    for root in roots {
+        let rel = norm_root(root)?;
+        if let End::Local(base) = dst {
+            ready_for(base, &rel)?;
+        }
+        let is_dir = offer.dirs.contains(&rel);
+        let a = argv(src, dst, &rel, is_dir, delete, quote);
+        let mut last = String::new();
+        for attempt in 1..=ATTEMPTS {
+            match rsync_one(&a, &|secs| {
+                beat(format!("rsync {} attempt {attempt}: {secs}s", if rel.is_empty() { "." } else { &rel }))
+            }) {
+                Ok(()) => {
+                    last.clear();
+                    break;
+                }
+                Err(e) => {
+                    last = e;
+                    if attempt < ATTEMPTS {
+                        beat(format!(
+                            "rsync {} attempt {attempt} failed ({last}); retrying",
+                            if rel.is_empty() { "." } else { &rel }
+                        ));
+                        std::thread::sleep(Duration::from_secs(5 * attempt as u64));
+                    }
+                }
+            }
+        }
+        if !last.is_empty() {
+            return Err(format!("rsync failed after {ATTEMPTS} attempts: {last}"));
+        }
+    }
+    Ok(format!(
+        "via rsync, {} file(s), {} in {:.1}s",
+        offer.files,
+        format_bytes(offer.bytes),
+        started.elapsed().as_secs_f64()
+    ))
+}
+
+fn rsync_one(argv: &[String], beat: &dyn Fn(u64)) -> Result<(), String> {
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start rsync: {e}"))?;
+    // Read stderr off-thread, or a chatty rsync blocks on a full pipe.
+    let mut err = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(e) = err.as_mut() {
+            let _ = e.read_to_string(&mut s);
+        }
+        s
+    });
+    let started = Instant::now();
+    let mut next = HEARTBEAT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
+        }
+        if started.elapsed() >= next {
+            beat(started.elapsed().as_secs());
+            next += HEARTBEAT;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let stderr = reader.join().unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    // "skipping non-regular file" is rsync obeying the symlink rule.
+    let why = stderr.lines().rfind(|l| !l.starts_with("skipping non-regular file")).unwrap_or("").trim().to_string();
+    Err(if why.is_empty() { format!("rsync exited with {status}") } else { why })
+}
+
+/// The far side's answer to `nerve sync place`: its own path of the
+/// place, and (as a source) what the roots hold.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PlaceInfo {
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) scan: Option<BulkOffer>,
+}
+
+/// When the relay cannot carry the coordination: ask the far side's
+/// own nerve, over the same ssh route, where its place is (and check
+/// the roots there by its own rules). A service's or a bare ssh
+/// session's PATH may lack the per-user bin directories nerve sits in.
+pub(crate) fn remote_place(host: &str, place: &str, as_src: bool, roots: &[String]) -> Result<PlaceInfo, String> {
+    let extra: Vec<String> =
+        super::bins::candidates(Some(Path::new("$HOME"))).iter().map(|d| d.display().to_string()).collect();
+    let mut cmd = format!(
+        "PATH=\"{}:$PATH\" exec nerve sync place {} {}",
+        extra.join(":"),
+        shell_quote(place),
+        if as_src { "--src" } else { "--dst" }
+    );
+    for r in roots {
+        cmd.push(' ');
+        cmd.push_str(&shell_quote(r));
+    }
+    let out = Command::new("ssh")
+        .args(SSH.split_whitespace().skip(1))
+        .args([host, &cmd])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("ssh {host}: {e}"))?;
+    if !out.status.success() {
+        let e = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("{host}: {}", e.lines().last().unwrap_or("nerve sync place failed").trim()));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("{host}: unreadable answer from nerve sync place: {e}"))
+}
+
+/// `nerve sync place <name> --src|--dst <root>...`, on the far side.
+pub(crate) fn place_info(base: &Path, as_src: bool, roots: &[String]) -> Result<PlaceInfo, String> {
+    let scan = if as_src {
+        Some(scan(base, roots)?)
+    } else {
+        for r in roots {
+            ready_for(base, &norm_root(r)?)?;
+        }
+        None
+    };
+    Ok(PlaceInfo { path: base.display().to_string(), scan })
 }
 
 #[cfg(test)]
@@ -390,7 +666,7 @@ mod tests {
         std::fs::create_dir_all(a.join("bin")).unwrap();
         std::fs::create_dir_all(a.join("units/S5")).unwrap();
         for i in 0..40 {
-            let body: String = (0..400).map(|j| format!("unit {i} line {j}\n")).collect();
+            let body = (0..400).map(|j| format!("unit {i} line {j}")).collect::<Vec<_>>().join("\n") + "\n";
             std::fs::write(a.join(format!("units/S5/f{i}.md")), body).unwrap();
         }
         std::fs::write(a.join("bin/check.mjs"), "#!/usr/bin/env node\n").unwrap();
@@ -411,11 +687,17 @@ mod tests {
         std::fs::write(a.join("units/S5/f3.md"), body).unwrap();
         let p2 = pack_files(&a, &roots, false, &sa).unwrap();
         let (n, bytes) = move_chunks(&p2, &sa, &sb);
-        assert!(n <= 2 && bytes * 20 < first_bytes, "repeat moved {n} chunks / {bytes} B; first {first_n} / {first_bytes} B");
+        assert!(
+            n <= 2 && bytes * 20 < first_bytes,
+            "repeat moved {n} chunks / {bytes} B; first {first_n} / {first_bytes} B"
+        );
         let got = apply_files(&p2, &b, &sb).unwrap();
         assert_eq!((got.written, got.unchanged), (1, 40));
         // No temp files left behind.
-        assert!(std::fs::read_dir(b.join("units/S5")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with('.')));
+        assert!(std::fs::read_dir(b.join("units/S5"))
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().starts_with('.')));
     }
 
     #[test]
@@ -508,7 +790,10 @@ mod tests {
         assert!(n >= 1);
         let lines = apply_refs(&p, &b, &sb).unwrap();
         assert!(lines[0].contains("refs/remotes/laptop/feature") && lines[0].contains("(new)"), "{lines:?}");
-        assert_eq!(text(&b, &["git", "rev-parse", "refs/remotes/laptop/feature"]).unwrap(), text(&a, &["git", "rev-parse", "feature"]).unwrap());
+        assert_eq!(
+            text(&b, &["git", "rev-parse", "refs/remotes/laptop/feature"]).unwrap(),
+            text(&a, &["git", "rev-parse", "feature"]).unwrap()
+        );
         assert_eq!(text(&b, &["git", "rev-parse", "HEAD"]).unwrap(), head_before, "HEAD did not move");
         assert_eq!(std::fs::read_to_string(b.join("f")).unwrap(), "local edit\n", "worktree untouched");
         assert!(!b.join("g").exists());
@@ -525,5 +810,78 @@ mod tests {
         assert!(check_dst(&b, "main").is_err() && check_dst(&b, "refs/heads/a..b").is_err());
         let bad = vec![RefMap { src: text(&a, &["git", "rev-parse", "HEAD"]).unwrap(), dst: "refs/x".into() }];
         assert!(pack_refs(&a, &bad, &[], &sa).unwrap_err().contains("not a ref"));
+    }
+
+    #[test]
+    fn scan_counts_files_and_refuses_what_the_relay_refuses() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("a/b")).unwrap();
+        std::fs::write(d.path().join("a/b/f"), vec![0u8; 1000]).unwrap();
+        std::fs::write(d.path().join("top"), b"12").unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", d.path().join("a/link")).unwrap();
+        std::os::unix::fs::symlink(d.path().join("a"), d.path().join("ln")).unwrap();
+        let s = scan(d.path(), &["a".into(), "top".into(), "a/b".into()]).unwrap();
+        assert_eq!((s.files, s.bytes), (2, 1002), "symlinks inside are not counted (or sent)");
+        assert_eq!(s.dirs, ["a", "a/b"]);
+        assert!(scan(d.path(), &["ln".into()]).unwrap_err().contains("symlink"));
+        assert!(scan(d.path(), &["../x".into()]).unwrap_err().contains("inside"));
+        assert!(scan(d.path(), &["/etc".into()]).is_err());
+        assert!(scan(d.path(), &["nope".into()]).unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn argv_copies_one_root_without_links_and_deletes_only_inside_named_dirs() {
+        let src = End::Local("/h/place".into());
+        let dst = End::Remote { host: "server".into(), path: "/home/p/it's here".into() };
+        let a = argv(&src, &dst, "out/units", true, true, true);
+        assert_eq!(&a[..5], ["rsync", "-rtp", "--partial", "-e", SSH]);
+        assert!(!a.iter().any(|x| x == "-a" || x == "-l" || x == "-L" || x == "--relative"), "{a:?}");
+        assert!(a.contains(&"--delete".to_string()));
+        assert_eq!(a[a.len() - 2], "/h/place/out/units/");
+        assert_eq!(a[a.len() - 1], r"server:'/home/p/it'\''s here/out/units/'");
+        // A file root never deletes, and a GNU client is given the path as it is.
+        let f = argv(&src, &dst, "LOG.md", false, true, false);
+        assert!(!f.contains(&"--delete".to_string()));
+        assert_eq!(f[f.len() - 1], "server:/home/p/it's here/LOG.md");
+        // The whole place.
+        let all = argv(&dst, &End::Local("/m/p".into()), "", true, false, false);
+        assert_eq!(all[all.len() - 2..], ["server:/home/p/it's here/", "/m/p/"]);
+    }
+
+    #[test]
+    fn quoting_follows_the_client() {
+        assert!(needs_quoting("openrsync: protocol version 29\nrsync version 2.6.9 compatible"));
+        assert!(needs_quoting("rsync  version 3.2.3  protocol version 31"));
+        assert!(!needs_quoting("rsync  version 3.2.7  protocol version 31"));
+        assert!(!needs_quoting("rsync  version 3.5.0  protocol version 32"));
+    }
+
+    #[test]
+    fn a_local_copy_skips_symlinks_and_refuses_writing_through_one() {
+        if Command::new("rsync").arg("--version").output().is_err() {
+            return;
+        }
+        let s = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(s.path().join("a/b")).unwrap();
+        std::fs::write(s.path().join("a/b/f"), b"x").unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", s.path().join("a/link")).unwrap();
+        std::fs::create_dir_all(d.path().join("a")).unwrap();
+        std::fs::write(d.path().join("a/stale"), b"old").unwrap();
+        std::fs::write(d.path().join("keep"), b"k").unwrap();
+        let offer = scan(s.path(), &["a".into()]).unwrap();
+        let (src, dst) = (End::Local(s.path().into()), End::Local(d.path().into()));
+        let msg = copy(&src, &dst, &["a".into()], &offer, true, &|_| {}).unwrap();
+        assert!(msg.starts_with("via rsync, 1 file(s)"), "{msg}");
+        assert_eq!(std::fs::read(d.path().join("a/b/f")).unwrap(), b"x");
+        assert!(std::fs::symlink_metadata(d.path().join("a/link")).is_err(), "symlink not sent");
+        assert!(!d.path().join("a/stale").exists(), "--delete inside the named dir");
+        assert!(d.path().join("keep").exists(), "--delete stays inside it");
+        // A symlinked directory on the receiver is never written through.
+        std::fs::remove_dir_all(d.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), d.path().join("a")).unwrap();
+        assert!(copy(&src, &dst, &["a".into()], &offer, false, &|_| {}).unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
     }
 }

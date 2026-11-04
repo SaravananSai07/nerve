@@ -9,7 +9,7 @@
 //!   relay keeps only the newest, so a closed laptop's last state stays
 //!   readable: "what was it doing when it went away".
 //! - `KIND_MSG` (regular, stored) with a NIP-40 expiration: commands,
-//!   answers, blobs, job traffic. Stored, so a device that was asleep
+//!   answers, blobs, run traffic. Stored, so a device that was asleep
 //!   catches up on reconnect (store-and-forward).
 //! - Acks are ordinary messages: a relay's `OK` is not delivery (public
 //!   relays were measured accepting and then silently dropping events).
@@ -17,11 +17,13 @@
 //! Strings arriving here are untrusted; the receiver wraps anything it
 //! renders in `Sanitised`.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 /// 2: chunked hand-off, invite pairing, mod-backed sessions. Devices on
 /// different versions ignore each other rather than misread.
-pub(crate) const PROTO_VERSION: u32 = 2;
+const PROTO_VERSION: u32 = 2;
 /// NIP-78 application data: addressable, so relays keep the latest only.
 pub(crate) const KIND_STATE: u16 = 30078;
 /// Regular (stored) kind in the unassigned 4xxx range.
@@ -55,13 +57,33 @@ pub(crate) struct Envelope {
 pub(crate) enum Body {
     State(Box<DeviceState>),
     /// Type `text` into a running session's prompt, then Enter.
-    Send { session: String, text: String },
+    Send {
+        session: String,
+        text: String,
+    },
     /// Resolve a pending permission prompt or question.
-    Answer { request: String, answer: Answer },
+    Answer {
+        request: String,
+        answer: Answer,
+    },
     /// Ask the device to republish its state now.
     SyncNow,
+    /// Stop a running session (SIGTERM, or `claude stop` for a `--bg` one).
+    Stop {
+        session: String,
+    },
+    /// Who to notify when `session` (running on the recipient) finishes a
+    /// turn. Empty turns it off; the devices ticked in Settings follow
+    /// Settings again.
+    SetNotify {
+        session: String,
+        devices: Vec<String>,
+    },
     /// Ask for a larger artefact; it comes back as `Blob` chunks.
-    Fetch { session: String, what: FetchWhat },
+    Fetch {
+        session: String,
+        what: FetchWhat,
+    },
     Blob(Blob),
     /// Continue `session` on the recipient. Starts a short exchange:
     /// offer → `HandoffHave` (what the target's checkout already holds)
@@ -71,16 +93,46 @@ pub(crate) enum Body {
     HandoffHave(HandoffHave),
     HandoffManifest(HandoffManifest),
     /// Ask the sender of `re` for these chunks.
-    ChunkWant { re: String, ids: Vec<String> },
+    ChunkWant {
+        re: String,
+        ids: Vec<String>,
+    },
     /// Chunks for `re`: (id, base64 bytes), at most `CHUNK_BYTES` raw.
-    ChunkData { re: String, chunks: Vec<(String, String)>, last: bool },
-    /// Join with an invite code (`nerve setup <code>`): proves knowledge
+    ChunkData {
+        re: String,
+        chunks: Vec<(String, String)>,
+        last: bool,
+    },
+    /// Join with an invite code (`nerve connect <code>`): proves knowledge
     /// of the inviter's one-time secret. The only message accepted from
-    /// a key that is not yet a peer.
-    PairRequest { secret: String, name: String, relays: Vec<String> },
-    JobSubmit(JobSpec),
-    /// Progress of a job or a run; runs carry `kind = "run"`.
-    JobUpdate(JobStatus),
+    /// a key that is not yet a peer. `want`: which of the offered devices
+    /// to join besides the inviter (None: all of them).
+    PairRequest {
+        secret: String,
+        name: String,
+        relays: Vec<String>,
+        want: Option<Vec<String>>,
+    },
+    /// The join of `re` was allowed: these devices (name, key hex, and
+    /// whether devices joining later meet it) now trust the joiner.
+    Welcome {
+        re: String,
+        devices: Vec<Met>,
+    },
+    /// Trust this device too: one that both of us trust says so.
+    Introduce(Met),
+    /// Stop trusting this device (key hex): it was forgotten elsewhere.
+    Forget {
+        key: String,
+    },
+    /// A person's answer to an approval this device holds.
+    Decide(Decision),
+    /// Start a new interactive session on the recipient (`nerve sync start`).
+    Start(StartSpec),
+    /// Progress of a run. Named as before runs had their own name, so
+    /// devices on either side of that change still read it.
+    #[serde(rename = "job_update")]
+    RunUpdate(RunStatus),
     /// Run one allowlisted command (`nerve sync run`).
     RunSubmit(RunSpec),
     /// Send files or git refs into a named place on the recipient. The
@@ -89,16 +141,195 @@ pub(crate) enum Body {
     XferOffer(XferOffer),
     /// Ask the recipient to send this back as an `XferOffer` (pull).
     XferGet(XferOffer),
-    Ack { re: String, ok: bool, msg: String },
+    /// Share a synced folder with the recipient, or change who shares it.
+    /// A recipient missing from `members` stops syncing it.
+    FolderSet(FolderSet),
+    /// Send me your changes to this folder now.
+    FolderNow {
+        name: String,
+    },
+    Ack {
+        re: String,
+        ok: bool,
+        msg: String,
+        /// It failed because the relay could not carry it.
+        #[serde(default)]
+        relay: bool,
+    },
+    /// A body this build doesn't know: from a newer nerve, or one that is
+    /// gone (`job_submit`, the headless jobs `start` replaced). The
+    /// recipient refuses it with an ack instead of dropping the envelope.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Body {
+    /// Does it make this device do something? A one-shot CLI agent leaves
+    /// that to the long-lived one. Exhaustive, so a new variant has to
+    /// be classified here.
+    pub(crate) fn is_work(&self) -> bool {
+        match self {
+            Self::Send { .. }
+            | Self::Answer { .. }
+            | Self::Stop { .. }
+            | Self::SetNotify { .. }
+            | Self::Fetch { .. }
+            | Self::HandoffOffer(_)
+            | Self::HandoffManifest(_)
+            | Self::ChunkData { .. }
+            | Self::Start(_)
+            | Self::RunSubmit(_)
+            | Self::XferOffer(_)
+            | Self::XferGet(_)
+            | Self::FolderSet(_)
+            | Self::FolderNow { .. }
+            | Self::Introduce(_)
+            | Self::Welcome { .. }
+            | Self::Forget { .. }
+            | Self::Decide(_)
+            | Self::PairRequest { .. }
+            | Self::Unknown => true,
+            Self::State(_)
+            | Self::SyncNow
+            | Self::Blob(_)
+            | Self::HandoffHave(_)
+            | Self::ChunkWant { .. }
+            | Self::RunUpdate(_)
+            | Self::Ack { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct FolderSet {
+    pub(crate) name: String,
+    /// Every device sharing it, by key (hex): names differ per device.
+    pub(crate) members: Vec<String>,
+    pub(crate) when: super::folders::When,
+    /// The sender's path, for the recipient's `path_map`.
+    pub(crate) src_path: String,
+    /// The same path relative to the sender's home, when it is inside it.
+    pub(crate) home_rel: Option<String>,
+    /// What the members may sync next without asking.
+    #[serde(default)]
+    pub(crate) others: super::folders::Others,
+    /// A person started it (in the TUI): no approval needed.
+    #[serde(default)]
+    pub(crate) yes: bool,
+    /// What the sender holds, for whoever approves it.
+    #[serde(default)]
+    pub(crate) files: u32,
+    #[serde(default)]
+    pub(crate) bytes: u64,
+}
+
+/// A device met through another: its name there and key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Met {
+    pub(crate) name: String,
+    pub(crate) key: String,
+    /// Devices that join later are connected to it automatically.
+    pub(crate) later: bool,
+}
+
+/// Something that waits for a person's yes on the device holding it.
+/// Any connected device may answer it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Approval {
+    pub(crate) id: String,
+    pub(crate) at: u64,
+    /// Who asked, by key hex.
+    pub(crate) from: String,
+    pub(crate) what: Asked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Asked {
+    /// A device asks to connect with a code this device showed.
+    Join {
+        name: String,
+        /// Three words both screens show.
+        words: String,
+        /// The devices it would join, by this device's names.
+        join: Vec<String>,
+        later: bool,
+        relays: Vec<String>,
+        /// The request's envelope id, for the answer.
+        re: String,
+    },
+    /// A device shares a folder new to this one: it would land at `lands`.
+    Folder { set: FolderSet, lands: String, re: String },
+}
+
+impl Approval {
+    /// What it asks, and the details to decide on: `asker` is the device
+    /// that asked and `holder` the one it waits on, as the reader names them.
+    pub(crate) fn describe(&self, asker: &str, holder: &str) -> (String, String) {
+        match &self.what {
+            Asked::Join { name, words, join, .. } => {
+                let with: Vec<String> = std::iter::once(holder.to_string()).chain(join.iter().cloned()).collect();
+                (
+                    format!("{name} wants to connect"),
+                    format!("Joins {}. Connect only if it shows: {words}.", crate::util::text::list_join(&with)),
+                )
+            }
+            Asked::Folder { set, lands, .. } => {
+                let size = match set.files {
+                    0 => String::new(),
+                    1 => format!(" 1 file, {}.", crate::util::text::format_bytes(set.bytes)),
+                    n => format!(" {n} files, {}.", crate::util::text::format_bytes(set.bytes)),
+                };
+                (format!("{asker} wants to sync {}", set.name), format!("Lands at {lands} on {holder}.{size}"))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Decision {
+    pub(crate) id: String,
+    pub(crate) yes: bool,
+    /// A folder: land it here instead.
+    #[serde(default)]
+    pub(crate) at: Option<String>,
+    /// A folder: what its members may sync next without asking.
+    #[serde(default)]
+    pub(crate) others: Option<super::folders::Others>,
+}
+
+/// The files of one synced-folder transfer, as (path, sha256) pairs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct FolderPush {
+    pub(crate) files: Vec<(String, String)>,
+    /// Deleted on the sender: (path, the version the recipient held).
+    pub(crate) gone: Vec<(String, String)>,
+    pub(crate) bytes: u64,
+}
+
+/// One synced folder in a device's state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct FolderStatus {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    /// Files this device has that each member (by key hex) lacks.
+    pub(crate) pending: std::collections::BTreeMap<String, u32>,
+    /// The rest, for this device's own TUI; peers don't get it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mine: Option<super::folders::View>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Answer {
     Allow,
-    Deny { reason: String },
+    Deny {
+        reason: String,
+    },
     /// One label per question, in question order.
-    Choose { labels: Vec<String> },
+    Choose {
+        labels: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,11 +338,13 @@ pub(crate) enum FetchWhat {
     Diff,
     Log,
     Subagents,
+    /// The session's last assistant message, in full.
+    Reply,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Blob {
-    /// The message this answers (a Fetch id, or `handoff:<id>`).
+    /// The `Fetch` this answers (its message id).
     pub(crate) re: String,
     pub(crate) title: String,
     pub(crate) part: u32,
@@ -133,7 +366,22 @@ pub(crate) struct DeviceState {
     pub(crate) away: bool,
     pub(crate) sessions: Vec<RemoteSession>,
     pub(crate) requests: Vec<PendingRequest>,
-    pub(crate) jobs: Vec<JobStatus>,
+    #[serde(default, rename = "jobs")]
+    pub(crate) runs: Vec<RunStatus>,
+    /// Fleet-wide notification settings; the newest copy wins.
+    #[serde(default)]
+    pub(crate) notify: crate::notify::NotifyPrefs,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) folders: Vec<FolderStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) approvals: Vec<Approval>,
+    /// Keys (hex) of the devices this one is connected to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) linked: Vec<String>,
+    /// The code this device shows for a new device, for its own TUI;
+    /// peers never get it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) invite: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -158,6 +406,10 @@ pub(crate) struct RemoteSession {
     pub(crate) via_mod: bool,
     #[serde(default)]
     pub(crate) last_turn: Option<TurnInfo>,
+    /// Devices told when this session finishes a turn: its own choice, or
+    /// the devices ticked in Settings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) notify: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -183,7 +435,6 @@ pub(crate) struct Question {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct HandoffOffer {
     pub(crate) session: String,
-    pub(crate) name: String,
     pub(crate) src_cwd: String,
     pub(crate) repo_name: String,
     /// The repo's first commit: names "the same project" on every device.
@@ -228,6 +479,9 @@ pub(crate) struct XferOffer {
     /// rsync and the relay only carries the coordination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) bulk: Option<BulkOffer>,
+    /// A synced folder's changes (`place` names the folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) folder: Option<FolderPush>,
 }
 
 /// What a bulk transfer holds, scanned on the sender.
@@ -276,6 +530,9 @@ pub(crate) struct HandoffHave {
     /// the place, checked and with its parent directories made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) dest: Option<String>,
+    /// For a synced folder: files the target already has as offered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) skip: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -284,16 +541,6 @@ pub(crate) struct HandoffManifest {
     /// The manifest JSON itself, chunked: large repos list thousands of
     /// chunk ids, which don't fit one message.
     pub(crate) index: super::chunks::FileRef,
-}
-
-/// What one hand-off carried, for the log and the experiments.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct TransferStats {
-    pub(crate) files: usize,
-    pub(crate) total_bytes: u64,
-    pub(crate) sent_bytes: u64,
-    pub(crate) chunks: usize,
-    pub(crate) sent_chunks: usize,
 }
 
 /// The last finished turn of a session, as its mod reported it.
@@ -307,44 +554,28 @@ pub(crate) struct TurnInfo {
     pub(crate) output_tokens: u64,
 }
 
+/// A new session: `claude <prompt>` in `dir` on the recipient, in a
+/// detached tmux session, as a hand-off resumes one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub(crate) struct JobSpec {
-    pub(crate) id: String,
-    pub(crate) title: String,
+pub(crate) struct StartSpec {
+    /// The session id the sender chose (a UUID), passed as
+    /// `--session-id`, so it knows the id before the session reports.
+    pub(crate) session: String,
+    /// On the recipient: an absolute path, `~` or `~/…`, or a place name.
+    pub(crate) dir: String,
     pub(crate) prompt: String,
-    /// Directory on the executing device; `{repo}` is cloned there if missing.
-    pub(crate) cwd: Option<String>,
-    pub(crate) repo: Option<String>,
-    /// Capabilities the executing device must advertise.
-    pub(crate) requires: Vec<String>,
-    /// Shell command run after the agent finishes; exit 0 = verified.
-    pub(crate) verify: Option<String>,
-    pub(crate) model: Option<String>,
-    pub(crate) permission_mode: String,
-    /// `--allowedTools` rules, e.g. "Bash(python3 *)". Headless jobs deny
-    /// anything that would prompt, so shell steps must be allowed here.
-    #[serde(default)]
-    pub(crate) allowed_tools: Vec<String>,
-    pub(crate) submitted_by: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub(crate) struct JobStatus {
+pub(crate) struct RunStatus {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) device: String,
-    /// queued | running | verifying | done | failed
+    /// queued | running | done | failed
     pub(crate) phase: String,
-    pub(crate) session_id: Option<String>,
-    pub(crate) turns: u32,
-    pub(crate) cost_usd: f64,
-    pub(crate) verified: Option<bool>,
     pub(crate) tail: Vec<String>,
     pub(crate) result: Option<String>,
     pub(crate) updated_at: u64,
-    /// "" for a Claude job, "run" for a command run.
-    #[serde(default)]
-    pub(crate) kind: String,
     #[serde(default)]
     pub(crate) exit_code: Option<i32>,
     /// Output lines seen so far, so a viewer can tell how many of `tail`
@@ -355,13 +586,7 @@ pub(crate) struct JobStatus {
 
 impl Envelope {
     pub(crate) fn new(from: &str, body: Body) -> Self {
-        Self {
-            v: PROTO_VERSION,
-            id: new_id(),
-            from: from.to_string(),
-            sent_at: now_secs(),
-            body,
-        }
+        Self { v: PROTO_VERSION, id: new_id(), from: from.to_string(), sent_at: crate::util::now_secs(), body }
     }
 
     /// With an id the caller chose, so a CLI can follow its outcome.
@@ -383,38 +608,44 @@ impl Envelope {
     }
 }
 
-pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// A random (v4) UUID, the form Claude takes for `--session-id`.
+pub(crate) fn new_session_id() -> String {
+    let hex = format!("{}{}", new_id(), new_id());
+    let variant = ["8", "9", "a", "b"][usize::from_str_radix(&hex[16..17], 16).unwrap_or(0) % 4];
+    format!("{}-{}-4{}-{variant}{}-{}", &hex[..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32])
+}
+
+/// Is `id` a UUID (lowercase or not), as `--session-id` needs?
+pub(crate) fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.char_indices().all(|(i, c)| if [8, 13, 18, 23].contains(&i) { c == '-' } else { c.is_ascii_hexdigit() })
 }
 
 /// 16 hex chars from the OS RNG (via the nanosecond clock + pid as a
 /// fallback seed — ids only need to be unique, not secret).
 pub(crate) fn new_id() -> String {
     let mut buf = [0u8; 8];
-    if std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
-        .is_err()
-    {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0) as u64
-            ^ (std::process::id() as u64) << 32;
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf)).is_err() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+            as u64
+            ^ ((std::process::id() as u64) << 32);
         buf = n.to_le_bytes();
     }
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    buf.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// The first `n` characters of an id, for display. Ids from the network
+/// may be short or not ASCII, so this never slices inside a character.
+pub(crate) fn short_id(id: &str, n: usize) -> &str {
+    id.char_indices().nth(n).map_or(id, |(i, _)| &id[..i])
 }
 
 /// Split bytes into base64 chunks of at most `CHUNK_BYTES` raw bytes.
 pub(crate) fn chunk(re: &str, title: &str, bytes: &[u8]) -> Vec<Blob> {
-    let pieces: Vec<&[u8]> = if bytes.is_empty() {
-        vec![&[][..]]
-    } else {
-        bytes.chunks(CHUNK_BYTES).collect()
-    };
+    let pieces: Vec<&[u8]> = if bytes.is_empty() { vec![&[][..]] } else { bytes.chunks(CHUNK_BYTES).collect() };
     let parts = pieces.len() as u32;
     pieces
         .into_iter()
@@ -455,10 +686,6 @@ impl Reassembly {
             Ok(None)
         }
     }
-
-    pub(crate) fn progress(&self) -> (usize, usize) {
-        (self.parts.iter().filter(|p| p.is_some()).count(), self.parts.len())
-    }
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -466,10 +693,10 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = ((c[0] as u32) << 16) | ((*c.get(1).unwrap_or(&0) as u32) << 8) | *c.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
             if i <= c.len() {
-                out.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
+                out.push(B64[((n >> (18 - 6 * i)) & 63) as usize] as char);
             } else {
                 out.push('=');
             }
@@ -491,7 +718,7 @@ pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
             b'=' => break,
             _ => return Err("invalid base64".into()),
         } as u32;
-        acc = acc << 6 | v;
+        acc = (acc << 6) | v;
         bits += 6;
         if bits >= 8 {
             bits -= 8;
@@ -505,23 +732,7 @@ pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 /// Claude's project-dir slug: every non-alphanumeric char becomes `-`.
 /// The handoff must install the transcript under the *target's* slug.
 pub(crate) fn project_slug(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
-/// Devices that can run a job: advertise every required capability.
-/// Least busy wins; ties go to the name for determinism, so every device
-/// computing this agrees.
-pub(crate) fn pick_device<'a>(
-    candidates: impl IntoIterator<Item = (&'a str, &'a [String], usize)>,
-    requires: &[String],
-) -> Option<&'a str> {
-    candidates
-        .into_iter()
-        .filter(|(_, caps, _)| requires.iter().all(|r| caps.iter().any(|c| c == r)))
-        .min_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(b.0)))
-        .map(|(name, _, _)| name)
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 #[cfg(test)]
@@ -538,6 +749,14 @@ mod tests {
     }
 
     #[test]
+    fn short_ids_survive_short_and_multibyte_input() {
+        assert_eq!(short_id("0123456789", 6), "012345");
+        assert_eq!(short_id("abc", 6), "abc");
+        assert_eq!(short_id("", 6), "");
+        assert_eq!(short_id("ééééééé", 6), "éééééé");
+    }
+
+    #[test]
     fn answer_wire_shape_is_stable() {
         let a = Answer::Choose { labels: vec!["Bash".into()] };
         assert_eq!(serde_json::to_string(&a).unwrap(), r#"{"kind":"choose","labels":["Bash"]}"#);
@@ -545,7 +764,15 @@ mod tests {
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
-        for (raw, enc) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
+        for (raw, enc) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
             assert_eq!(base64_encode(raw.as_bytes()), enc);
             assert_eq!(base64_decode(enc).unwrap(), raw.as_bytes());
         }
@@ -563,7 +790,6 @@ mod tests {
         assert_eq!(r.add(&blobs[0]).unwrap(), None, "duplicate is harmless");
         assert_eq!(r.add(&blobs[1]).unwrap(), None);
         assert_eq!(r.add(&blobs[2]).unwrap().unwrap(), data);
-        assert_eq!(r.progress(), (3, 3));
     }
 
     #[test]
@@ -580,12 +806,73 @@ mod tests {
     }
 
     #[test]
-    fn job_goes_to_least_busy_capable_device() {
-        let laptop = ["xcode".to_string(), "ios-sim".to_string()];
-        let server = ["linux".to_string(), "arm64".to_string()];
-        let devs = [("laptop", &laptop[..], 3), ("server", &server[..], 0)];
-        assert_eq!(pick_device(devs, &["ios-sim".into()]), Some("laptop"));
-        assert_eq!(pick_device(devs, &[]), Some("server"));
-        assert_eq!(pick_device(devs, &["gpu".into()]), None);
+    fn a_start_round_trips_with_its_prompt_intact() {
+        let prompt = "say \"hi\"; $(rm -rf ~) `id`\nline two\t'quoted'";
+        let spec = StartSpec { session: new_session_id(), dir: "~/code/app".into(), prompt: prompt.into() };
+        let e = Envelope::new("laptop", Body::Start(spec.clone()));
+        let back = Envelope::decode(&e.encode()).unwrap();
+        assert_eq!(back.body, Body::Start(spec));
+        assert!(back.body.is_work());
+    }
+
+    #[test]
+    fn session_ids_are_uuids() {
+        for _ in 0..50 {
+            let id = new_session_id();
+            assert!(is_uuid(&id), "{id}");
+            assert_eq!(&id[14..15], "4", "{id}");
+            assert!("89ab".contains(&id[19..20]), "{id}");
+        }
+        assert!(!is_uuid("not-a-uuid"));
+        assert!(!is_uuid("../../../../etc/passwd/xxxxxxxxxxxxxxxxx"));
+    }
+
+    // A device on an older build may still send a job: it must decode,
+    // as something to refuse, not fail the whole envelope.
+    #[test]
+    fn a_job_from_an_older_device_decodes_as_unknown() {
+        let old = r#"{"v":2,"id":"ab","from":"old","sent_at":1,"body":{"t":"job_submit","id":"x","title":"t","prompt":"p","cwd":null,"repo":null,"requires":[],"verify":"rm -rf /","model":null,"permission_mode":"bypassPermissions","submitted_by":"old"}}"#;
+        let e = Envelope::decode(old).unwrap();
+        assert_eq!(e.body, Body::Unknown);
+        assert!(e.body.is_work(), "the long-lived agent answers it");
+    }
+
+    #[test]
+    fn runs_keep_their_wire_names() {
+        let st = RunStatus { id: "r".into(), phase: "done".into(), exit_code: Some(0), ..Default::default() };
+        let json = serde_json::to_string(&Body::RunUpdate(st)).unwrap();
+        assert!(json.starts_with(r#"{"t":"job_update""#), "{json}");
+        let state = serde_json::to_value(DeviceState::default()).unwrap();
+        assert!(state.get("jobs").is_some(), "{state}");
+    }
+
+    #[test]
+    fn approvals_say_what_they_ask() {
+        let set = FolderSet { name: "app-runs".into(), files: 12, bytes: 3 << 20, ..Default::default() };
+        let a = Approval {
+            id: "q".into(),
+            at: 1,
+            from: "ab".into(),
+            what: Asked::Folder { set, lands: "~/code/app-runs".into(), re: "e".into() },
+        };
+        assert_eq!(
+            a.describe("mini", "laptop"),
+            ("mini wants to sync app-runs".into(), "Lands at ~/code/app-runs on laptop. 12 files, 3.0 MiB.".into())
+        );
+        let j = Approval {
+            what: Asked::Join {
+                name: "air".into(),
+                words: "amber fox river".into(),
+                join: vec!["studio".into()],
+                later: true,
+                relays: vec![],
+                re: "e".into(),
+            },
+            ..a
+        };
+        assert_eq!(
+            j.describe("air", "laptop").1,
+            "Joins laptop and studio. Connect only if it shows: amber fox river."
+        );
     }
 }

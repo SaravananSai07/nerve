@@ -1,5 +1,6 @@
 //! Moving a session to another device: pack (source), unpack + resume
-//! (target). Validated by hand in research/sync/experiments (E7) before
+//! (target); and starting a new one on this device for another. Both run
+//! `claude` in a detached tmux session. Validated by hand in research/sync/experiments (E7) before
 //! being written here: a git bundle + working-tree patch + untracked
 //! files, plus the transcript installed under the *target* cwd's project
 //! slug, is enough for `claude --resume <id>` to continue with full
@@ -18,7 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use super::chunks::{FileRef, Store};
 use super::fleet::Fleet;
-use super::protocol::{project_slug, HandoffOffer};
+use super::protocol::{project_slug, HandoffOffer, StartSpec};
+use crate::detect::git::{git_root, is_sha, repo_id};
+use crate::util::fs::{safe_rel, tempdir, walk};
+use crate::util::{run, text};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Manifest {
@@ -31,7 +35,6 @@ pub(crate) struct Manifest {
     pub(crate) repo_id: String,
     pub(crate) branch: String,
     pub(crate) head: String,
-    pub(crate) src_host: String,
 }
 
 /// Everything a hand-off moves, as chunked files. The index travels as
@@ -45,33 +48,6 @@ pub(crate) struct Pack {
     pub(crate) files: Vec<FileRef>,
 }
 
-pub(crate) fn run(dir: &Path, argv: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new(argv[0])
-        .args(&argv[1..])
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("{}: {e}", argv[0]))?;
-    if !out.status.success() {
-        return Err(format!("{} failed: {}", argv.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    Ok(out.stdout)
-}
-
-pub(crate) fn text(dir: &Path, argv: &[&str]) -> Result<String, String> {
-    Ok(String::from_utf8_lossy(&run(dir, argv)?).trim().to_string())
-}
-
-pub(crate) fn git_root(cwd: &Path) -> Result<PathBuf, String> {
-    Ok(PathBuf::from(text(cwd, &["git", "rev-parse", "--show-toplevel"])?))
-}
-
-/// The first commit reachable from HEAD: the same on every clone.
-pub(crate) fn repo_id(repo: &Path) -> Option<String> {
-    let out = text(repo, &["git", "rev-list", "--max-parents=0", "HEAD"]).ok()?;
-    out.lines().last().map(String::from)
-}
-
 /// Facts about the repo a session runs in, for the offer.
 pub(crate) fn describe(cwd: &Path) -> Result<Manifest, String> {
     let root = git_root(cwd).map_err(|e| format!("not a git repo ({e}); only git projects can be handed off"))?;
@@ -82,7 +58,6 @@ pub(crate) fn describe(cwd: &Path) -> Result<Manifest, String> {
         repo_id: repo_id(&root).unwrap_or_default(),
         branch: text(&root, &["git", "rev-parse", "--abbrev-ref", "HEAD"])?,
         head: text(&root, &["git", "rev-parse", "HEAD"])?,
-        src_host: super::fleet::hostname(),
     })
 }
 
@@ -97,12 +72,8 @@ pub(crate) fn local_tips(dest: &Path, repo_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn is_sha(s: &str) -> bool {
-    (40..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// Find a session's transcript (and sidecar dir) under any Claude root.
-pub(crate) fn find_transcript(roots: &[PathBuf], session_id: &str) -> Option<PathBuf> {
+fn find_transcript(roots: &[PathBuf], session_id: &str) -> Option<PathBuf> {
     roots.iter().find_map(|root| {
         std::fs::read_dir(root.join("projects")).ok()?.flatten().find_map(|d| {
             let p = d.path().join(format!("{session_id}.jsonl"));
@@ -111,22 +82,15 @@ pub(crate) fn find_transcript(roots: &[PathBuf], session_id: &str) -> Option<Pat
     })
 }
 
-pub(crate) fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let r = if rel.is_empty() { name } else { format!("{rel}/{name}") };
-        match e.file_type() {
-            Ok(t) if t.is_dir() => walk(&e.path(), &r, out),
-            Ok(t) if t.is_file() => out.push((r, e.path())),
-            _ => {}
-        }
-    }
-}
-
 /// Collect the session's files into `store`. `have` are commits the
 /// target reported; the git bundle only carries what lies beyond them.
-pub(crate) fn pack(cwd: &Path, session_id: &str, roots: &[PathBuf], have: &[String], store: &Store) -> Result<Pack, String> {
+pub(crate) fn pack(
+    cwd: &Path,
+    session_id: &str,
+    roots: &[PathBuf],
+    have: &[String],
+    store: &Store,
+) -> Result<Pack, String> {
     let root = git_root(cwd).map_err(|e| format!("not a git repo ({e}); only git projects can be handed off"))?;
     let transcript = find_transcript(roots, session_id).ok_or("transcript not found")?;
     let mut meta = describe(cwd)?;
@@ -206,19 +170,17 @@ pub(crate) struct Installed {
     pub(crate) manifest: Manifest,
 }
 
-/// A relative path from the wire that stays inside its directory.
-pub(crate) fn safe_rel(rel: &str) -> Option<&str> {
-    let ok = !rel.is_empty()
-        && !rel.starts_with('/')
-        && Path::new(rel).components().all(|c| matches!(c, std::path::Component::Normal(_)));
-    ok.then_some(rel)
-}
-
 /// Restore the repo state at `dest` and install the transcript under the
 /// target cwd's slug in `claude_root`. Every chunk must be in `store`.
 /// An existing checkout keeps its branch: one on another branch, or
 /// whose branch has commits the hand-off lacks, is refused unless `force`.
-pub(crate) fn unpack(pack: &Pack, dest: &Path, store: &Store, claude_root: &Path, force: bool) -> Result<Installed, String> {
+pub(crate) fn unpack(
+    pack: &Pack,
+    dest: &Path,
+    store: &Store,
+    claude_root: &Path,
+    force: bool,
+) -> Result<Installed, String> {
     let manifest = pack.meta.clone();
     if !valid_session_id(&manifest.session_id) || !is_sha(&manifest.head) {
         return Err("bad session id or head in manifest".into());
@@ -314,57 +276,173 @@ pub(crate) fn valid_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// Start the resumed session interactively in a detached tmux session
-/// (so it shows up in nerve, is injectable, and survives the agent).
-/// `--fork-session` gives it a fresh id so the two devices never append
-/// to one transcript.
+/// The tmux session a hand-off or a start runs in.
+pub(crate) fn tmux_name(session_id: &str) -> String {
+    format!("nerve-{}", super::protocol::short_id(session_id, 8))
+}
+
+/// Resume a handed-off session. `--fork-session` gives it a fresh id so
+/// the two devices never append to one transcript.
 pub(crate) fn resume_in_tmux(inst: &Installed, claude_root: &Path, sync_settings: &Path) -> Result<String, String> {
-    let name = format!("nerve-{}", &inst.manifest.session_id[..8.min(inst.manifest.session_id.len())]);
-    let cwd = inst.cwd.to_string_lossy().into_owned();
+    let name = tmux_name(&inst.manifest.session_id);
+    let args = vec!["--resume".into(), inst.manifest.session_id.clone(), "--fork-session".into()];
+    claude_in_tmux(&name, &inst.cwd, args, claude_root, sync_settings)?;
+    Ok(name)
+}
+
+/// Prompts longer than this are refused: tmux carries the whole command
+/// in one message of at most 16 KiB, environment included.
+pub(crate) const PROMPT_MAX: usize = 8 * 1024;
+
+/// claude's arguments for a new session: the id the sender chose, then
+/// the prompt after `--`, so a prompt starting with `-` is no option.
+pub(crate) fn start_args(session_id: &str, prompt: &str) -> Result<Vec<String>, String> {
+    if !super::protocol::is_uuid(session_id) {
+        return Err("bad session id: not a UUID".into());
+    }
+    if prompt.trim().is_empty() || prompt.len() > PROMPT_MAX || prompt.contains('\0') {
+        return Err(format!("the prompt must be 1 to {PROMPT_MAX} bytes, with no NUL"));
+    }
+    Ok(vec!["--session-id".into(), session_id.into(), "--".into(), prompt.into()])
+}
+
+/// Where a session started here runs: `dir` is an absolute path, `~` or
+/// `~/…`, or a place. It must be an existing directory in `home`, a place
+/// or `handoff_root` (where hand-offs land), and in neither a private
+/// folder nor one of `never` (keys, credentials, Claude's and nerve's
+/// own config).
+pub(crate) fn start_dir(
+    dir: &str,
+    fleet: &Fleet,
+    fleet_file: &Path,
+    home: &Path,
+    never: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let device = &fleet.device;
+    let raw = match dir.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ if dir.starts_with('/') => PathBuf::from(dir),
+        _ if fleet.places.contains_key(dir) => fleet.place(dir, fleet_file)?,
+        _ => return Err(format!("no folder '{dir}' on {device}: give an absolute path, ~/…, or a place name")),
+    };
+    let path = raw.canonicalize().map_err(|e| format!("{} on {device}: {e}", raw.display()))?;
+    if !path.is_dir() {
+        return Err(format!("{} on {device} is not a folder", path.display()));
+    }
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let mut roots = vec![canon(home)];
+    roots.extend(fleet.places.values().map(|p| canon(Path::new(p))));
+    roots.extend(fleet.handoff_root.as_deref().map(canon));
+    if !roots.iter().any(|r| path.starts_with(r)) {
+        return Err(format!(
+            "{} is outside the home folder on {device}; to allow it, add it under [places] in {}",
+            path.display(),
+            fleet_file.display()
+        ));
+    }
+    if let Some(d) = never.iter().map(|d| canon(d)).find(|d| path.starts_with(d)) {
+        return Err(format!("{device} never starts sessions in {}", d.display()));
+    }
+    if super::fleet::inside(&fleet.private, &path) {
+        return Err(format!("{} is kept private on {device}", path.display()));
+    }
+    Ok(path)
+}
+
+/// Start `spec` on this device for a peer: `claude --session-id <id> --
+/// <prompt>` in a detached tmux session, the way a hand-off resumes one.
+pub(crate) fn start(spec: &StartSpec, fleet: &Fleet, sync_dir: &Path, nerve_config: &Path) -> Result<String, String> {
+    let args = start_args(&spec.session, &spec.prompt)?;
+    let home = dirs::home_dir().ok_or("no home folder")?;
+    let never = super::folders::never_dirs(&[nerve_config.to_path_buf()]);
+    let cwd = start_dir(&spec.dir, fleet, &Fleet::file(sync_dir), &home, &never)?;
+    let root = claude_root()?;
+    let name = tmux_name(&spec.session);
+    claude_in_tmux(&name, &cwd, args, &root, &sync_dir.join("claude-settings.json"))?;
+    if fleet.auto_trust_handoffs {
+        accept_trust_dialog(&name);
+    }
+    Ok(format!("{} started {} in tmux session {name} at {}", fleet.device, spec.session, cwd.display()))
+}
+
+/// Where sessions started or resumed here keep their data.
+pub(crate) fn claude_root() -> Result<PathBuf, String> {
+    crate::detect::claude_roots()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no Claude config directory: no home directory and no $CLAUDE_CONFIG_DIR".into())
+}
+
+/// `tmux new-session` arguments that run `claude <args>` detached in
+/// `cwd`. Given as several arguments, the command is exec'd directly,
+/// never through a shell, so each of `args` reaches claude unchanged.
+fn tmux_argv(name: &str, cwd: &Path, env: &[String], claude: &Path, args: &[String]) -> Vec<String> {
+    let mut argv: Vec<String> =
+        ["new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c"].map(String::from).into();
+    argv.push(cwd.to_string_lossy().into_owned());
+    for e in env {
+        argv.extend(["-e".to_string(), e.clone()]);
+    }
+    argv.push(claude.to_string_lossy().into_owned());
+    argv.extend(args.iter().cloned());
+    argv
+}
+
+/// Run `claude <args>` interactively in a detached tmux session `name`
+/// at `cwd`, so it shows up in nerve, takes prompts and survives the agent.
+fn claude_in_tmux(
+    name: &str,
+    cwd: &Path,
+    args: Vec<String>,
+    claude_root: &Path,
+    sync_settings: &Path,
+) -> Result<(), String> {
     // The tmux server, not this process, runs the command, with the
     // server's environment: resolve claude here and pass env with -e.
     let claude = super::bins::find("claude")?;
-    let mut cmd = vec![
-        claude.to_string_lossy().into_owned(),
-        "--resume".into(),
-        inst.manifest.session_id.clone(),
-        "--fork-session".into(),
-    ];
+    let mut all = Vec::new();
     if sync_settings.exists() {
-        cmd.push("--settings".into());
-        cmd.push(sync_settings.to_string_lossy().into_owned());
+        all.push("--settings".into());
+        all.push(sync_settings.to_string_lossy().into_owned());
     }
-    let mut tmux = Command::new("tmux");
+    all.extend(args);
     // Only for a relocated root: setting it to the default ~/.claude makes
     // Claude look for ~/.claude/.claude.json and rerun onboarding.
-    let default_root = dirs::home_dir().map(|h| h.join(".claude"));
-    let env_root = if default_root.as_deref() == Some(claude_root) {
+    let env_root = if crate::detect::default_root().as_deref() == Some(claude_root) {
         "NERVE_HANDOFF=1".to_string()
     } else {
         format!("CLAUDE_CONFIG_DIR={}", claude_root.display())
     };
-    let env_path = format!("PATH={}", std::env::var("PATH").unwrap_or_default());
-    let env_nerve = format!("NERVE_CONFIG_DIR={}", std::env::var("NERVE_CONFIG_DIR").unwrap_or_default());
-    tmux.args(["new-session", "-d", "-s", &name, "-x", "200", "-y", "50", "-c", &cwd])
-        .args(["-e", &env_root, "-e", &env_path, "-e", &env_nerve])
-        .args(&cmd)
+    let env = [
+        env_root,
+        format!("PATH={}", std::env::var("PATH").unwrap_or_default()),
+        format!("NERVE_CONFIG_DIR={}", std::env::var("NERVE_CONFIG_DIR").unwrap_or_default()),
+    ];
+    let out = Command::new("tmux")
+        .args(tmux_argv(name, cwd, &env, &claude, &all))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let out = tmux.output().map_err(|e| format!("tmux: {e}"))?;
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("tmux: {e}"))?;
     if !out.status.success() {
         return Err(format!("tmux new-session failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let alive = Command::new("tmux").args(["has-session", "-t", &name]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let alive = Command::new("tmux")
+        .args(["has-session", "-t", &format!("={name}")])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
     if !alive {
-        return Err(format!("claude exited right after starting in {cwd}"));
+        return Err(format!("claude exited right after starting in {}", cwd.display()));
     }
-    Ok(name)
+    Ok(())
 }
 
 /// Accept the folder-trust dialog if it is what the pane shows. Only
-/// called for a session this device was explicitly asked to continue.
+/// called for a session this device was explicitly asked to continue or
+/// start.
 pub(crate) fn accept_trust_dialog(tmux_session: &str) -> bool {
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -385,26 +463,6 @@ pub(crate) fn accept_trust_dialog(tmux_session: &str) -> bool {
         }
     }
     false
-}
-
-pub(crate) struct TempDir(PathBuf);
-
-impl TempDir {
-    pub(crate) fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-pub(crate) fn tempdir() -> Result<TempDir, String> {
-    let p = std::env::temp_dir().join(format!("nerve-handoff-{}", super::protocol::new_id()));
-    std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
-    Ok(TempDir(p))
 }
 
 #[cfg(test)]
@@ -537,10 +595,17 @@ mod tests {
     #[test]
     fn destination_is_a_place_then_path_map_then_an_explicit_root_else_refused() {
         let file = Path::new("/cfg/sync/fleet.toml");
-        let offer = HandoffOffer { repo_name: "nerve".into(), src_cwd: "/Users/me/code/nerve".into(), ..Default::default() };
+        let offer =
+            HandoffOffer { repo_name: "nerve".into(), src_cwd: "/Users/me/code/nerve".into(), ..Default::default() };
         let mut f = Fleet { device: "server".into(), ..Default::default() };
         let e = destination(&offer, &f, file).unwrap_err();
-        assert!(e.contains("--to <place>") && e.contains("[places]") && e.contains("[path_map]") && e.contains("/cfg/sync/fleet.toml"), "{e}");
+        assert!(
+            e.contains("--to <place>")
+                && e.contains("[places]")
+                && e.contains("[path_map]")
+                && e.contains("/cfg/sync/fleet.toml"),
+            "{e}"
+        );
         f.handoff_root = Some("/h".into());
         assert_eq!(destination(&offer, &f, file).unwrap(), PathBuf::from("/h/nerve"));
         f.path_map.insert("/Users/me/code".into(), "/srv/ss".into());
@@ -583,6 +648,76 @@ mod tests {
         let inst = unpack(&p, &dest, &store_b, &root_b, true).unwrap();
         assert_eq!(text(&inst.cwd, &["git", "rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "main");
         assert_eq!(std::fs::read_to_string(inst.cwd.join("f0.txt")).unwrap(), "edited\n");
+    }
+
+    #[test]
+    fn a_prompt_is_one_argument_whatever_it_holds() {
+        let sid = "0f8e2b1c-3d4a-4b5c-9d6e-7f8091a2b3c4";
+        let prompt = "say \"hi\"; $(touch /tmp/pwned) `id` && echo 'x'\nsecond line\n--dangerously-skip-permissions";
+        let args = start_args(sid, prompt).unwrap();
+        assert_eq!(args, ["--session-id", sid, "--", prompt]);
+        let argv = tmux_argv("nerve-0f8e2b1c", Path::new("/w d"), &["A=1".into()], Path::new("/bin/claude"), &args);
+        assert_eq!(
+            argv,
+            [
+                "new-session",
+                "-d",
+                "-s",
+                "nerve-0f8e2b1c",
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "-c",
+                "/w d",
+                "-e",
+                "A=1",
+                "/bin/claude",
+                "--session-id",
+                sid,
+                "--",
+                prompt
+            ]
+        );
+        assert!(start_args("../x", "hi").is_err());
+        assert!(start_args(sid, "  \n").is_err());
+        assert!(start_args(sid, "a\0b").is_err());
+        assert!(start_args(sid, &"x".repeat(PROMPT_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn a_session_starts_only_in_an_allowed_existing_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let (code, secret, private, srv) =
+            (home.join("code"), home.join(".ssh"), home.join("code/secret"), root.join("srv/proj"));
+        for d in [&code, &secret, &private, &srv] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(home.join("file.txt"), "x").unwrap();
+        let file = Path::new("/cfg/sync/fleet.toml");
+        let mut f = Fleet { device: "beta".into(), private: vec![private.display().to_string()], ..Default::default() };
+        let never = [secret.clone()];
+        let at = |d: &str, f: &Fleet| start_dir(d, f, file, &home, &never);
+        assert_eq!(at("~", &f).unwrap(), home);
+        assert_eq!(at("~/code", &f).unwrap(), code);
+        assert_eq!(at(&code.join("../code").display().to_string(), &f).unwrap(), code);
+        assert!(at("~/missing", &f).is_err());
+        assert!(at("~/file.txt", &f).unwrap_err().contains("not a folder"));
+        assert!(at("code", &f).unwrap_err().contains("place name"), "relative paths are not guessed at");
+        assert!(at("~/.ssh", &f).unwrap_err().contains("never starts sessions"));
+        assert!(at("~/code/secret", &f).unwrap_err().contains("kept private"));
+        let e = at(&srv.display().to_string(), &f).unwrap_err();
+        assert!(e.contains("outside the home folder") && e.contains("[places]"), "{e}");
+        assert!(at("/", &f).is_err());
+        f.places.insert("proj".into(), srv.display().to_string());
+        assert_eq!(at("proj", &f).unwrap(), srv);
+        assert_eq!(at(&srv.display().to_string(), &f).unwrap(), srv, "a place admits its path too");
+        // A symlink in home that points outside it lands outside: refused.
+        std::os::unix::fs::symlink(root.join("srv"), home.join("link")).unwrap();
+        f.places.clear();
+        assert!(at("~/link/proj", &f).unwrap_err().contains("outside the home folder"));
     }
 
     #[test]

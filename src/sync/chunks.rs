@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 /// wire's `CHUNK_BYTES`. An 8 KiB average keeps the id overhead (64 hex
 /// chars per chunk in the manifest) under 1% while isolating a
 /// transcript append to the last chunk or two.
-pub(crate) const MIN_CHUNK: usize = 2 * 1024;
-pub(crate) const AVG_CHUNK: usize = 8 * 1024;
-pub(crate) const MAX_CHUNK: usize = super::protocol::CHUNK_BYTES;
+const MIN_CHUNK: usize = 2 * 1024;
+const AVG_CHUNK: usize = 8 * 1024;
+const MAX_CHUNK: usize = super::protocol::CHUNK_BYTES;
 
 /// Cut-point masks for an 8 KiB average (FastCDC "normalised chunking",
 /// level 2): a stricter mask before the average and a looser one after
@@ -51,7 +51,7 @@ const GEAR: [u64; 256] = {
 };
 
 /// Lengths of the chunks `data` splits into, in order.
-pub(crate) fn cut(data: &[u8]) -> Vec<usize> {
+fn cut(data: &[u8]) -> Vec<usize> {
     let mut out = Vec::new();
     let mut rest = data;
     while !rest.is_empty() {
@@ -117,6 +117,11 @@ const PRUNE_ABOVE: u64 = 512 * 1024 * 1024;
 impl Store {
     pub(crate) fn new(sync_dir: &Path) -> Self {
         Self { dir: sync_dir.join("chunks"), known_dir: sync_dir.join("known") }
+    }
+
+    /// A store of its own in `dir`, with no peers.
+    pub(crate) fn at(dir: PathBuf) -> Self {
+        Self { known_dir: dir.join("known"), dir }
     }
 
     fn path(&self, id: &str) -> PathBuf {
@@ -207,7 +212,7 @@ impl Store {
         let mut all: BTreeSet<String> = self.known(peer_hex).into_iter().collect();
         all.extend(ids.into_iter().filter(|i| valid_id(i)));
         std::fs::create_dir_all(&self.known_dir)?;
-        let body: String = all.iter().map(|i| format!("{i}\n")).collect();
+        let body: String = all.iter().flat_map(|i| [i.as_str(), "\n"]).collect();
         let p = self.known_file(peer_hex);
         let tmp = p.with_extension("tmp");
         std::fs::write(&tmp, body)?;
@@ -223,13 +228,27 @@ impl Store {
         self.mark_known(peer_hex, keep)
     }
 
-    /// Drop the oldest chunks once the store passes its size cap.
-    pub(crate) fn prune(&self) -> u64 {
-        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = std::fs::read_dir(&self.dir)
+    fn entries(&self) -> impl Iterator<Item = std::fs::DirEntry> {
+        std::fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
             .flatten()
             .flat_map(|d| std::fs::read_dir(d.path()).into_iter().flatten().flatten())
+    }
+
+    /// Drop every chunk not in `keep`.
+    pub(crate) fn sweep(&self, keep: &HashSet<String>) {
+        for e in self.entries() {
+            if !keep.contains(&*e.file_name().to_string_lossy()) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+
+    /// Drop the oldest chunks once the store passes its size cap.
+    pub(crate) fn prune(&self) -> u64 {
+        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = self
+            .entries()
             .filter_map(|e| {
                 let m = e.metadata().ok()?;
                 Some((m.modified().ok()?, m.len(), e.path()))

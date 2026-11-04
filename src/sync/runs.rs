@@ -3,25 +3,27 @@
 //! device's fleet.toml. A peer can already type into sessions, but a
 //! command runs with no human watching, so nothing runs by default.
 //!
-//! Progress reuses `JobStatus` (kind "run"): an output tail, the line
-//! count, and finally the exit code.
+//! Progress is a `RunStatus`: an output tail, the line count, and
+//! finally the exit code.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use super::fleet::{Fleet, RunRule};
-use super::protocol::{now_secs, JobStatus, RunSpec};
+use super::protocol::{RunSpec, RunStatus};
+use crate::util::now_secs;
+use crate::util::spawn_named;
 
 /// Output lines carried per update.
-pub(crate) const RUN_TAIL: usize = 20;
+const RUN_TAIL: usize = 20;
 /// At most one progress update per this, so a chatty command can't
 /// flood the relay.
 const UPDATE_EVERY: Duration = Duration::from_secs(1);
 /// What `timeout(1)` exits with; reported when `--timeout` kills it.
-pub(crate) const TIMED_OUT: i32 = 124;
+const TIMED_OUT: i32 = 124;
 
 /// How an allowed run executes.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,11 +35,14 @@ pub(crate) struct Plan {
 
 /// A rule's argv: literal, with an optional final `"*"` for any trailing
 /// arguments. A `*` anywhere else makes the rule invalid (never matches).
-pub(crate) fn rule_matches(pattern: &[String], argv: &[String]) -> bool {
+fn rule_matches(pattern: &[String], argv: &[String]) -> bool {
     match pattern.split_last() {
         None => false,
         Some((last, head)) if last == "*" => {
-            !head.is_empty() && !head.iter().any(|p| p == "*") && argv.len() >= head.len() && argv[..head.len()] == *head
+            !head.is_empty()
+                && !head.iter().any(|p| p == "*")
+                && argv.len() >= head.len()
+                && argv[..head.len()] == *head
         }
         Some(_) => !pattern.iter().any(|p| p == "*") && pattern == argv,
     }
@@ -83,7 +88,8 @@ pub(crate) fn authorize(fleet: &Fleet, fleet_file: &Path, spec: &RunSpec) -> Res
     Ok(Plan { cwd, argv: spec.argv.clone(), shell: rule.shell })
 }
 
-fn push_tail(st: &mut JobStatus, line: &str) {
+/// Keep the last `RUN_TAIL` lines, each cut to 240 characters.
+fn push_tail(st: &mut RunStatus, line: &str) {
     st.tail.push(line.chars().take(240).collect());
     if st.tail.len() > RUN_TAIL {
         st.tail.remove(0);
@@ -92,13 +98,12 @@ fn push_tail(st: &mut JobStatus, line: &str) {
 }
 
 /// The status a run starts with, before its thread reports.
-pub(crate) fn queued(spec: &RunSpec, device: &str) -> JobStatus {
-    JobStatus {
+pub(crate) fn queued(spec: &RunSpec, device: &str) -> RunStatus {
+    RunStatus {
         id: spec.id.clone(),
         title: spec.argv.join(" ").chars().take(80).collect(),
         device: device.to_string(),
         phase: "queued".into(),
-        kind: "run".into(),
         updated_at: now_secs(),
         ..Default::default()
     }
@@ -106,12 +111,12 @@ pub(crate) fn queued(spec: &RunSpec, device: &str) -> JobStatus {
 
 /// Run to completion on this thread, sending throttled status updates
 /// and always a final one with the exit code.
-pub(crate) fn run(spec: &RunSpec, plan: &Plan, device: &str, tx: &Sender<JobStatus>) {
+pub(crate) fn run(spec: &RunSpec, plan: &Plan, device: &str, report: &dyn Fn(RunStatus)) {
     let mut st = queued(spec, device);
     st.phase = "running".into();
-    let send = |st: &mut JobStatus| {
+    let send = |st: &mut RunStatus| {
         st.updated_at = now_secs();
-        let _ = tx.send(st.clone());
+        report(st.clone());
     };
     send(&mut st);
     // What actually runs: argv as given, or `sh -c` for a shell rule.
@@ -120,9 +125,15 @@ pub(crate) fn run(spec: &RunSpec, plan: &Plan, device: &str, tx: &Sender<JobStat
     } else {
         // `./bin/x` means the one in the run's directory, not the agent's.
         let prog = &plan.argv[0];
-        let prog = if prog.contains('/') && !prog.starts_with('/') { plan.cwd.join(prog).to_string_lossy().into_owned() } else { prog.clone() };
+        let prog = if prog.contains('/') && !prog.starts_with('/') {
+            plan.cwd.join(prog).to_string_lossy().into_owned()
+        } else {
+            prog.clone()
+        };
         match super::bins::find(&prog) {
-            Ok(exe) => std::iter::once(exe.to_string_lossy().into_owned()).chain(plan.argv[1..].iter().cloned()).collect(),
+            Ok(exe) => {
+                std::iter::once(exe.to_string_lossy().into_owned()).chain(plan.argv[1..].iter().cloned()).collect()
+            }
             Err(e) => {
                 st.phase = "failed".into();
                 st.result = Some(e);
@@ -130,21 +141,8 @@ pub(crate) fn run(spec: &RunSpec, plan: &Plan, device: &str, tx: &Sender<JobStat
             }
         }
     };
-    // A process with a SIGCHLD reaper (the TUI hosting an agent) can reap
-    // the child before `wait` sees it, losing the exit code. So the
-    // command runs under `"$@"` (argv passed through verbatim, nothing
-    // parsed) and its status also goes to a file, passed as `$0`.
-    let stage = match super::handoff::tempdir() {
-        Ok(t) => t,
-        Err(e) => {
-            st.phase = "failed".into();
-            st.result = Some(e);
-            return send(&mut st);
-        }
-    };
-    let status_file = stage.path().join("status");
-    let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(r#""$@"; s=$?; echo "$s" >"$0"; exit "$s""#).arg(&status_file).args(&target);
+    let mut cmd = Command::new(&target[0]);
+    cmd.args(&target[1..]);
     cmd.current_dir(&plan.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // Its own process group, so a timeout takes its children with it.
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
@@ -157,18 +155,27 @@ pub(crate) fn run(spec: &RunSpec, plan: &Plan, device: &str, tx: &Sender<JobStat
         }
     };
     let (ltx, lrx) = channel::<String>();
-    for out in [child.stdout.take().map(|o| Box::new(o) as Box<dyn std::io::Read + Send>), child.stderr.take().map(|e| Box::new(e) as Box<dyn std::io::Read + Send>)]
-        .into_iter()
-        .flatten()
+    for out in [
+        child.stdout.take().map(|o| Box::new(o) as Box<dyn std::io::Read + Send>),
+        child.stderr.take().map(|e| Box::new(e) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
     {
         let ltx = ltx.clone();
-        std::thread::spawn(move || {
+        if let Err(e) = spawn_named("run-output", move || {
             for l in BufReader::new(out).lines().map_while(Result::ok) {
                 if ltx.send(l).is_err() {
                     break;
                 }
             }
-        });
+        }) {
+            kill_group(child.id(), &mut child);
+            let _ = child.wait();
+            st.phase = "failed".into();
+            st.result = Some(e);
+            return send(&mut st);
+        }
     }
     drop(ltx);
     let started = Instant::now();
@@ -197,15 +204,13 @@ pub(crate) fn run(spec: &RunSpec, plan: &Plan, device: &str, tx: &Sender<JobStat
                 while let Ok(l) = lrx.recv_timeout(Duration::from_millis(50)) {
                     push_tail(&mut st, &l);
                 }
-                break Some(s);
+                break Ok(s);
             }
             Ok(None) => {}
-            // Reaped elsewhere: gone, and its status is in the file.
-            Err(_) => {
-                while let Ok(l) = lrx.recv_timeout(Duration::from_millis(50)) {
-                    push_tail(&mut st, &l);
-                }
-                break None;
+            Err(e) => {
+                kill_group(child.id(), &mut child);
+                let _ = child.wait();
+                break Err(e);
             }
         }
         if dirty && last_sent.elapsed() >= UPDATE_EVERY {
@@ -214,12 +219,10 @@ pub(crate) fn run(spec: &RunSpec, plan: &Plan, device: &str, tx: &Sender<JobStat
             dirty = false;
         }
     };
-    let code = status
-        .map(|s| {
-            use std::os::unix::process::ExitStatusExt;
-            s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))
-        })
-        .or_else(|| std::fs::read_to_string(&status_file).ok().and_then(|c| c.trim().parse().ok()));
+    let code = status.ok().map(|s| {
+        use std::os::unix::process::ExitStatusExt;
+        s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))
+    });
     st.exit_code = Some(if timed_out { TIMED_OUT } else { code.unwrap_or(-1) });
     st.phase = if st.exit_code == Some(0) { "done" } else { "failed" }.into();
     st.result = Some(if timed_out {
@@ -283,7 +286,10 @@ mod tests {
 
         let other_dir = RunSpec { cwd: Some("/tmp".into()), place: None, ..spec.clone() };
         let e = authorize(&f, file, &other_dir).unwrap_err();
-        assert!(e.contains("no [run] allow rule") && e.contains("cwd = \"/tmp\"") && e.contains("/x/fleet.toml"), "{e}");
+        assert!(
+            e.contains("no [run] allow rule") && e.contains("cwd = \"/tmp\"") && e.contains("/x/fleet.toml"),
+            "{e}"
+        );
 
         let rm = RunSpec { argv: v(&["rm", "-rf", "x"]), ..spec.clone() };
         assert!(authorize(&f, file, &rm).unwrap_err().contains("argv = [\"rm\", \"-rf\", \"x\"]"));
@@ -297,11 +303,15 @@ mod tests {
     fn run_streams_output_and_reports_the_exit_code() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = channel();
-        let spec = RunSpec { id: "r1".into(), argv: v(&["sh", "-c", "echo out; echo err >&2; pwd; exit 3"]), ..Default::default() };
+        let spec = RunSpec {
+            id: "r1".into(),
+            argv: v(&["sh", "-c", "echo out; echo err >&2; pwd; exit 3"]),
+            ..Default::default()
+        };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
-        run(&spec, &plan, "server", &tx);
+        run(&spec, &plan, "server", &|st| tx.send(st).unwrap());
         let last = rx.try_iter().last().unwrap();
-        assert_eq!((last.phase.as_str(), last.exit_code, last.kind.as_str()), ("failed", Some(3), "run"));
+        assert_eq!((last.phase.as_str(), last.exit_code), ("failed", Some(3)));
         assert_eq!(last.lines, 3);
         assert!(last.tail.contains(&"out".to_string()) && last.tail.contains(&"err".to_string()));
         let pwd = dir.path().canonicalize().unwrap();
@@ -314,7 +324,7 @@ mod tests {
         let (tx, rx) = channel();
         let spec = RunSpec { id: "r2".into(), argv: v(&["echo", "$HOME; touch pwned"]), ..Default::default() };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
-        run(&spec, &plan, "server", &tx);
+        run(&spec, &plan, "server", &|st| tx.send(st).unwrap());
         let last = rx.try_iter().last().unwrap();
         assert_eq!(last.exit_code, Some(0));
         assert_eq!(last.tail, vec!["$HOME; touch pwned".to_string()]);
@@ -331,7 +341,7 @@ mod tests {
         let (tx, rx) = channel();
         let spec = RunSpec { id: "r4".into(), argv: v(&["./bin/v2.sh", "verify", "S5"]), ..Default::default() };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
-        run(&spec, &plan, "server", &tx);
+        run(&spec, &plan, "server", &|st| tx.send(st).unwrap());
         let last = rx.try_iter().last().unwrap();
         assert_eq!((last.exit_code, last.tail.clone()), (Some(0), vec!["v2 verify S5".to_string()]));
     }
@@ -343,7 +353,7 @@ mod tests {
         let spec = RunSpec { id: "r3".into(), argv: v(&["sleep", "30"]), timeout_secs: Some(1), ..Default::default() };
         let plan = Plan { cwd: dir.path().to_path_buf(), argv: spec.argv.clone(), shell: false };
         let t = Instant::now();
-        run(&spec, &plan, "server", &tx);
+        run(&spec, &plan, "server", &|st| tx.send(st).unwrap());
         assert!(t.elapsed() < Duration::from_secs(10));
         let last = rx.try_iter().last().unwrap();
         assert_eq!(last.exit_code, Some(TIMED_OUT));

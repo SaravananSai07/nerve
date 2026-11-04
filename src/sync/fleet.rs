@@ -1,6 +1,6 @@
 //! Who this device is and who it trusts. Lives in `<config>/sync/`:
 //! `device.key` (0600, hex secret) and `fleet.toml` (relays, peers,
-//! capabilities). Managed by `nerve sync init|pair`, editable by hand.
+//! capabilities). Managed by `nerve connect` and the TUI, editable by hand.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -22,8 +22,21 @@ pub(crate) struct Fleet {
     pub(crate) relays: Vec<String>,
     /// name → npub/hex of every device allowed to talk to this one.
     pub(crate) peers: BTreeMap<String, String>,
+    /// Peers that devices joining later are not connected to on their
+    /// own (they joined for "the devices there now").
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) closed: Vec<String>,
     /// Extra capabilities on top of the detected ones (os, arch, tools).
     pub(crate) caps: Vec<String>,
+    /// Folders whose sessions stay on this device, subfolders included
+    /// (`nerve sync private`). Peers don't see them, can't type into them,
+    /// and their prompts are answered only here. Every other session is
+    /// visible to paired devices.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) private: Vec<String>,
+    /// Single sessions kept on this device, by session id.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) private_sessions: Vec<String>,
     /// Where a hand-off of a repo that neither `--to <place>` nor
     /// `path_map` places lands. Unset, such a hand-off is refused.
     pub(crate) handoff_root: Option<PathBuf>,
@@ -56,6 +69,24 @@ pub(crate) struct Fleet {
     pub(crate) ssh: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "XferConfig::is_default")]
     pub(crate) xfer: XferConfig,
+    /// Folders kept the same on several devices; each one's path is the
+    /// place of the same name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) folders: Vec<FolderCfg>,
+    /// Hours a file a sync replaced or deleted is kept, to undo it.
+    pub(crate) keep_versions_hours: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct FolderCfg {
+    pub(crate) name: String,
+    /// The other devices that keep a copy.
+    pub(crate) with: Vec<String>,
+    #[serde(default)]
+    pub(crate) when: super::folders::When,
+    /// What those devices may sync next without asking.
+    #[serde(default)]
+    pub(crate) others: super::folders::Others,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,10 +113,13 @@ impl XferConfig {
 impl Default for Fleet {
     fn default() -> Self {
         Self {
-            device: hostname(),
+            device: crate::util::hostname(),
             relays: Vec::new(),
             peers: BTreeMap::new(),
+            closed: Vec::new(),
             caps: Vec::new(),
+            private: Vec::new(),
+            private_sessions: Vec::new(),
             handoff_root: None,
             places: BTreeMap::new(),
             run: RunConfig::default(),
@@ -96,6 +130,8 @@ impl Default for Fleet {
             hook_timeout_secs: 600,
             ssh: BTreeMap::new(),
             xfer: XferConfig::default(),
+            folders: Vec::new(),
+            keep_versions_hours: 48,
         }
     }
 }
@@ -131,13 +167,9 @@ pub(crate) fn sync_dir(paths: &Paths) -> PathBuf {
     paths.config_dir().join("sync")
 }
 
-pub(crate) fn hostname() -> String {
-    nix::unistd::gethostname()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .map(|h| h.split('.').next().unwrap_or("").to_string())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "device".into())
+/// This device's fleet.toml, or what to do when there is none.
+pub(crate) fn set_up(dir: &Path) -> Result<Fleet, String> {
+    Fleet::load(dir).ok_or_else(|| "not set up; run `nerve connect` first".into())
 }
 
 impl Fleet {
@@ -157,7 +189,7 @@ impl Fleet {
     }
 
     pub(crate) fn save(&self, dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
+        create_private_dir(dir)?;
         let body = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         let tmp = dir.join("fleet.toml.tmp");
         std::fs::write(&tmp, body)?;
@@ -176,6 +208,58 @@ impl Fleet {
                 }
             })
             .collect()
+    }
+
+    /// Is the session `id` running in `cwd` kept on this device?
+    pub(crate) fn is_private(&self, id: &str, cwd: &Path) -> bool {
+        self.private_sessions.iter().any(|s| s == id) || inside(&self.private, cwd)
+    }
+
+    /// Keep a folder (absolute; subfolders included) or one session on
+    /// this device, or make it visible again. Making a folder visible
+    /// drops any private folder inside it, and fails while a parent stays
+    /// private.
+    pub(crate) fn set_private(&mut self, target: &PrivateTarget, on: bool) -> Result<String, String> {
+        let path = match target {
+            PrivateTarget::Session(id) => {
+                let had = self.private_sessions.iter().any(|s| s == id);
+                return Ok(match (on, had) {
+                    (true, true) => format!("session {id:.8} is already private"),
+                    (true, false) => {
+                        self.private_sessions.push(id.clone());
+                        format!("session {id:.8} stays on this device now")
+                    }
+                    (false, true) => {
+                        self.private_sessions.retain(|s| s != id);
+                        format!("session {id:.8} is visible to your devices again")
+                    }
+                    (false, false) => format!("session {id:.8} was not private"),
+                });
+            }
+            PrivateTarget::Folder(path) => path,
+        };
+        if !path.is_absolute() {
+            return Err(format!("{} is not an absolute path", path.display()));
+        }
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        let p = path.to_string_lossy().into_owned();
+        if on {
+            if inside(&self.private, &path) {
+                return Ok(format!("{p} is already private"));
+            }
+            self.private.push(p.clone());
+            return Ok(format!("sessions in {p} stay on this device now"));
+        }
+        let before = self.private.len();
+        self.private.retain(|s| !inside(std::slice::from_ref(&p), Path::new(s)));
+        if let Some(parent) = self.private.iter().find(|s| inside(std::slice::from_ref(s), &path)) {
+            return Err(format!("{p} is inside private {parent}; make that visible instead"));
+        }
+        Ok(if self.private.len() < before {
+            format!("sessions in {p} are visible to your devices again")
+        } else {
+            format!("{p} was not private")
+        })
     }
 
     /// The local directory of place `name`, or what to add to `file`
@@ -198,7 +282,45 @@ impl Fleet {
             .iter()
             .filter(|(from, _)| src == from.as_str() || src.starts_with(&format!("{}/", from.trim_end_matches('/'))))
             .max_by_key(|(from, _)| from.len())
-            .map(|(from, to)| PathBuf::from(format!("{}{}", to.trim_end_matches('/'), &src[from.trim_end_matches('/').len()..])))
+            .map(|(from, to)| {
+                PathBuf::from(format!("{}{}", to.trim_end_matches('/'), &src[from.trim_end_matches('/').len()..]))
+            })
+    }
+}
+
+/// What `nerve sync private` and the TUI's `p` keep on this device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) enum PrivateTarget {
+    Folder(PathBuf),
+    Session(String),
+}
+
+/// Is `cwd` inside one of the folders in `list`? A leading `~/` means $HOME.
+pub(crate) fn inside(list: &[String], cwd: &Path) -> bool {
+    let cwd = cwd.to_string_lossy();
+    list.iter().any(|s| {
+        let root = crate::paths::untilde(s).to_string_lossy().into_owned();
+        if !root.starts_with('/') {
+            return false;
+        }
+        let root = root.trim_end_matches('/');
+        root.is_empty() || cwd == root || cwd.starts_with(&format!("{root}/"))
+    })
+}
+
+/// The sync dir holds the device key and the mod's socket: owner only.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// `ws://` or `wss://`: the only relay URLs nerve speaks.
+pub(crate) fn check_relay(url: &str) -> Result<(), String> {
+    if url.starts_with("ws://") || url.starts_with("wss://") {
+        Ok(())
+    } else {
+        Err(format!("relay must be ws:// or wss://: {url}"))
     }
 }
 
@@ -208,13 +330,9 @@ pub(crate) fn device_keys(dir: &Path) -> std::io::Result<Keys> {
     if let Ok(s) = std::fs::read_to_string(&path) {
         return Keys::parse(s.trim()).map_err(std::io::Error::other);
     }
-    std::fs::create_dir_all(dir)?;
+    create_private_dir(dir)?;
     let keys = Keys::generate();
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)?;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
     f.write_all(keys.secret_key().to_secret_hex().as_bytes())?;
     Ok(keys)
 }
@@ -223,7 +341,7 @@ pub(crate) fn npub(pk: &PublicKey) -> String {
     pk.to_bech32().unwrap_or_else(|_| pk.to_hex())
 }
 
-/// Capabilities a job can require: OS, arch, and tools found on PATH.
+/// What this device advertises (`nerve sync status`): OS, arch, and tools on PATH.
 /// Spawns processes, so only call it from a worker or CLI thread.
 pub(crate) fn detect_caps(extra: &[String]) -> Vec<String> {
     let mut caps = vec![std::env::consts::OS.to_string(), std::env::consts::ARCH.to_string()];
@@ -269,6 +387,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sessions_are_visible_unless_kept_private() {
+        let mut f = Fleet::default();
+        assert!(!f.is_private("s1", Path::new("/srv/proj")), "everything is visible by default");
+        f.private = vec!["/srv/proj/".into(), "relative/dir".into()];
+        assert!(f.is_private("s1", Path::new("/srv/proj")));
+        assert!(f.is_private("s1", Path::new("/srv/proj/sub/dir")));
+        assert!(!f.is_private("s1", Path::new("/srv/project")), "prefix must end at path boundary");
+        assert!(!f.is_private("s1", Path::new("/srv")));
+        assert!(!f.is_private("s1", Path::new("relative/dir")), "relative entries match nothing");
+        let home = std::env::var("HOME").unwrap();
+        f.private = vec!["~/code".into()];
+        assert!(f.is_private("s1", &Path::new(&home).join("code/x")));
+        f.private_sessions = vec!["s2".into()];
+        assert!(f.is_private("s2", Path::new("/anywhere")), "one session alone");
+    }
+
+    #[test]
+    fn keeping_folders_and_sessions_private() {
+        let mut f = Fleet::default();
+        let dir = |p: &str| PrivateTarget::Folder(PathBuf::from(p));
+        assert!(f.set_private(&dir("rel"), true).is_err());
+        f.set_private(&dir("/nonexistent/a"), true).unwrap();
+        f.set_private(&dir("/nonexistent/a/b"), true).unwrap();
+        assert_eq!(f.private, ["/nonexistent/a"], "already covered by its parent");
+        assert!(f.set_private(&dir("/nonexistent/a/b"), false).is_err(), "parent keeps it private");
+        f.private.push("/nonexistent/a/c".into());
+        f.set_private(&dir("/nonexistent/a"), false).unwrap();
+        assert!(f.private.is_empty(), "making a folder visible drops folders inside it");
+        let one = PrivateTarget::Session("abc".into());
+        f.set_private(&one, true).unwrap();
+        f.set_private(&one, true).unwrap();
+        assert_eq!(f.private_sessions, ["abc"]);
+        f.set_private(&one, false).unwrap();
+        assert!(f.private_sessions.is_empty());
+    }
+
+    #[test]
     fn path_map_prefers_longest_prefix_and_respects_boundaries() {
         let mut f = Fleet::default();
         f.path_map.insert("/Users/me".into(), "/home/user".into());
@@ -301,7 +456,23 @@ mod tests {
         assert_eq!(g.peers["server"], "npub1x");
         assert_eq!(g.remote_questions, "away");
         let body = std::fs::read_to_string(Fleet::file(dir.path())).unwrap();
-        assert!(!body.contains("[places]") && !body.contains("[run]"), "empty tables stay out of the file");
+        assert!(
+            !body.contains("[places]") && !body.contains("[run]") && !body.contains("folders"),
+            "empty tables stay out of the file"
+        );
+        let mut g = g;
+        g.places.insert("site".into(), "/srv/site".into());
+        g.folders.push(FolderCfg {
+            name: "site".into(),
+            with: vec!["server".into()],
+            when: super::super::folders::When::Watch,
+            others: super::super::folders::Others::Inside,
+        });
+        g.closed.push("pi".into());
+        g.save(dir.path()).unwrap();
+        let h = Fleet::load(dir.path()).unwrap();
+        assert_eq!((h.folders, h.closed, h.keep_versions_hours), (g.folders, vec!["pi".to_string()], 48));
+        assert!(std::fs::read_to_string(Fleet::file(dir.path())).unwrap().contains("others = \"inside\""));
     }
 
     #[test]

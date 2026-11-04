@@ -53,7 +53,7 @@ impl Mailbox {
             .filter_map(|e| {
                 let id = e.path().file_stem()?.to_str()?.to_string();
                 let input: Value = serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok()?;
-                Some(to_request(&id, &input, file_age_secs(&e.path())))
+                Some(to_request(&id, &input, mtime_secs(&e.path())))
             })
             .collect();
         out.sort_by_key(|r| r.created_at);
@@ -106,8 +106,9 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn file_age_secs(p: &Path) -> u64 {
-    let now = super::protocol::now_secs();
+/// When the file was last written, in seconds since the epoch (now, if unknown).
+fn mtime_secs(p: &Path) -> u64 {
+    let now = crate::util::now_secs();
     std::fs::metadata(p)
         .and_then(|m| m.modified())
         .ok()
@@ -167,7 +168,7 @@ pub(crate) fn to_request(id: &str, input: &Value, created_at: u64) -> PendingReq
 
 /// The JSON a hook prints to apply `answer` (shapes verified on Claude
 /// Code 2.1.288, see research/sync/experiments/RESULTS.md E6).
-pub(crate) fn hook_output(input: &Value, answer: &Answer) -> Value {
+fn hook_output(input: &Value, answer: &Answer) -> Value {
     let event = input.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
     let tool_input = input.get("tool_input").cloned().unwrap_or(Value::Null);
     match (event, answer) {
@@ -208,8 +209,8 @@ pub(crate) fn hook_output(input: &Value, answer: &Answer) -> Value {
 /// is about — i.e. someone answered at the keyboard. The hook input has
 /// no tool_use_id, so match the newest `tool_use` with the same name and
 /// input, then look for its `tool_result`.
-pub(crate) fn resolved_in_transcript(transcript: &Path, tool: &str, tool_input: &Value) -> bool {
-    let Some(tail) = read_tail(transcript, 256 * 1024) else {
+fn resolved_in_transcript(transcript: &Path, tool: &str, tool_input: &Value) -> bool {
+    let Ok(tail) = crate::util::fs::read_tail_nofollow(transcript, 256 * 1024) else {
         return false;
     };
     let mut want: Option<String> = None;
@@ -240,16 +241,45 @@ pub(crate) fn resolved_in_transcript(transcript: &Path, tool: &str, tool_input: 
     false
 }
 
-fn read_tail(path: &Path, max: u64) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    let s = String::from_utf8_lossy(&buf).into_owned();
-    // Drop the partial first line when we started mid-file.
-    Some(if len > max { s.split_once('\n').map(|x| x.1.to_string()).unwrap_or_default() } else { s })
+/// Claude hook entry point. Prints a decision when a peer answers; prints
+/// nothing (= Claude asks locally as usual) on timeout, when the user
+/// answers at the keyboard, or when no sync agent is running.
+pub(crate) fn hook(dir: &std::path::Path) -> Result<String, String> {
+    let mut raw = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).map_err(|e| e.to_string())?;
+    let input: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let fleet = super::fleet::Fleet::load(dir).unwrap_or_default();
+    if !super::agent::agent_alive(dir) {
+        return Ok(String::new());
+    }
+    // A private session's prompts stay on this device.
+    let cwd = input.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let sid = input.get("session_id").and_then(Value::as_str).unwrap_or("");
+    if fleet.is_private(sid, std::path::Path::new(cwd)) {
+        return Ok(String::new());
+    }
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string();
+    let is_question = input.get("hook_event_name").and_then(Value::as_str) == Some("PreToolUse");
+    if is_question {
+        // The question dialog stays hidden while this hook runs, so only
+        // take it remote when nobody is at this keyboard.
+        let away = super::agent::away_flag(dir).exists();
+        let allowed = match fleet.remote_questions.as_str() {
+            "always" => true,
+            "never" => false,
+            _ => away,
+        };
+        if !allowed {
+            return Ok(String::new());
+        }
+    } else if !fleet.remote_permissions {
+        return Ok(String::new());
+    }
+    let transcript = input.get("transcript_path").and_then(Value::as_str).map(PathBuf::from);
+    let tool_input = input.get("tool_input").cloned().unwrap_or(Value::Null);
+    let answered_locally = || transcript.as_deref().is_some_and(|t| resolved_in_transcript(t, &tool, &tool_input));
+    let mb = Mailbox::new(dir);
+    Ok(mb.wait(&input, Duration::from_secs(fleet.hook_timeout_secs), answered_locally).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -273,7 +303,8 @@ mod tests {
 
     #[test]
     fn permission_allow_and_deny_shapes() {
-        let input = json!({"hook_event_name": "PermissionRequest", "tool_name": "Write", "tool_input": {"file_path": "/x"}});
+        let input =
+            json!({"hook_event_name": "PermissionRequest", "tool_name": "Write", "tool_input": {"file_path": "/x"}});
         assert_eq!(hook_output(&input, &Answer::Allow)["hookSpecificOutput"]["decision"]["behavior"], "allow");
         let d = hook_output(&input, &Answer::Deny { reason: "no".into() });
         assert_eq!(d["hookSpecificOutput"]["decision"]["behavior"], "deny");
@@ -327,10 +358,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = dir.path().join("t.jsonl");
         let input = json!({"file_path": "/a", "content": "x"});
-        let lines = [
-            json!({"message": {"content": [{"type": "tool_use", "id": "tu1", "name": "Write", "input": input}]}}),
-        ];
-        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let lines =
+            [json!({"message": {"content": [{"type": "tool_use", "id": "tu1", "name": "Write", "input": input}]}})];
+        let body: String = lines.iter().flat_map(|l| [l.to_string(), "\n".into()]).collect();
         std::fs::write(&t, &body).unwrap();
         assert!(!resolved_in_transcript(&t, "Write", &input));
         let result = json!({"message": {"content": [{"type": "tool_result", "tool_use_id": "tu1"}]}});
