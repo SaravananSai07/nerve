@@ -60,7 +60,8 @@ async function pump($) {
     const got = await call($, 'GET', '/v1/poll?sid=' + encodeURIComponent(sid))
     if (got.status !== undefined && got.status !== lastStatus) {
       lastStatus = got.status
-      $.ui.status(got.status)
+      // "" means nothing needs attention; undefined clears the line.
+      $.ui.status(got.status || undefined)
     }
     for (const c of got.cmds || []) {
       if (c.t !== 'prompt') continue
@@ -89,7 +90,9 @@ async function remote($, kind, tool, input, localDone, maxWaits) {
   if (!online) return { kind: 'none' }
   const id = newId()
   try {
-    await call($, 'POST', '/v1/request', { id, kind, tool, input })
+    // A refused request (malformed) leaves the question to Claude's dialog.
+    const got = await call($, 'POST', '/v1/request', { id, kind, tool, input })
+    if (got.ok === false) return { kind: 'none' }
   } catch {
     return { kind: 'none' }
   }

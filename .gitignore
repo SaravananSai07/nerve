@@ -9,3 +9,6 @@
 research/sync/lab/target*
 research/sync/demo/.state/
 research/sync/experiments/.e17/
+
+# local design prototypes, never committed
+/ignored/
