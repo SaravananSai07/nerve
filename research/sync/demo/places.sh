@@ -13,7 +13,7 @@ state="$here/.state/places"
 port="${DEMO_PORT:-7789}"
 relay="ws://127.0.0.1:$port"
 
-cargo build --quiet --release --features sync --manifest-path "$repo/Cargo.toml"
+cargo build --quiet --release --manifest-path "$repo/Cargo.toml"
 nerve="$repo/target/release/nerve"
 
 pids=()

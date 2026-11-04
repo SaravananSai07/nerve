@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Two-device nerve sync demo on one machine, no second device, VPN or internet.
 #
-#   research/sync/demo/demo.sh           relay + "beta" agent, then the TUI as "alpha" (press D)
+#   research/sync/demo/demo.sh           relay + "beta" agent, then the TUI as "alpha"
 #   research/sync/demo/demo.sh --job     also run a headless Claude job on beta (spends a few cents)
-#   research/sync/demo/demo.sh --check   non-interactive smoke test: status + acknowledged sync
+#   research/sync/demo/demo.sh --check   non-interactive smoke test: status + manual sync
 #
 # Each device is a separate NERVE_CONFIG_DIR under demo/.state, so your real
 # nerve config is untouched. Both "devices" see the same local Claude
-# sessions, so anything you type from the Devices view lands in a real session.
+# sessions, so anything you type into one of beta's rows lands in a real session.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
@@ -16,8 +16,8 @@ port="${DEMO_PORT:-7788}"
 relay="ws://127.0.0.1:$port"
 mode="${1:-tui}"
 
-echo "› building nerve with --features sync"
-cargo build --quiet --release --features sync --manifest-path "$repo/Cargo.toml"
+echo "› building nerve"
+cargo build --quiet --release --manifest-path "$repo/Cargo.toml"
 nerve="$repo/target/release/nerve"
 
 pids=()
@@ -55,7 +55,7 @@ for _ in $(seq 1 40); do
 done
 alpha sync status
 echo
-echo "› manual sync (✓ only when beta acknowledges end to end)"
+echo "› manual sync (ends on this device's own outcome)"
 alpha sync sync
 
 if [ "$mode" = "--job" ]; then
@@ -74,8 +74,8 @@ fi
 cat <<EOF
 
 Opening the TUI as "alpha". Try:
-  D   Devices view: beta's sessions, last synced, pending prompts, jobs
-  r   sync now            m  type into a session      d/l/g  diff/log/subagents
+  beta's sessions are in the list, named "beta"; Tab shows if beta is online
+  1-9 answer a question   i  type into a session      x  stop it
   H   hand a session off to beta (lands in $state/beta-work, tmux)
   q   quit (stops the relay and beta)
 Logs: $state/*.log

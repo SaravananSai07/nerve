@@ -13,7 +13,7 @@ research/sync/demo/places.sh         # put/get/refs/run between two agents, each
 
 The script does the following:
 
-1. Builds `nerve` with `--features sync` into `target/release`.
+1. Builds `nerve` into `target/release`.
 2. Starts the embedded private relay on `ws://127.0.0.1:7788`.
 3. Creates two devices, **alpha** and **beta**, each with its own `NERVE_CONFIG_DIR` under `research/sync/demo/.state/`, and pairs them. Your real nerve config is not touched.
 4. Runs beta's sync agent in the background, waits for its first state event, and prints `nerve sync status`.
@@ -39,7 +39,7 @@ Logs are in `.state/relay.log` and `.state/beta-agent.log`. Quitting the TUI sto
 See `docs/SYNC.md` for the full guide. In short:
 
 ```bash
-cargo build --release --features sync
+cargo build --release
 nerve sync init --name laptop --relay wss://relay.primal.net --relay wss://relay.snort.social
 nerve sync pair server npub1…        # and the reverse on the server
 nerve sync agent                     # on the server

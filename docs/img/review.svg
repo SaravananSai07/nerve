@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1036" height="526" viewBox="0 0 1036 526">
+<rect width="100%" height="100%" rx="10" fill="#16181d"/>
+<circle cx="20" cy="15" r="6" fill="#ff5f57"/><circle cx="40" cy="15" r="6" fill="#febc2e"/><circle cx="60" cy="15" r="6" fill="#28c840"/>
+<text x="518" y="19" fill="#7f848e" font-family="-apple-system, Segoe UI, sans-serif" font-size="12" text-anchor="middle">nerve</text>
+<g font-family="SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14">
+<text x="22.4" y="57.5" fill="#d7dae0" font-weight="bold" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs">nerve</text>
+<text x="98.0" y="57.5" fill="#d7dae0" font-weight="bold" text-decoration="underline" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs">Sessions</text>
+<text x="190.4" y="57.5" fill="#7f848e" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">Sync</text>
+<text x="249.2" y="57.5" fill="#7f848e" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs">Settings</text>
+<text x="316.4" y="57.5" fill="#d7dae0" xml:space="preserve" textLength="579.6" lengthAdjust="spacingAndGlyphs">                                                             laptop  </text>
+<text x="896.0" y="57.5" fill="#7f848e" xml:space="preserve" textLength="117.6" lengthAdjust="spacingAndGlyphs">1 other online</text>
+<text x="14.0" y="93.5" fill="#7f848e" xml:space="preserve" textLength="369.6" lengthAdjust="spacingAndGlyphs">   Two sessions and three requests need you.</text>
+<text x="14.0" y="111.5" fill="#7f848e" xml:space="preserve" textLength="369.6" lengthAdjust="spacingAndGlyphs">   Waiting longest: billing, under a minute.</text>
+<text x="14.0" y="147.5" fill="#7f848e" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs">   Needs you</text>
+<text x="14.0" y="165.5" fill="#7f848e" xml:space="preserve" textLength="999.6" lengthAdjust="spacingAndGlyphs">   ◆  Add invoice due dates                                                   billing                               35s</text>
+<text x="14.0" y="183.5" fill="#7f848e" xml:space="preserve" textLength="999.6" lengthAdjust="spacingAndGlyphs">   ◆  pi wants to connect                                                     pi                                    14s</text>
+<text x="14.0" y="201.5" fill="#7f848e" xml:space="preserve" textLength="268.8" lengthAdjust="spacingAndGlyphs">   ◆  laptop wants to sync do╭─ </text>
+<text x="282.8" y="201.5" fill="#d7dae0" font-weight="bold" xml:space="preserve" textLength="201.6" lengthAdjust="spacingAndGlyphs">studio wants to sync app</text>
+<text x="484.4" y="201.5" fill="#7f848e" xml:space="preserve" textLength="529.2" lengthAdjust="spacingAndGlyphs"> ─────────────────────────────────╮           studio        14s</text>
+<text x="14.0" y="219.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs"> ▌ ◆  studio wants to sync ap│</text>
+<text x="770.0" y="219.5" fill="#7f848e" xml:space="preserve" textLength="243.6" lengthAdjust="spacingAndGlyphs">│                         14s</text>
+<text x="14.0" y="237.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs">      Lands at ~/code/app on │</text>
+<text x="274.4" y="237.5" fill="#7f848e" xml:space="preserve" textLength="428.4" lengthAdjust="spacingAndGlyphs">If its devices ask to sync other folders here later</text>
+<text x="770.0" y="237.5" fill="#7f848e" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="255.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs">      y Allow   ↵ Review   n │</text>
+<text x="770.0" y="255.5" fill="#7f848e" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="273.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs">   ●  Fix the flaky checkout │</text>
+<text x="291.2" y="273.5" fill="#7f848e" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">( )</text>
+<text x="316.4" y="273.5" fill="#d7dae0" xml:space="preserve" textLength="453.6" lengthAdjust="spacingAndGlyphs"> Ask me first                                         </text>
+<text x="770.0" y="273.5" fill="#7f848e" xml:space="preserve" textLength="243.6" lengthAdjust="spacingAndGlyphs">│           studio        11s</text>
+<text x="14.0" y="291.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs">                             │</text>
+<text x="274.4" y="291.5" fill="#61afef" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">›</text>
+<text x="291.2" y="291.5" fill="#61afef" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">(•)</text>
+<text x="324.8" y="291.5" fill="#d7dae0" font-weight="bold" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">Allow folders inside ~/code</text>
+<text x="770.0" y="291.5" fill="#7f848e" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="309.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs">   Working                   │</text>
+<text x="291.2" y="309.5" fill="#7f848e" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">( )</text>
+<text x="316.4" y="309.5" fill="#d7dae0" xml:space="preserve" textLength="453.6" lengthAdjust="spacingAndGlyphs"> Allow any folder that isn&#x27;t private                  </text>
+<text x="770.0" y="309.5" fill="#7f848e" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="327.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs">   ⠙  Add per-key rate limits│</text>
+<text x="770.0" y="327.5" fill="#7f848e" xml:space="preserve" textLength="243.6" lengthAdjust="spacingAndGlyphs">│                         35s</text>
+<text x="14.0" y="345.5" fill="#7f848e" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs">   ⠙  Export the icon set at │</text>
+<text x="266.0" y="345.5" fill="#d7dae0" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ↵ </text>
+<text x="291.2" y="345.5" fill="#7f848e" xml:space="preserve" textLength="117.6" lengthAdjust="spacingAndGlyphs">Allow and sync</text>
+<text x="408.8" y="345.5" fill="#d7dae0" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">   Esc </text>
+<text x="467.6" y="345.5" fill="#7f848e" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">Back</text>
+<text x="770.0" y="345.5" fill="#7f848e" xml:space="preserve" textLength="243.6" lengthAdjust="spacingAndGlyphs">│           studio        11s</text>
+<text x="14.0" y="363.5" fill="#7f848e" xml:space="preserve" textLength="764.4" lengthAdjust="spacingAndGlyphs">                             ╰────────────────────────────────────────────────────────────╯</text>
+<text x="14.0" y="381.5" fill="#7f848e" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">   Idle</text>
+<text x="14.0" y="399.5" fill="#7f848e" xml:space="preserve" textLength="999.6" lengthAdjust="spacingAndGlyphs">   ○  Update the API reference                                                docs                                  35s</text>
+<text x="14.0" y="417.5" fill="#7f848e" xml:space="preserve" textLength="999.6" lengthAdjust="spacingAndGlyphs">   ○  Move the site to the new spacing tokens                                 site                                  35s</text>
+</g></svg>

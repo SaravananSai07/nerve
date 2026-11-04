@@ -45,7 +45,7 @@ wait_for() { # seconds, command...
   return 1
 }
 
-cargo build --quiet --release --features sync --manifest-path "$repo/Cargo.toml" || exit 1
+cargo build --quiet --release --manifest-path "$repo/Cargo.toml" || exit 1
 rm -rf "$st"; mkdir -p "$st/work" "$st/beta-handoff"
 "$nerve" sync serve-relay --port "$port" >"$st/relay.log" 2>&1 & pids+=($!)
 until nc -z 127.0.0.1 $port 2>/dev/null; do sleep 0.2; done

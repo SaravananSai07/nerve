@@ -465,7 +465,7 @@ research/sync/demo/demo.sh --check    # non-interactive; prints status and exits
 <pre><code># build on the phone: install.sh installs rust, git, tmux, openssh from pkg first
 git clone &lt;your fork&gt; nerve &amp;&amp; cd nerve &amp;&amp; ./install.sh nerve1…</code></pre>
 <p>or copy the prebuilt static binary (no compiler needed on the phone):</p>
-<pre><code># on the Pi, once:  cargo build --release --features sync --target aarch64-unknown-linux-musl
+<pre><code># on the Pi, once:  cargo build --release --target aarch64-unknown-linux-musl
 scp &lt;host&gt;:nerve-src/target/aarch64-unknown-linux-musl/release/nerve $PREFIX/bin/
 nerve setup nerve1…</code></pre>
 <p>That's all you need: setup uses public relays, so the phone needs no Tailscale. Because Termux has no service manager, setup starts the agent as a detached process, takes a wake-lock, and writes <code>~/.termux/boot/nerve-sync</code> for Termux:Boot. Android may still kill background apps, so exempt Termux from battery optimisation. <span class="warn">This path is built but not yet run on a real phone.</span></p>
