@@ -1,16 +1,14 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Open for reading with `O_NOFOLLOW`. Use for files under Claude's
 /// directories: a planted final-component symlink can't redirect the
 /// read (e.g. a transcript swapped between `exists()` and open).
 pub(crate) fn open_nofollow(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(path)
+    OpenOptions::new().read(true).custom_flags(nix::libc::O_NOFOLLOW).open(path)
 }
 
 /// `read_capped` for files under Claude's directories.
@@ -39,6 +37,37 @@ pub(crate) fn read_tail_nofollow(path: &Path, max_bytes: u64) -> io::Result<Stri
     })
 }
 
+/// What a file looked like when last read: caches compare it to decide
+/// whether to re-parse. mtime alone misses a rewrite within the
+/// filesystem's timestamp resolution; the length and inode catch it, and
+/// a replaced file at the same path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileKey {
+    mtime: SystemTime,
+    pub(crate) len: u64,
+    pub(crate) inode: u64,
+}
+
+impl FileKey {
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).ok()?;
+        Some(Self { mtime: m.modified().ok()?, len: m.len(), inode: m.ino() })
+    }
+}
+
+/// Read and parse a TOML file, capped at `max_bytes`. A missing file is
+/// `Ok(None)`; an unreadable or malformed one is an error message the
+/// caller can show.
+pub(crate) fn load_toml<T: serde::de::DeserializeOwned>(path: &Path, max_bytes: u64) -> Result<Option<T>, String> {
+    let text = match read_capped(path, max_bytes) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    toml::from_str(&text).map(Some).map_err(|e| format!("parse error at {} ({e})", path.display()))
+}
+
 /// Read up to `max_bytes` from `path`. Bytes beyond the cap are silently
 /// truncated — callers either re-parse and reject malformed input
 /// (TOML/JSON parsers do) or work on small, well-typed contents (a PID
@@ -50,6 +79,61 @@ pub(crate) fn read_capped(path: &Path, max_bytes: u64) -> io::Result<String> {
     let mut buf = String::new();
     file.take(max_bytes).read_to_string(&mut buf)?;
     Ok(buf)
+}
+
+/// Regular files under `dir` as (path relative to it, full path). Symlinks are skipped.
+pub(crate) fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
+    walk_skipping(dir, rel, &|_| false, out)
+}
+
+/// `walk`, not entering directories `skip` names.
+pub(crate) fn walk_skipping(dir: &Path, rel: &str, skip: &dyn Fn(&str) -> bool, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+        match e.file_type() {
+            Ok(t) if t.is_dir() && !skip(&name) => walk_skipping(&e.path(), &r, skip, out),
+            Ok(t) if t.is_file() => out.push((r, e.path())),
+            _ => {}
+        }
+    }
+}
+
+/// A relative path from the wire that stays inside its directory.
+pub(crate) fn safe_rel(rel: &str) -> Option<&str> {
+    let ok = !rel.is_empty()
+        && !rel.starts_with('/')
+        && Path::new(rel).components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    ok.then_some(rel)
+}
+
+/// A scratch directory that goes when dropped.
+pub(crate) struct TempDir(PathBuf);
+
+impl TempDir {
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A fresh scratch directory, removed when dropped.
+pub(crate) fn tempdir() -> Result<TempDir, String> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let p = std::env::temp_dir().join(format!(
+        "nerve-{}-{}-{}",
+        std::process::id(),
+        crate::util::now_secs(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
+    Ok(TempDir(p))
 }
 
 #[cfg(test)]
@@ -105,5 +189,20 @@ mod tests {
         let path = tmp.path().join("nonexistent.txt");
         let err = read_capped(&path, 1024).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn load_toml_tells_missing_from_broken() {
+        #[derive(serde::Deserialize, Debug)]
+        struct T {
+            n: u32,
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("a.toml");
+        assert!(load_toml::<T>(&path, 100).unwrap().is_none());
+        std::fs::write(&path, "n = 4").unwrap();
+        assert_eq!(load_toml::<T>(&path, 100).unwrap().map(|t| t.n), Some(4));
+        std::fs::write(&path, "[bad @@").unwrap();
+        assert!(load_toml::<T>(&path, 100).unwrap_err().contains("parse error"));
     }
 }

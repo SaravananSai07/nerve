@@ -2,7 +2,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
 
 const FILE_MAX_BYTES: u64 = 1_048_576;
 
@@ -49,10 +48,7 @@ fn append_to_file(path: &Path, level: Level, message: &str) -> std::io::Result<(
         }
     }
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = crate::util::now_secs();
     writeln!(f, "[{secs}] {} {message}", level.tag())
 }
 
