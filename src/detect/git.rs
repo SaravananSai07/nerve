@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::util::text;
+
 const GIT_REF_MAX_BYTES: u64 = 4 * 1024;
 
 /// Per-cwd cache of branch lookups. First call for a cwd does the
@@ -23,11 +25,7 @@ pub(crate) struct BranchCache {
 }
 
 enum BranchEntry {
-    InTree {
-        head_path: PathBuf,
-        head_mtime: SystemTime,
-        branch: Option<String>,
-    },
+    InTree { head_path: PathBuf, head_mtime: SystemTime, branch: Option<String> },
     NoTree,
 }
 
@@ -40,12 +38,7 @@ impl BranchCache {
         // Cached InTree: stat the known HEAD path and reuse the
         // parsed branch if the mtime matches. The walk that found
         // HEAD in the first place doesn't repeat.
-        if let Some(BranchEntry::InTree {
-            head_path,
-            head_mtime,
-            branch,
-        }) = self.entries.get(cwd)
-        {
+        if let Some(BranchEntry::InTree { head_path, head_mtime, branch }) = self.entries.get(cwd) {
             match fs::metadata(head_path).and_then(|m| m.modified()) {
                 Ok(mtime) if mtime == *head_mtime => return branch.clone(),
                 Ok(mtime) => {
@@ -57,11 +50,7 @@ impl BranchCache {
                         .and_then(|raw| parse_head_contents(raw.trim()));
                     self.entries.insert(
                         cwd.to_path_buf(),
-                        BranchEntry::InTree {
-                            head_path: hp,
-                            head_mtime: mtime,
-                            branch: branch.clone(),
-                        },
+                        BranchEntry::InTree { head_path: hp, head_mtime: mtime, branch: branch.clone() },
                     );
                     return branch;
                 }
@@ -85,18 +74,10 @@ impl BranchCache {
             }
         };
         let raw = crate::util::fs::read_capped(&head_path, GIT_REF_MAX_BYTES).ok()?;
-        let mtime = fs::metadata(&head_path)
-            .and_then(|m| m.modified())
-            .ok()?;
+        let mtime = fs::metadata(&head_path).and_then(|m| m.modified()).ok()?;
         let branch = parse_head_contents(raw.trim());
-        self.entries.insert(
-            cwd.to_path_buf(),
-            BranchEntry::InTree {
-                head_path,
-                head_mtime: mtime,
-                branch: branch.clone(),
-            },
-        );
+        self.entries
+            .insert(cwd.to_path_buf(), BranchEntry::InTree { head_path, head_mtime: mtime, branch: branch.clone() });
         branch
     }
 
@@ -131,11 +112,7 @@ fn follow_gitfile(gitfile: &Path) -> Option<PathBuf> {
     let rest = contents.lines().find_map(|l| l.strip_prefix("gitdir:"))?;
     let trimmed = rest.trim();
     let gitdir = Path::new(trimmed);
-    let absolute = if gitdir.is_absolute() {
-        gitdir.to_path_buf()
-    } else {
-        gitfile.parent()?.join(gitdir)
-    };
+    let absolute = if gitdir.is_absolute() { gitdir.to_path_buf() } else { gitfile.parent()?.join(gitdir) };
     Some(absolute.join("HEAD"))
 }
 
@@ -147,11 +124,7 @@ fn parse_head_contents(contents: &str) -> Option<String> {
         }
         // Symbolic ref to something other than a local branch — return the
         // tail of the ref so the UI still shows something informative.
-        return refname
-            .rsplit('/')
-            .next()
-            .and_then(safe_refname)
-            .map(str::to_string);
+        return refname.rsplit('/').next().and_then(safe_refname).map(str::to_string);
     }
     // Detached HEAD: 40-byte (or 64-byte SHA-256) hex string.
     if is_hex_sha(contents) {
@@ -162,7 +135,7 @@ fn parse_head_contents(contents: &str) -> Option<String> {
 
 /// Refuse refnames containing ASCII control bytes — git itself forbids them
 /// (`git check-ref-format`), and an attacker-planted `.git/HEAD` reading
-/// `ref: refs/heads/\x1b[2Jpwned` would otherwise paint the cards view.
+/// `ref: refs/heads/\x1b[2Jpwned` would otherwise paint the session list.
 fn safe_refname(name: &str) -> Option<&str> {
     if name.is_empty() {
         return None;
@@ -175,6 +148,22 @@ fn safe_refname(name: &str) -> Option<&str> {
 
 fn is_hex_sha(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The top of the work tree holding `cwd`.
+pub(crate) fn git_root(cwd: &Path) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(text(cwd, &["git", "rev-parse", "--show-toplevel"])?))
+}
+
+/// The first commit reachable from HEAD: the same on every clone.
+pub(crate) fn repo_id(repo: &Path) -> Option<String> {
+    let out = text(repo, &["git", "rev-list", "--max-parents=0", "HEAD"]).ok()?;
+    out.lines().last().map(String::from)
+}
+
+/// A full commit id.
+pub(crate) fn is_sha(s: &str) -> bool {
+    (40..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -228,19 +217,12 @@ mod tests {
         // Main repo with worktrees/<name>/HEAD
         let main_git = tmp.path().join("main/.git");
         std::fs::create_dir_all(main_git.join("worktrees/feat")).unwrap();
-        std::fs::write(
-            main_git.join("worktrees/feat/HEAD"),
-            "ref: refs/heads/feature-x\n",
-        )
-        .unwrap();
+        std::fs::write(main_git.join("worktrees/feat/HEAD"), "ref: refs/heads/feature-x\n").unwrap();
         // Worktree dir with a .git file pointing to the worktree's gitdir.
         let worktree_dir = tmp.path().join("worktree-feat");
         std::fs::create_dir_all(&worktree_dir).unwrap();
-        std::fs::write(
-            worktree_dir.join(".git"),
-            format!("gitdir: {}\n", main_git.join("worktrees/feat").display()),
-        )
-        .unwrap();
+        std::fs::write(worktree_dir.join(".git"), format!("gitdir: {}\n", main_git.join("worktrees/feat").display()))
+            .unwrap();
         assert_eq!(lookup_uncached(&worktree_dir).as_deref(), Some("feature-x"));
     }
 
@@ -253,10 +235,7 @@ mod tests {
 
     #[test]
     fn ref_outside_heads_returns_tail() {
-        assert_eq!(
-            parse_head_contents("ref: refs/tags/v1.0").as_deref(),
-            Some("v1.0")
-        );
+        assert_eq!(parse_head_contents("ref: refs/tags/v1.0").as_deref(), Some("v1.0"));
     }
 
     #[test]

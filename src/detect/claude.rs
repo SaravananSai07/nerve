@@ -9,9 +9,9 @@ use crate::detect::git::BranchCache;
 use crate::detect::jsonl_cache::JsonlCache;
 use crate::detect::statusline::StatuslineCache;
 use crate::detect::{jsonl, process};
+use crate::state::session::TokenUsage;
 use crate::state::session::{DiscoverySnapshot, SessionId, SessionKind, SessionState};
-use crate::state::token_usage::TokenUsage;
-use crate::util::fs::{read_capped_nofollow, read_tail_nofollow};
+use crate::util::fs::{read_capped_nofollow, FileKey};
 use crate::util::sanitize::Sanitised;
 
 /// Cap on the size of a per-pid session JSON file. The format is small
@@ -91,15 +91,9 @@ pub(crate) fn attach_command(session_id: &str, root: &Path) -> String {
     // Ids are charset-checked, but that set allows `$`, which a shell
     // would expand. Plain ids stay unquoted so the command reads cleanly.
     let job = job_id(session_id);
-    let job = if job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        job.to_string()
-    } else {
-        shell_quote(job)
-    };
-    format!(
-        "CLAUDE_CONFIG_DIR={} claude attach {job}",
-        shell_quote(Sanitised::new(root.to_string_lossy()).as_str()),
-    )
+    let job =
+        if job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { job.to_string() } else { shell_quote(job) };
+    format!("CLAUDE_CONFIG_DIR={} claude attach {job}", shell_quote(Sanitised::new(root.to_string_lossy()).as_str()),)
 }
 
 /// `<root>/jobs/<id>/state.json` for a `claude --bg` session. Parked jobs
@@ -152,17 +146,9 @@ pub(crate) struct JobStateCache {
     entries: HashMap<PathBuf, (FileKey, Option<JobState>)>,
 }
 
-type FileKey = (SystemTime, u64, u64);
-
-fn file_key(path: &Path) -> Option<FileKey> {
-    use std::os::unix::fs::MetadataExt;
-    let m = fs::metadata(path).ok()?;
-    Some((m.modified().ok()?, m.len(), m.ino()))
-}
-
 impl JobStateCache {
     fn read(&mut self, path: &Path) -> Option<JobState> {
-        let Some(key) = file_key(path) else {
+        let Some(key) = FileKey::of(path) else {
             self.entries.remove(path);
             return None;
         };
@@ -240,15 +226,8 @@ pub(crate) fn discover_sessions(statusline_dir: Option<PathBuf>) -> Vec<Discover
 /// and branch cache. On an idle session this collapses to one
 /// `stat(2)` per JSONL plus one `stat(2)` per HEAD — no reads, no
 /// re-walks.
-pub(crate) fn discover_sessions_with(
-    table: &process::ProcessTable,
-    caches: &mut ScanCaches,
-) -> Scan {
-    let roots: Vec<Root> = super::claude_roots()
-        .into_iter()
-        .filter(|r| r.exists())
-        .map(Root::new)
-        .collect();
+pub(crate) fn discover_sessions_with(table: &process::ProcessTable, caches: &mut ScanCaches) -> Scan {
+    let roots: Vec<Root> = super::claude_roots().into_iter().filter(|r| r.exists()).map(Root::new).collect();
 
     let mut sessions = Vec::new();
     let mut unseen_pids = HashSet::new();
@@ -272,10 +251,7 @@ pub(crate) fn discover_sessions_with(
     caches.statusline.retain_present(|id| known.contains(id));
     caches.jobs.retain_present();
 
-    Scan {
-        sessions: deduplicate_sessions(sessions),
-        unseen_pids,
-    }
+    Scan { sessions: deduplicate_sessions(sessions), unseen_pids }
 }
 
 fn scan_sessions_dir(
@@ -291,9 +267,7 @@ fn scan_sessions_dir(
     };
     for (i, entry) in entries.enumerate() {
         if i >= MAX_SESSION_ENTRIES {
-            crate::log_warn!(
-                "discovery: sessions dir exceeded {MAX_SESSION_ENTRIES} entries; stopping enumeration"
-            );
+            crate::log_warn!("discovery: sessions dir exceeded {MAX_SESSION_ENTRIES} entries; stopping enumeration");
             break;
         }
         // Log per-entry IO errors but don't bail the scan — one
@@ -322,9 +296,7 @@ fn list_project_dirs(projects_dir: &Path) -> Vec<PathBuf> {
     let mut result: Vec<PathBuf> = Vec::new();
     for (i, entry) in entries.enumerate() {
         if i >= MAX_PROJECT_ENTRIES {
-            crate::log_warn!(
-                "discovery: projects dir exceeded {MAX_PROJECT_ENTRIES} entries; stopping enumeration"
-            );
+            crate::log_warn!("discovery: projects dir exceeded {MAX_PROJECT_ENTRIES} entries; stopping enumeration");
             break;
         }
         let Ok(entry) = entry else { continue };
@@ -335,8 +307,28 @@ fn list_project_dirs(projects_dir: &Path) -> Vec<PathBuf> {
     result
 }
 
+/// `ps` prints `??` (macOS) or `?` (Linux) for a process with no terminal.
+fn is_real_tty(tty: &str) -> bool {
+    tty != "??" && tty != "?"
+}
+
 fn has_tty(proc: &process::ProcessInfo) -> bool {
-    proc.tty != "??" && proc.tty != "?"
+    is_real_tty(&proc.tty)
+}
+
+/// Keep the better of two snapshots under `key`.
+fn keep_best<K: std::hash::Hash + Eq>(map: &mut HashMap<K, DiscoverySnapshot>, key: K, snap: DiscoverySnapshot) {
+    use std::collections::hash_map::Entry;
+    match map.entry(key) {
+        Entry::Occupied(mut e) => {
+            if should_replace(e.get(), &snap) {
+                e.insert(snap);
+            }
+        }
+        Entry::Vacant(e) => {
+            e.insert(snap);
+        }
+    }
 }
 
 fn load_session(
@@ -366,8 +358,10 @@ fn load_session(
     // through `kind` / `entrypoint`.
     if kind == SessionKind::Terminal && !has_tty(proc) {
         let parent_is_shell = table.find_by_pid(proc.ppid).is_some_and(|p| {
-            matches!(process::comm_name(&p.comm), "zsh" | "bash" | "fish" | "sh" | "dash" | "csh" | "tcsh"
-                         | "nu" | "tmux" | "screen")
+            matches!(
+                process::comm_name(&p.comm),
+                "zsh" | "bash" | "fish" | "sh" | "dash" | "csh" | "tcsh" | "nu" | "tmux" | "screen"
+            )
         });
         if !parent_is_shell {
             return None;
@@ -412,14 +406,9 @@ fn load_session(
         .then(|| read_job_state(root, job_id(&resolved_id), &mut caches.jobs))
         .flatten();
     let status_age_secs = sf.status_updated_at.map(age_from_epoch_ms).unwrap_or(0.0);
-    let from_job = job
-        .as_ref()
-        .and_then(|j| state_from_job(&j.state, tail_state.as_ref()));
-    let from_status = from_job.or_else(|| {
-        sf.status
-            .as_deref()
-            .and_then(|s| state_from_status(s, tail_state.as_ref(), status_age_secs))
-    });
+    let from_job = job.as_ref().and_then(|j| state_from_job(&j.state, tail_state.as_ref()));
+    let from_status = from_job
+        .or_else(|| sf.status.as_deref().and_then(|s| state_from_status(s, tail_state.as_ref(), status_age_secs)));
     let state_authoritative = from_status.is_some();
     let detected = match (from_status, tail_state, &jsonl_path) {
         (Some(state), _, _) => state,
@@ -429,11 +418,9 @@ fn load_session(
     };
 
     let waiting_for = match detected {
-        SessionState::WaitingForInput => job
-            .and_then(JobState::reason)
-            .or(sf.waiting_for)
-            .filter(|w| !w.is_empty())
-            .map(Sanitised::new),
+        SessionState::WaitingForInput => {
+            job.and_then(JobState::reason).or(sf.waiting_for).filter(|w| !w.is_empty()).map(Sanitised::new)
+        }
         _ => None,
     };
     let current_tool = match &detected {
@@ -445,8 +432,7 @@ fn load_session(
     let official = process::valid_session_id(&sf.session_id)
         .and_then(|id| caches.statusline.read(id))
         .or_else(|| caches.statusline.read(&resolved_id));
-    let tty = (kind == SessionKind::Terminal && has_tty(proc))
-        .then(|| Sanitised::new(proc.tty.clone()));
+    let tty = (kind == SessionKind::Terminal && has_tty(proc)).then(|| Sanitised::new(proc.tty.clone()));
 
     Some(DiscoverySnapshot {
         id: SessionId::new(resolved_id),
@@ -474,22 +460,14 @@ fn load_session(
 fn display_name(claude_name: Option<&str>, cwd: &Path) -> Sanitised {
     let name = claude_name.map(Sanitised::new).filter(|n| !n.is_empty());
     name.unwrap_or_else(|| {
-        Sanitised::new(
-            cwd.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unknown".into()),
-        )
+        Sanitised::new(cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "unknown".into()))
     })
 }
 
 /// Map Claude's own status onto nerve's states. `busy` keeps the tool
 /// name from the transcript tail when there is one; `idle` keeps a tail
 /// error. Unknown values return `None` so the heuristics take over.
-fn state_from_status(
-    status: &str,
-    tail: Option<&SessionState>,
-    status_age_secs: f64,
-) -> Option<SessionState> {
+fn state_from_status(status: &str, tail: Option<&SessionState>, status_age_secs: f64) -> Option<SessionState> {
     match status {
         "busy" => Some(match tail {
             Some(SessionState::ToolRunning(tool)) => SessionState::ToolRunning(tool.clone()),
@@ -506,19 +484,11 @@ fn state_from_status(
 }
 
 fn age_from_epoch_ms(ms: u64) -> f64 {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     now_ms.saturating_sub(ms) as f64 / 1000.0
 }
 
-fn scan_jobs_dir(
-    root: &Root,
-    caches: &mut ScanCaches,
-    known: &mut HashSet<String>,
-    out: &mut Vec<DiscoverySnapshot>,
-) {
+fn scan_jobs_dir(root: &Root, caches: &mut ScanCaches, known: &mut HashSet<String>, out: &mut Vec<DiscoverySnapshot>) {
     let entries = match fs::read_dir(root.path.join("jobs")) {
         Ok(e) => e,
         Err(_) => return,
@@ -557,7 +527,7 @@ fn load_parked_job(
         return None;
     }
     // A parked job that's done / failed / stopped has nothing left to
-    // monitor; only live ones get a card.
+    // monitor; only live ones get a row.
     if !matches!(job.state.as_str(), "blocked" | "working") {
         return None;
     }
@@ -593,9 +563,7 @@ fn load_parked_job(
     };
     // Blocked for days: the user has moved on. Same 48 h rule as an
     // interactive session waiting at a prompt.
-    if detected == SessionState::WaitingForInput
-        && activity_age_secs.is_some_and(|age| age > DORMANT_AFTER_SECS)
-    {
+    if detected == SessionState::WaitingForInput && activity_age_secs.is_some_and(|age| age > DORMANT_AFTER_SECS) {
         detected = SessionState::Dormant;
     }
     let official = caches.statusline.read(&id);
@@ -621,45 +589,6 @@ fn load_parked_job(
     })
 }
 
-/// Timeline entries are one line of state + detail each; the tail we
-/// show is a few KiB.
-const TIMELINE_TAIL_BYTES: u64 = 64 * 1024;
-
-#[derive(Deserialize)]
-struct TimelineEntry {
-    at: String,
-    state: String,
-    #[serde(default)]
-    detail: String,
-}
-
-/// Last `max` state changes of a background job as `time  state  detail`
-/// lines, from `<root>/jobs/<job>/timeline.jsonl`. Survives the daemon
-/// being down and the transcript being pruned.
-pub(crate) fn job_timeline(job: &str, max: usize) -> Option<String> {
-    let job = process::valid_session_id(job)?;
-    let path = super::claude_roots()
-        .into_iter()
-        .map(|r| r.join("jobs").join(job).join("timeline.jsonl"))
-        .find(|p| p.exists())?;
-    format_timeline(&read_tail_nofollow(&path, TIMELINE_TAIL_BYTES).ok()?, max)
-}
-
-fn format_timeline(raw: &str, max: usize) -> Option<String> {
-    let lines: Vec<String> = raw
-        .lines()
-        .filter_map(|l| serde_json::from_str::<TimelineEntry>(l).ok())
-        .map(|e| {
-            // "2026-08-03T13:49:41.690Z" → "08-03 13:49"
-            let when = Sanitised::new(e.at.get(5..16).unwrap_or(&e.at).replace('T', " "));
-            let detail = Sanitised::new(e.detail.replace('\n', " "));
-            format!("{when}  {:<8} {detail}", Sanitised::new(e.state).as_str())
-        })
-        .collect();
-    let start = lines.len().saturating_sub(max);
-    (!lines.is_empty()).then(|| lines[start..].join("\n"))
-}
-
 fn read_session_file(path: &Path) -> Option<SessionFile> {
     let buf = read_capped_nofollow(path, SESSION_JSON_MAX_BYTES).ok()?;
     serde_json::from_str(&buf).ok()
@@ -668,10 +597,7 @@ fn read_session_file(path: &Path) -> Option<SessionFile> {
 /// Claude Code's transcript dir name: every non-alphanumeric character of
 /// the cwd becomes `-` (so `/a/.claude/wt` → `-a--claude-wt`).
 fn encode_project_dir(cwd: &Path) -> String {
-    cwd.to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 fn find_jsonl(session_id: &str, cwd: &Path, root: &Root) -> Option<PathBuf> {
@@ -679,33 +605,21 @@ fn find_jsonl(session_id: &str, cwd: &Path, root: &Root) -> Option<PathBuf> {
 
     // Exact match: try the path Claude Code would naturally write to
     // before walking the fallback list.
-    let exact = root
-        .path
-        .join("projects")
-        .join(encode_project_dir(cwd))
-        .join(&jsonl_name);
+    let exact = root.path.join("projects").join(encode_project_dir(cwd)).join(&jsonl_name);
     if exact.exists() {
         return Some(exact);
     }
 
     // Fallback for hashed long paths and `CLAUDE_CODE_PROJECT_DIR_NAME`:
     // the dirs were listed once per scan, just stat each candidate.
-    root.project_dirs
-        .iter()
-        .map(|dir| dir.join(&jsonl_name))
-        .find(|candidate| candidate.exists())
+    root.project_dirs.iter().map(|dir| dir.join(&jsonl_name)).find(|candidate| candidate.exists())
 }
 
 /// Apply the runtime conditions (CPU%, caffeinate child, mtime age)
 /// to a tail-parse result. Only used for sessions whose file carries no
 /// `status` (Claude Code < 2.1.145). Pure: doesn't touch the file system
 /// aside from the cheap `mtime` call.
-fn refine_with_runtime(
-    tail_parse: SessionState,
-    path: &Path,
-    pid: u32,
-    table: &process::ProcessTable,
-) -> SessionState {
+fn refine_with_runtime(tail_parse: SessionState, path: &Path, pid: u32, table: &process::ProcessTable) -> SessionState {
     let mtime_age = file_age_secs(path);
     let cpu = table.find_by_pid(pid).map(|p| p.cpu).unwrap_or(0.0);
     let state = tail_parse;
@@ -726,9 +640,7 @@ fn refine_with_runtime(
     // CPU is deliberately NOT used here — Claude's TUI burns CPU on
     // keystroke rendering, which would otherwise flip an idle session to
     // Processing whenever the user is typing.
-    if mtime_age <= 300.0
-        || process::has_child_named(table.procs(), table.child_map(), pid, "caffeinate")
-    {
+    if mtime_age <= 300.0 || process::has_child_named(table.procs(), table.child_map(), pid, "caffeinate") {
         return state;
     }
     SessionState::Idle
@@ -763,54 +675,51 @@ pub(crate) fn stop_background_job(session_id: &str, root: &Path) -> Result<Strin
         Err(if msg.is_empty() {
             format!("claude stop {job} failed ({})", out.status)
         } else {
-            Sanitised::new(msg).to_string()
+            crate::util::sanitize::clean(msg)
         })
     }
 }
 
-/// SIGTERM a terminal session, resolved by session id AND re-validated as
-/// a `claude` process in the same function: between a separate
-/// resolve-then-kill the kernel could recycle the pid to an unrelated
-/// user process.
+/// SIGTERM a terminal session. The pid is resolved and re-validated as a
+/// `claude` process from one fresh process scan, so a recycled pid is
+/// never signalled.
 pub(crate) fn kill_by_session_id(session_id: &str) -> Result<u32, String> {
-    for root in super::claude_roots() {
-        let Ok(entries) = fs::read_dir(root.join("sessions")) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+    let table = process::ProcessTable::refreshed();
+    let pid = pid_for_session(&super::claude_roots(), &table, session_id)?;
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGTERM)
+        .map_err(|e| format!("kill pid {pid}: {e}"))?;
+    Ok(pid)
+}
+
+/// The live `claude` pid whose session resolves to `session_id` the way
+/// discovery resolves it: `--resume <id>` from argv, else the file's id.
+fn pid_for_session(roots: &[PathBuf], table: &process::ProcessTable, session_id: &str) -> Result<u32, String> {
+    // A file left by a dead process must not hide the live one.
+    let mut stale = None;
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root.join("sessions")) else { continue };
+        for path in entries.flatten().map(|e| e.path()) {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let sf = match read_session_file(&path) {
-                Some(s) => s,
-                None => continue,
-            };
-            if sf.session_id != session_id {
+            let Some(sf) = read_session_file(&path) else { continue };
+            let proc = table.find_by_pid(sf.pid);
+            let id = proc
+                .and_then(|p| process::resume_session_id(&p.args))
+                .or_else(|| process::valid_session_id(&sf.session_id));
+            if id != Some(session_id) {
                 continue;
             }
-
-            if !is_claude_process(sf.pid) {
-                return Err(format!(
-                    "pid {} is no longer a claude process (likely already exited)",
-                    sf.pid
-                ));
+            if proc.is_some_and(|p| process::comm_name(&p.comm) == "claude") {
+                return Ok(sf.pid);
             }
-            nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(sf.pid as i32),
-                nix::sys::signal::Signal::SIGTERM,
-            )
-            .map_err(|e| format!("kill pid {}: {e}", sf.pid))?;
-            return Ok(sf.pid);
+            stale = Some(sf.pid);
         }
     }
-    Err("session id not found in any Claude sessions dir".to_string())
-}
-
-fn is_claude_process(pid: u32) -> bool {
-    process::scan_processes()
-        .iter()
-        .any(|p| p.pid == pid && process::comm_name(&p.comm) == "claude")
+    match stale {
+        Some(pid) => Err(format!("pid {pid} is no longer a claude process (likely already exited)")),
+        None => Err("session id not found in any Claude sessions dir".to_string()),
+    }
 }
 
 fn should_replace(existing: &DiscoverySnapshot, candidate: &DiscoverySnapshot) -> bool {
@@ -826,14 +735,7 @@ fn deduplicate_sessions(sessions: Vec<DiscoverySnapshot>) -> Vec<DiscoverySnapsh
     let mut no_pid: Vec<DiscoverySnapshot> = Vec::new();
     for snap in sessions {
         if let Some(pid) = snap.pid {
-            by_pid
-                .entry(pid)
-                .and_modify(|existing| {
-                    if should_replace(existing, &snap) {
-                        *existing = snap.clone();
-                    }
-                })
-                .or_insert(snap);
+            keep_best(&mut by_pid, pid, snap);
         } else {
             no_pid.push(snap);
         }
@@ -846,17 +748,10 @@ fn deduplicate_sessions(sessions: Vec<DiscoverySnapshot>) -> Vec<DiscoverySnapsh
     let mut by_tty: HashMap<String, DiscoverySnapshot> = HashMap::new();
     for snap in pid_deduped {
         let tty = match &snap.tty {
-            Some(t) if t.as_str() != "??" && t.as_str() != "?" => t.as_str().to_string(),
+            Some(t) if is_real_tty(t.as_str()) => t.as_str().to_string(),
             _ => format!("__notty_{}", snap.id),
         };
-        by_tty
-            .entry(tty)
-            .and_modify(|existing| {
-                if should_replace(existing, &snap) {
-                    *existing = snap.clone();
-                }
-            })
-            .or_insert(snap);
+        keep_best(&mut by_tty, tty, snap);
     }
 
     by_tty.into_values().collect()
@@ -865,18 +760,6 @@ fn deduplicate_sessions(sessions: Vec<DiscoverySnapshot>) -> Vec<DiscoverySnapsh
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn timeline_formats_recent_entries() {
-        let raw = concat!(
-            r#"{"at":"2026-08-03T13:49:41.690Z","state":"working","detail":"start"}"#, "\n",
-            r#"{"at":"2026-08-03T14:00:00.000Z","state":"blocked","detail":"needs\nanswers"}"#, "\n",
-        );
-        let out = format_timeline(raw, 30).unwrap();
-        assert_eq!(out, "08-03 13:49  working  start\n08-03 14:00  blocked  needs answers");
-        assert_eq!(format_timeline(raw, 1).unwrap().lines().count(), 1);
-        assert!(format_timeline("junk", 30).is_none());
-    }
 
     #[test]
     fn project_dir_encoding_matches_claude() {
@@ -890,14 +773,8 @@ mod tests {
     #[test]
     fn status_busy_keeps_tail_tool_name() {
         let tail = SessionState::ToolRunning("Bash".into());
-        assert_eq!(
-            state_from_status("busy", Some(&tail), 0.0),
-            Some(SessionState::ToolRunning("Bash".into()))
-        );
-        assert_eq!(
-            state_from_status("busy", Some(&SessionState::Idle), 0.0),
-            Some(SessionState::Processing)
-        );
+        assert_eq!(state_from_status("busy", Some(&tail), 0.0), Some(SessionState::ToolRunning("Bash".into())));
+        assert_eq!(state_from_status("busy", Some(&SessionState::Idle), 0.0), Some(SessionState::Processing));
     }
 
     #[test]
@@ -929,15 +806,9 @@ mod tests {
         let cmd = claude_cli(root);
         let env: Vec<_> = cmd.get_envs().collect();
         assert_eq!(env, [(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"), Some(root.as_os_str()))]);
-        assert_eq!(
-            attach_command("78240abc-845e", root),
-            "CLAUDE_CONFIG_DIR='/home/u/.claude' claude attach 78240abc"
-        );
+        assert_eq!(attach_command("78240abc-845e", root), "CLAUDE_CONFIG_DIR='/home/u/.claude' claude attach 78240abc");
         // `$` passes the id charset but must not reach the shell bare.
-        assert_eq!(
-            attach_command("$HOME-ab-1", root),
-            "CLAUDE_CONFIG_DIR='/home/u/.claude' claude attach '$HOME-ab'"
-        );
+        assert_eq!(attach_command("$HOME-ab-1", root), "CLAUDE_CONFIG_DIR='/home/u/.claude' claude attach '$HOME-ab'");
     }
 
     #[test]
@@ -966,15 +837,9 @@ mod tests {
     #[test]
     fn status_waiting_and_idle() {
         assert_eq!(state_from_status("waiting", None, 10.0), Some(SessionState::WaitingForInput));
-        assert_eq!(
-            state_from_status("waiting", None, DORMANT_AFTER_SECS + 1.0),
-            Some(SessionState::Dormant)
-        );
+        assert_eq!(state_from_status("waiting", None, DORMANT_AFTER_SECS + 1.0), Some(SessionState::Dormant));
         assert_eq!(state_from_status("idle", None, 0.0), Some(SessionState::Idle));
-        assert_eq!(
-            state_from_status("idle", Some(&SessionState::Error), 0.0),
-            Some(SessionState::Error)
-        );
+        assert_eq!(state_from_status("idle", Some(&SessionState::Error), 0.0), Some(SessionState::Error));
         assert_eq!(state_from_status("something-new", None, 0.0), None);
     }
 
@@ -987,8 +852,7 @@ mod tests {
         .unwrap();
         assert_eq!(new.waiting_for.as_deref(), Some("permission prompt"));
         assert_eq!(new.entrypoint.as_deref(), Some("claude-desktop"));
-        let legacy: SessionFile =
-            serde_json::from_str(r#"{"pid":1,"sessionId":"s","cwd":"/x"}"#).unwrap();
+        let legacy: SessionFile = serde_json::from_str(r#"{"pid":1,"sessionId":"s","cwd":"/x"}"#).unwrap();
         assert!(legacy.status.is_none() && legacy.name.is_none());
     }
 
@@ -1033,12 +897,57 @@ mod tests {
         out
     }
 
+    // Regression: after `--resume` the registry id is the resumed one from
+    // argv, not the file's, and `x` reported "session id not found".
+    #[test]
+    fn kill_resolves_the_resumed_id_and_checks_comm() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+        std::fs::write(tmp.path().join("sessions/4242.json"), r#"{"pid":4242,"sessionId":"new-1","cwd":"/x"}"#)
+            .unwrap();
+        let roots = [tmp.path().to_path_buf()];
+        let table = |comm: &str| {
+            process::ProcessTable::from_procs(vec![process::ProcessInfo {
+                pid: 4242,
+                ppid: 1,
+                tty: "ttys001".into(),
+                comm: comm.into(),
+                cpu: 0.0,
+                args: "claude --resume orig-1".into(),
+            }])
+        };
+        assert_eq!(pid_for_session(&roots, &table("claude"), "orig-1"), Ok(4242));
+        assert!(pid_for_session(&roots, &table("claude"), "new-1").is_err(), "the file's id is not the session's");
+        assert!(pid_for_session(&roots, &table("zsh"), "orig-1").unwrap_err().contains("no longer a claude"));
+        assert!(pid_for_session(&roots, &process::ProcessTable::from_procs(Vec::new()), "new-1").is_err());
+    }
+
+    #[test]
+    fn kill_skips_session_files_of_dead_pids() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+        for pid in [1111, 4242] {
+            let body = format!(r#"{{"pid":{pid},"sessionId":"s-1","cwd":"/x"}}"#);
+            std::fs::write(tmp.path().join(format!("sessions/{pid}.json")), body).unwrap();
+        }
+        let live = process::ProcessTable::from_procs(vec![process::ProcessInfo {
+            pid: 4242,
+            ppid: 1,
+            tty: "ttys001".into(),
+            comm: "claude".into(),
+            cpu: 0.0,
+            args: "claude".into(),
+        }]);
+        assert_eq!(pid_for_session(&[tmp.path().to_path_buf()], &live, "s-1"), Ok(4242));
+    }
+
     // Regression (seen live on 2.1.292): a background session's pid file
     // says `status: "shell"` for its whole life. The job's state.json
     // must win, or a finished/blocked job shows as Idle forever.
     #[test]
     fn background_session_follows_job_state_not_pid_status() {
-        let session = r#"{"pid":4242,"sessionId":"abcd1234-0000","cwd":"/x","status":"shell","kind":"bg","entrypoint":"cli"}"#;
+        let session =
+            r#"{"pid":4242,"sessionId":"abcd1234-0000","cwd":"/x","status":"shell","kind":"bg","entrypoint":"cli"}"#;
         let blocked = r#"{"state":"blocked","sessionId":"abcd1234-0000","cwd":"/x","needs":"pick A or B"}"#;
         let snaps = discover_fixture(session, Some(blocked));
         assert_eq!(snaps.len(), 1, "tty-less bg session must not be filtered");
@@ -1093,8 +1002,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = Root { path: tmp.path().to_path_buf(), project_dirs: Vec::new() };
         let p = tmp.path().join("state.json");
-        std::fs::write(&p, r#"{"state":"blocked","sessionId":"abb1a2d1-x","cwd":"/a/p","needs":"reply"}"#)
-            .unwrap();
+        std::fs::write(&p, r#"{"state":"blocked","sessionId":"abb1a2d1-x","cwd":"/a/p","needs":"reply"}"#).unwrap();
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
         std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
 

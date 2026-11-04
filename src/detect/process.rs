@@ -30,18 +30,9 @@ impl ProcessTable {
     }
 
     pub(crate) fn from_procs(procs: Vec<ProcessInfo>) -> Self {
-        let pid_index: PidIndex = procs
-            .iter()
-            .enumerate()
-            .map(|(idx, p)| (p.pid, idx))
-            .collect();
+        let pid_index: PidIndex = procs.iter().enumerate().map(|(idx, p)| (p.pid, idx)).collect();
         let child_map = build_child_map(&procs);
-        Self {
-            procs,
-            pid_index,
-            child_map,
-            snapshot_at: Instant::now(),
-        }
+        Self { procs, pid_index, child_map, snapshot_at: Instant::now() }
     }
 
     pub(crate) fn refresh_if_stale(&mut self, max_age: Duration) {
@@ -65,7 +56,7 @@ impl ProcessTable {
     }
 }
 
-pub(crate) fn scan_processes() -> Vec<ProcessInfo> {
+fn scan_processes() -> Vec<ProcessInfo> {
     let output = match std::process::Command::new("ps")
         // `ucomm` (bare name) rather than `comm` (full exec path): the
         // desktop app's claude lives under ".../Application Support/...",
@@ -110,21 +101,11 @@ fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
     // `ps -eo tty` is locally trusted but cheap to harden: a binary
     // shadowing `ps` on $PATH could emit escape sequences here that
     // the `--list` CLI prints verbatim to the calling terminal.
-    let tty = crate::util::sanitize::strip_ansi(iter.next()?)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
+    let tty = crate::util::sanitize::strip_ansi(iter.next()?).chars().filter(|c| !c.is_control()).collect();
     let comm = iter.next()?.to_string();
     let cpu = iter.next()?.parse().unwrap_or(0.0);
     let args = iter.collect::<Vec<_>>().join(" ");
-    Some(ProcessInfo {
-        pid,
-        ppid,
-        tty,
-        comm,
-        cpu,
-        args,
-    })
+    Some(ProcessInfo { pid, ppid, tty, comm, cpu, args })
 }
 
 /// Bare process name. `ps -o ucomm` already gives one; the `rsplit`
@@ -158,7 +139,7 @@ pub(super) fn valid_session_id(raw: &str) -> Option<&str> {
     if raw.is_empty() || raw.contains("..") {
         return None;
     }
-    if !raw.chars().all(crate::util::focus_arg::is_safe_id_char) {
+    if !raw.chars().all(crate::util::is_safe_id_char) {
         return None;
     }
     Some(raw)
@@ -172,10 +153,8 @@ fn build_child_map(procs: &[ProcessInfo]) -> HashMap<u32, Vec<u32>> {
     map
 }
 
-/// Linear scan over a slice. Hot-path callers (`load_session`,
-/// `infer_state_from_jsonl`) use `ProcessTable::find_by_pid` instead;
-/// this exists for `is_claude_process` and other places that only
-/// have a `&[ProcessInfo]`.
+/// Linear scan over a slice, for callers that only have a
+/// `&[ProcessInfo]`; the rest use `ProcessTable::find_by_pid`.
 fn find_process(procs: &[ProcessInfo], pid: u32) -> Option<&ProcessInfo> {
     procs.iter().find(|p| p.pid == pid)
 }
@@ -241,4 +220,3 @@ mod tests {
         assert!(table.snapshot_at > first_snapshot_at);
     }
 }
-

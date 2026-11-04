@@ -15,7 +15,8 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
-use crate::state::token_usage::OfficialUsage;
+use crate::state::session::OfficialUsage;
+use crate::util::fs::FileKey;
 use crate::util::sanitize::Sanitised;
 
 /// Claude's statusline payload is a few KiB; anything far bigger is junk.
@@ -118,16 +119,11 @@ fn prune_stale(dir: &Path) {
 }
 
 fn parse_usage(v: &Value) -> OfficialUsage {
-    let model = v
-        .pointer("/model/display_name")
-        .or_else(|| v.pointer("/model/id"))
-        .and_then(Value::as_str)
-        .map(Sanitised::new);
+    let model =
+        v.pointer("/model/display_name").or_else(|| v.pointer("/model/id")).and_then(Value::as_str).map(Sanitised::new);
     OfficialUsage {
         cost_usd: v.pointer("/cost/total_cost_usd").and_then(Value::as_f64),
-        context_pct: v
-            .pointer("/context_window/used_percentage")
-            .and_then(Value::as_f64),
+        context_pct: v.pointer("/context_window/used_percentage").and_then(Value::as_f64),
         model,
     }
 }
@@ -150,7 +146,7 @@ fn default_line(u: &OfficialUsage) -> String {
 /// an unchanged record costs one `stat(2)` per scan.
 pub(crate) struct StatuslineCache {
     dir: Option<PathBuf>,
-    entries: HashMap<String, (SystemTime, OfficialUsage)>,
+    entries: HashMap<String, (FileKey, OfficialUsage)>,
 }
 
 /// Upper bound on a record we're willing to parse.
@@ -158,20 +154,17 @@ const RECORD_MAX_BYTES: u64 = 256 * 1024;
 
 impl StatuslineCache {
     pub(crate) fn new(dir: Option<PathBuf>) -> Self {
-        Self {
-            dir,
-            entries: HashMap::new(),
-        }
+        Self { dir, entries: HashMap::new() }
     }
 
     pub(crate) fn read(&mut self, session_id: &str) -> Option<OfficialUsage> {
         let path = self.dir.as_ref()?.join(format!("{session_id}.json"));
-        let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) else {
+        let Some(key) = FileKey::of(&path) else {
             self.entries.remove(session_id);
             return None;
         };
-        if let Some((cached_at, usage)) = self.entries.get(session_id) {
-            if *cached_at == mtime {
+        if let Some((cached, usage)) = self.entries.get(session_id) {
+            if *cached == key {
                 return Some(usage.clone());
             }
         }
@@ -179,8 +172,7 @@ impl StatuslineCache {
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
             .map(|v| parse_usage(&v))?;
-        self.entries
-            .insert(session_id.to_string(), (mtime, usage.clone()));
+        self.entries.insert(session_id.to_string(), (key, usage.clone()));
         Some(usage)
     }
 

@@ -1,12 +1,11 @@
 use std::io::{Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::state::log_entry::LogEntry;
 use crate::state::session::SessionState;
-use crate::state::token_usage::TokenUsage;
-use crate::util::sanitize::{Sanitised, strip_ansi};
+use crate::state::session::TokenUsage;
+use crate::util::sanitize::{strip_ansi, Sanitised};
 
 /// Open a JSONL transcript with `O_NOFOLLOW` (see `util::fs`).
 fn open_jsonl(path: &Path) -> std::io::Result<std::fs::File> {
@@ -20,10 +19,7 @@ pub(super) fn read_tail_state(path: &Path) -> Option<SessionState> {
     // The tail window has to step past at least one of each, so we read a
     // generous slice rather than try to parse the whole file.
     let buf = crate::util::fs::read_tail_nofollow(path, 262_144).ok()?;
-    buf.lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .find_map(parse_jsonl_state)
+    buf.lines().rev().filter(|l| !l.trim().is_empty()).find_map(parse_jsonl_state)
 }
 
 /// Lightweight schema for the subset of JSONL fields we read when
@@ -173,52 +169,18 @@ impl ModelClass {
     }
 }
 
+/// Sum token usage from `from_offset` (a line start) to the last complete line.
+/// Returns the usage and the offset after that line; a partial last line waits
+/// for the next call.
 pub(super) fn parse_token_usage(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
-    let usage = TokenUsage::default();
-
-    let file = match open_jsonl(path) {
-        Ok(f) => f,
-        Err(_) => return (usage, from_offset),
-    };
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-
-    if file_len < from_offset {
-        // File was truncated/rotated under us. Re-parse from offset 0
-        // *iteratively* (recursion previously meant an arbitrary stack
-        // for a 50 MB JSONL); the call below is safe because we know
-        // `file_len >= 0` makes the next `file_len < 0` impossible.
-        return parse_token_usage_inner(path, 0);
-    }
-    parse_token_usage_inner(path, from_offset)
-}
-
-fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
     let mut usage = TokenUsage::default();
 
-    let file = match open_jsonl(path) {
-        Ok(f) => f,
-        Err(_) => return (usage, from_offset),
-    };
+    let Ok(file) = open_jsonl(path) else { return (usage, from_offset) };
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut off = if file_len < from_offset { 0 } else { from_offset };
 
     let mut reader = std::io::BufReader::new(file);
-    if from_offset > 0 {
-        if reader.seek(SeekFrom::Start(from_offset)).is_err() {
-            return (usage, from_offset);
-        }
-        let mut skip = [0u8; 1];
-        loop {
-            match std::io::Read::read(&mut reader, &mut skip) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if skip[0] == b'\n' {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    } else if reader.seek(SeekFrom::Start(0)).is_err() {
+    if reader.seek(SeekFrom::Start(off)).is_err() {
         return (usage, from_offset);
     }
 
@@ -228,15 +190,20 @@ fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
     let mut last_class: Option<ModelClass> = None;
     let mut last_rate = ModelClass::Other.rate();
 
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        match std::io::BufRead::read_line(&mut reader, &mut line) {
-            Ok(0) => break,
+        match std::io::BufRead::read_until(&mut reader, b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
             Ok(_) => {}
-            Err(_) => break,
         }
-        let trimmed = line.trim();
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        off += line.len() as u64;
+        // A line that is not UTF-8 is skipped, but still counted past.
+        let Ok(text) = std::str::from_utf8(&line) else { continue };
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -273,20 +240,21 @@ fn parse_token_usage_inner(path: &Path, from_offset: u64) -> (TokenUsage, u64) {
             let cache_read = cache_read.min(PER_ROW_TOKEN_CAP);
             let cache_creation = cache_creation.min(PER_ROW_TOKEN_CAP);
 
-            usage.input_tokens = usage.input_tokens.saturating_add(input);
-            usage.output_tokens = usage.output_tokens.saturating_add(output);
-            usage.cache_read_tokens = usage.cache_read_tokens.saturating_add(cache_read);
-            usage.cache_creation_tokens = usage.cache_creation_tokens.saturating_add(cache_creation);
-            usage.cost_usd += (input as f64 * rate_in
-                + output as f64 * rate_out
-                + cache_read as f64 * rate_cache_read
-                + cache_creation as f64 * rate_cache_create)
-                / 1_000_000.0;
+            usage += TokenUsage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache_read,
+                cache_creation_tokens: cache_creation,
+                cost_usd: (input as f64 * rate_in
+                    + output as f64 * rate_out
+                    + cache_read as f64 * rate_cache_read
+                    + cache_creation as f64 * rate_cache_create)
+                    / 1_000_000.0,
+            };
         }
     }
 
-    let new_offset = reader.stream_position().unwrap_or(file_len);
-    (usage, new_offset)
+    (usage, off)
 }
 
 fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
@@ -312,9 +280,7 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
         return String::new();
     };
 
-    let first_line = text.lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
+    let first_line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let trimmed = first_line.trim();
     // Strip ANSI / OSC / C0+C1 controls BEFORE truncating. Truncating
     // first could split a CSI / OSC sequence, and `strip_ansi` would
@@ -326,12 +292,58 @@ fn extract_tool_result_snippet(item: &serde_json::Value) -> String {
     crate::util::text::truncate_graphemes(&cleaned, 80)
 }
 
-/// Initial and maximum tail window for the log preview. Claude writes
+/// Initial and maximum tail window for the log. Claude writes
 /// large `attachment` records (often 100 KB+ at session start) that yield
 /// no entries, so a fixed 64 KB window can show nothing for a session
 /// that has a prompt. Double until we have enough entries.
 const ENTRIES_WINDOW_START: u64 = 64 * 1024;
 const ENTRIES_WINDOW_MAX: u64 = 4 * 1024 * 1024;
+
+/// One transcript line, as the panel and peers show it.
+#[derive(Debug, Clone)]
+pub(crate) enum LogEntry {
+    UserText(Sanitised),
+    AssistantText(Sanitised),
+    ToolUse { name: Sanitised, detail: Sanitised },
+    ToolResult { is_error: bool, snippet: Sanitised },
+    Result { is_error: bool },
+}
+
+/// One line, as peers and `nerve sync fetch log` show it.
+impl std::fmt::Display for LogEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UserText(t) => write!(f, "› {t}"),
+            Self::AssistantText(t) => write!(f, "● {t}"),
+            Self::ToolUse { name, detail } => write!(f, "▸ {name} {detail}"),
+            Self::ToolResult { is_error, snippet } => {
+                write!(f, "  ⎿ {} {snippet}", if *is_error { "error" } else { "ok" })
+            }
+            Self::Result { is_error: true } => f.write_str("✗ turn failed"),
+            Self::Result { is_error: false } => f.write_str("✓ turn done"),
+        }
+    }
+}
+
+/// The transcripts of a session's subagents, in name order.
+pub(crate) fn subagent_transcripts(transcript: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(transcript.with_extension("").join("subagents")) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> =
+        rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jsonl")).collect();
+    files.sort();
+    files
+}
+
+/// What a subagent transcript's `.meta.json` calls it, if anything.
+pub(crate) fn subagent_description(subagent: &Path) -> String {
+    std::fs::read_to_string(subagent.with_extension("meta.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("description").or(v.get("agentType")).and_then(|d| d.as_str()).map(String::from))
+        .unwrap_or_default()
+}
 
 pub(crate) fn read_tail_entries(path: &Path, max_entries: usize) -> Vec<LogEntry> {
     let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -372,11 +384,7 @@ fn parse_entries(buf: &str) -> Vec<LogEntry> {
             continue;
         }
 
-        let role = val
-            .get("message")
-            .and_then(|m| m.get("role"))
-            .and_then(|r| r.as_str())
-            .unwrap_or("");
+        let role = val.get("message").and_then(|m| m.get("role")).and_then(|r| r.as_str()).unwrap_or("");
 
         let content = val.get("message").and_then(|m| m.get("content"));
         // A typed prompt is stored as a bare string, not a content array.
@@ -392,8 +400,7 @@ fn parse_entries(buf: &str) -> Vec<LogEntry> {
                 let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match item_type {
                     "tool_use" => {
-                        let raw_name =
-                            item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                        let raw_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
                         let name = Sanitised::new(raw_name);
                         let raw_detail: String = item
                             .get("input")
@@ -420,10 +427,9 @@ fn parse_entries(buf: &str) -> Vec<LogEntry> {
                         entries.push(LogEntry::ToolUse { name, detail });
                     }
                     "tool_result" => {
-                        let is_err = item.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
-                        let status = Sanitised::new(if is_err { "error" } else { "ok" });
+                        let is_error = item.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
                         let snippet = Sanitised::new(extract_tool_result_snippet(item));
-                        entries.push(LogEntry::ToolResult { status, snippet });
+                        entries.push(LogEntry::ToolResult { is_error, snippet });
                     }
                     "text" => {
                         let raw = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -470,7 +476,7 @@ mod tests {
     }
 
     // Regression: Claude 2.1.x writes a typed prompt as a plain string;
-    // the preview showed "No log entries" for a session that had one.
+    // the log showed "No log entries" for a session that had one.
     #[test]
     fn string_content_user_prompt_is_an_entry() {
         let tmp = tempfile::tempdir().unwrap();
@@ -478,8 +484,10 @@ mod tests {
         std::fs::write(
             &path,
             concat!(
-                r#"{"type":"attachment"}"#, "\n",
-                r#"{"type":"user","message":{"role":"user","content":"ask me tea or coffee"}}"#, "\n",
+                r#"{"type":"attachment"}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":"ask me tea or coffee"}}"#,
+                "\n",
             ),
         )
         .unwrap();
@@ -489,9 +497,48 @@ mod tests {
     }
 
     #[test]
+    fn usage_is_counted_incrementally_without_losing_a_line() {
+        let row = |n: u64| format!("{{\"type\":\"assistant\",\"message\":{{\"usage\":{{\"input_tokens\":{n}}}}}}}\n");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        std::fs::write(&path, format!("{}{}", row(1), row(2))).unwrap();
+        let (first, off) = parse_token_usage(&path, 0);
+        assert_eq!(first.input_tokens, 3);
+
+        // A line still being written is left for the next call.
+        let partial = row(8);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut f, format!("{}{}{}", row(4), row(5), &partial[..10]).as_bytes()).unwrap();
+        let (second, off2) = parse_token_usage(&path, off);
+        assert_eq!(second.input_tokens, 9);
+
+        std::io::Write::write_all(&mut f, &partial.as_bytes()[10..]).unwrap();
+        let (third, _) = parse_token_usage(&path, off2);
+        assert_eq!(third.input_tokens, 8);
+
+        // A shorter file at the same path starts over.
+        std::fs::write(&path, row(6)).unwrap();
+        assert_eq!(parse_token_usage(&path, off2).0.input_tokens, 6);
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_skipped_but_not_stuck_on() {
+        let row = |n: u64| format!("{{\"type\":\"assistant\",\"message\":{{\"usage\":{{\"input_tokens\":{n}}}}}}}\n");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let mut bytes = row(1).into_bytes();
+        bytes.extend_from_slice(b"{\"type\":\"assistant\",\"x\":\"\xff\xfe\"}\n");
+        bytes.extend_from_slice(row(2).as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let (usage, off) = parse_token_usage(&path, 0);
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(off, bytes.len() as u64);
+    }
+
+    #[test]
     fn tool_name_with_ansi_is_sanitised_before_storage() {
         // A `tool_use` row whose name carries an OSC-52 clipboard write
-        // would propagate raw into the cards view on every tick without
+        // would propagate raw into the session list on every tick without
         // sanitisation. The JSON source uses `` so serde_json
         // (which rejects raw control bytes) decodes it cleanly.
         let line = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\\u001b]52;c;ZXZpbA==\\u0007after\"}]}}";
@@ -507,10 +554,7 @@ mod tests {
         // through to ToolRunning with the escape attached; with it, the
         // sanitised name matches the WaitingForInput keyword.
         let line = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\\u001b[2J\"}]}}";
-        assert!(matches!(
-            parse_jsonl_state(line),
-            Some(SessionState::WaitingForInput)
-        ));
+        assert!(matches!(parse_jsonl_state(line), Some(SessionState::WaitingForInput)));
     }
 
     #[test]

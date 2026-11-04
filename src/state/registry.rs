@@ -1,75 +1,84 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
-use super::session::{Session, SessionId, SessionState};
+use super::session::{DiscoverySnapshot, Session, SessionId, SessionState};
+use crate::util::sanitize::Sanitised;
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum SortMode {
-    Stable,
-    State,
-    Name,
-    Age,
-}
-
-impl SortMode {
-    pub(crate) fn next(self) -> Self {
-        match self {
-            Self::Stable => Self::State,
-            Self::State => Self::Name,
-            Self::Name => Self::Age,
-            Self::Age => Self::Stable,
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Stable => "stable",
-            Self::State => "state",
-            Self::Name => "name",
-            Self::Age => "age",
-        }
-    }
+/// A committed state change worth a notification.
+pub(crate) struct PendingNotification {
+    pub(crate) id: String,
+    pub(crate) project: Sanitised,
+    pub(crate) name: Sanitised,
+    pub(crate) state: SessionState,
+    pub(crate) waiting_for: Option<Sanitised>,
 }
 
 pub(crate) struct SessionRegistry {
     sessions: HashMap<SessionId, Session>,
+    /// Insertion order, so the list doesn't reshuffle between scans.
     order: Vec<SessionId>,
-    sort_mode: SortMode,
-    /// Monotonic counter bumped whenever a mutation could change the
-    /// rendered/filtered view. `FilteredView` snapshots this and
-    /// rebuilds only on mismatch, so a steady-state idle tick pays
-    /// zero filter cost.
-    version: u64,
 }
 
 impl SessionRegistry {
     pub(crate) fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-            order: Vec::new(),
-            sort_mode: SortMode::Stable,
-            version: 0,
+        Self { sessions: HashMap::new(), order: Vec::new() }
+    }
+
+    /// Apply one discovery scan: sessions it no longer lists vanish, new
+    /// ones join, known ones take the new observation. `names` maps a cwd
+    /// to the name config.toml gives its sessions. Returns the
+    /// notifications the committed state changes call for.
+    pub(crate) fn apply(
+        &mut self,
+        scan: Vec<DiscoverySnapshot>,
+        names: &HashMap<String, String>,
+    ) -> Vec<PendingNotification> {
+        let live: HashSet<&str> = scan.iter().map(|s| s.id.as_str()).collect();
+        let gone: Vec<SessionId> = self.order.iter().filter(|id| !live.contains(id.as_str())).cloned().collect();
+        let mut membership_changed = false;
+        for id in gone {
+            membership_changed |= self.mark_stale(id.as_str());
         }
+
+        let mut pending = Vec::new();
+        for mut snap in scan {
+            let (state, authoritative) = (snap.detected_state.clone(), snap.state_authoritative);
+            let name = names.get(snap.cwd.to_string_lossy().as_ref()).map(String::as_str);
+            let Some(existing) = self.sessions.get_mut(snap.id.as_str()) else {
+                if let Some(name) = name {
+                    snap.name = Sanitised::new(name);
+                }
+                // Seeded with the detected state: no Processing flash
+                // while the debounce climbs from a default.
+                self.upsert(Session::from_snapshot(snap));
+                membership_changed = true;
+                continue;
+            };
+            existing.merge_snapshot(snap, name);
+            if existing.observe_state(state, authoritative) {
+                if let Some(state) = existing.take_pending_notification() {
+                    pending.push(PendingNotification {
+                        id: existing.id.as_str().to_string(),
+                        project: existing.project_dir(),
+                        name: existing.name().clone(),
+                        waiting_for: existing.waiting_for.clone(),
+                        state,
+                    });
+                }
+            }
+        }
+        // Only a change of membership can introduce a name clash.
+        if membership_changed {
+            self.re_disambiguate_names();
+        }
+        pending
     }
 
-    pub(crate) fn version(&self) -> u64 {
-        self.version
-    }
-
-    /// Announce that the rendered view should rebuild. Callers
-    /// mutating through `get_mut` use this to flag changes the
-    /// registry can't otherwise detect.
-    pub(crate) fn bump_version(&mut self) {
-        self.version = self.version.wrapping_add(1);
-    }
-
-    pub(crate) fn upsert(&mut self, session: Session) {
+    fn upsert(&mut self, session: Session) {
         let id = session.id.clone();
         if !self.sessions.contains_key(&id) {
             self.order.push(id.clone());
         }
         self.sessions.insert(id, session);
-        self.bump_version();
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<&Session> {
@@ -77,82 +86,18 @@ impl SessionRegistry {
     }
 
     pub(crate) fn get_mut(&mut self, id: &str) -> Option<&mut Session> {
-        // Callers must call `bump_version()` after a mutation that
-        // affects the rendered view (state, name, etc.); the registry
-        // can't detect that on its own.
         self.sessions.get_mut(id)
     }
 
-    pub(crate) fn sorted_sessions(&self) -> Vec<&Session> {
-        let mut sessions: Vec<&Session> = self
-            .order
-            .iter()
-            .filter_map(|id| self.sessions.get(id))
-            .collect();
-
-        match self.sort_mode {
-            SortMode::Stable => {}
-            SortMode::State => {
-                sessions.sort_by(|a, b| {
-                    a.state()
-                        .sort_priority()
-                        .cmp(&b.state().sort_priority())
-                        .then(a.name().cmp(b.name()))
-                });
-            }
-            SortMode::Name => {
-                sessions.sort_by(|a, b| a.name().cmp(b.name()));
-            }
-            SortMode::Age => {
-                // One `Instant::now()` outside the comparator so all
-                // pairwise compares see the same `now` snapshot —
-                // otherwise the sort could observe inconsistent
-                // orderings under heavy load.
-                let now = Instant::now();
-                sessions.sort_by_key(|s| std::cmp::Reverse(s.state_duration_at(now)));
-            }
-        }
-
-        sessions
-    }
-
-    pub(crate) fn cycle_sort(&mut self) {
-        self.sort_mode = self.sort_mode.next();
-        self.bump_version();
-    }
-
-    pub(crate) fn sort_mode(&self) -> SortMode {
-        self.sort_mode
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.sessions.len()
-    }
-
-    pub(crate) fn total_cost_usd(&self) -> f64 {
-        self.sessions.values().map(Session::cost_usd).sum()
-    }
-
-    pub(crate) fn count_by_state(&self) -> StateCount {
-        let mut count = StateCount::default();
-        for session in self.sessions.values() {
-            match session.state() {
-                SessionState::Processing | SessionState::ToolRunning(_) => count.active += 1,
-                SessionState::WaitingForInput => count.waiting += 1,
-                SessionState::Idle => count.idle += 1,
-                SessionState::Error => count.error += 1,
-                SessionState::Dormant => count.dormant += 1,
-                SessionState::Vanished => count.vanished += 1,
-            }
-        }
-        count
+    /// Every session, in the order discovery first saw them.
+    pub(crate) fn sessions(&self) -> impl Iterator<Item = &Session> {
+        self.order.iter().filter_map(|id| self.sessions.get(id))
     }
 
     /// Returns true iff the session existed and was not already `Vanished`.
-    /// Callers use the return value to gate `FilteredView` invalidation
-    /// and re-disambiguation work — a session lingering in the grace
-    /// window shouldn't churn that work every tick.
-    pub(crate) fn mark_stale(&mut self, id: &str) -> bool {
+    /// Callers use the return value to gate re-disambiguation — a
+    /// session lingering in the grace window shouldn't churn it every tick.
+    fn mark_stale(&mut self, id: &str) -> bool {
         let Some(session) = self.sessions.get_mut(id) else {
             return false;
         };
@@ -160,7 +105,6 @@ impl SessionRegistry {
             return false;
         }
         session.set_state(SessionState::Vanished);
-        self.bump_version();
         true
     }
 
@@ -193,27 +137,12 @@ impl SessionRegistry {
         });
         if self.sessions.len() != before {
             self.order.retain(|id| self.sessions.contains_key(id));
-            self.bump_version();
         }
     }
 
-    pub(crate) fn shift_all_activity(&mut self) {
-        for session in self.sessions.values_mut() {
-            session.shift_activity();
-        }
-        // No version bump: `FilteredView` stores only ids, not
-        // content. Renderers resolve `&Session` on demand, so
-        // sparkline changes flow through without invalidating the
-        // filter — bumping would defeat the steady-state win.
-    }
-
-    pub(crate) fn re_disambiguate_names(&mut self) {
-        let reserved: HashSet<String> = self
-            .sessions
-            .values()
-            .filter(|s| s.is_renamed())
-            .map(|s| s.name().to_string())
-            .collect();
+    fn re_disambiguate_names(&mut self) {
+        let reserved: HashSet<String> =
+            self.sessions.values().filter(|s| s.is_renamed()).map(|s| s.name().to_string()).collect();
 
         let mut base_to_ids: HashMap<String, Vec<SessionId>> = HashMap::new();
         for (id, session) in &self.sessions {
@@ -224,13 +153,11 @@ impl SessionRegistry {
             base_to_ids.entry(base).or_default().push(id.clone());
         }
 
-        let mut any_renamed = false;
         for (base, mut ids) in base_to_ids {
             if ids.len() <= 1 && !reserved.contains(&base) {
                 if let Some(session) = self.sessions.get_mut(&ids[0]) {
                     if session.name().as_str() != base {
                         session.set_auto_name(base);
-                        any_renamed = true;
                     }
                 }
                 continue;
@@ -248,24 +175,14 @@ impl SessionRegistry {
                 if let Some(session) = self.sessions.get_mut(id) {
                     if session.name().as_str() != candidate {
                         session.set_auto_name(candidate);
-                        any_renamed = true;
                     }
                 }
             }
         }
-        if any_renamed {
-            self.bump_version();
-        }
     }
 
     pub(crate) fn name_taken(&self, name: &str, exclude_id: &str) -> bool {
-        self.sessions
-            .iter()
-            .any(|(id, s)| s.name() == name && id.as_str() != exclude_id)
-    }
-
-    pub(crate) fn ids(&self) -> &[SessionId] {
-        &self.order
+        self.sessions.iter().any(|(id, s)| s.name() == name && id.as_str() != exclude_id)
     }
 }
 
@@ -281,12 +198,41 @@ fn strip_disambiguation_suffix(name: &str) -> String {
     name.to_string()
 }
 
-#[derive(Default)]
-pub(crate) struct StateCount {
-    pub(crate) active: usize,
-    pub(crate) waiting: usize,
-    pub(crate) idle: usize,
-    pub(crate) error: usize,
-    pub(crate) dormant: usize,
-    pub(crate) vanished: usize,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(id: &str, cwd: &str, state: SessionState) -> DiscoverySnapshot {
+        let mut s = DiscoverySnapshot::for_test(id, state);
+        s.cwd = cwd.into();
+        s.name = Sanitised::new(cwd.rsplit('/').next().unwrap_or(""));
+        s.state_authoritative = true;
+        s
+    }
+
+    #[test]
+    fn apply_tracks_membership_names_and_notifications() {
+        let mut r = SessionRegistry::new();
+        let names = HashMap::from([("/w/api".to_string(), "Backend".to_string())]);
+        let first = r.apply(
+            vec![
+                snap("a", "/w/app", SessionState::Processing),
+                snap("b", "/x/app", SessionState::Processing),
+                snap("c", "/w/api", SessionState::Idle),
+            ],
+            &names,
+        );
+        assert!(first.is_empty(), "joining is not a change of state");
+        let named: Vec<_> = r.sessions().map(|s| s.name().to_string()).collect();
+        assert_eq!(named, ["app (1)", "app (2)", "Backend"]);
+
+        let next = r.apply(
+            vec![snap("a", "/w/app", SessionState::WaitingForInput), snap("c", "/w/api", SessionState::Idle)],
+            &names,
+        );
+        assert_eq!(next.len(), 1);
+        assert_eq!((next[0].id.as_str(), &next[0].state), ("a", &SessionState::WaitingForInput));
+        assert_eq!(next[0].project, "app");
+        assert_eq!(r.get("b").map(|s| s.state()), Some(&SessionState::Vanished));
+    }
 }
