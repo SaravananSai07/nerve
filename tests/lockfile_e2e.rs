@@ -1,3 +1,5 @@
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -46,57 +48,16 @@ fn second_instance_refuses_to_start() {
         .spawn()
         .expect("spawn nerve");
 
-    let pid = output.id();
     let timeout = Duration::from_secs(5);
-    let result = wait_with_timeout(output, timeout);
+    let result = common::wait_with_timeout(output, timeout);
 
     drop(held);
 
-    let (status, stderr) = result.unwrap_or_else(|| {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-        panic!("nerve did not exit within {timeout:?}");
-    });
+    let common::Finished { status, stderr, .. } =
+        result.unwrap_or_else(|| panic!("nerve did not exit within {timeout:?}"));
 
-    assert!(
-        status.success(),
-        "nerve should exit 0 when another instance is running, got {status:?}\nstderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("already running"),
-        "expected 'already running' in stderr, got:\n{stderr}"
-    );
+    assert!(status.success(), "nerve should exit 0 when another instance is running, got {status:?}\nstderr: {stderr}");
+    assert!(stderr.contains("already running"), "expected 'already running' in stderr, got:\n{stderr}");
     let my_pid = std::process::id().to_string();
-    assert!(
-        stderr.contains(&my_pid),
-        "expected the holder pid {my_pid} in stderr, got:\n{stderr}"
-    );
-}
-
-fn wait_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Option<(std::process::ExitStatus, String)> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = s.read_to_string(&mut stderr);
-                }
-                return Some((status, stderr));
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => return None,
-        }
-    }
+    assert!(stderr.contains(&my_pid), "expected the holder pid {my_pid} in stderr, got:\n{stderr}");
 }

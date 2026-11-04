@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -12,7 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn run_cli(args: &[&str], home: &std::path::Path, config: &std::path::Path) -> (i32, String, String) {
     let bin = env!("CARGO_BIN_EXE_nerve");
-    let mut child = Command::new(bin)
+    let child = Command::new(bin)
         .args(args)
         .env("HOME", home)
         .env("NERVE_CONFIG_DIR", config)
@@ -25,35 +27,9 @@ fn run_cli(args: &[&str], home: &std::path::Path, config: &std::path::Path) -> (
         .spawn()
         .expect("spawn nerve");
 
-    let deadline = std::time::Instant::now() + TIMEOUT;
-    let pid = child.id();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                use std::io::Read;
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
-                return (status.code().unwrap_or(-1), stdout, stderr);
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(pid as i32),
-                        nix::sys::signal::Signal::SIGKILL,
-                    );
-                    panic!("nerve {args:?} did not exit within {TIMEOUT:?}");
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => panic!("wait failed: {e}"),
-        }
-    }
+    let done = common::wait_with_timeout(child, TIMEOUT)
+        .unwrap_or_else(|| panic!("nerve {args:?} did not exit within {TIMEOUT:?}"));
+    (done.status.code().unwrap_or(-1), done.stdout, done.stderr)
 }
 
 fn fixture_dirs() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -82,8 +58,7 @@ fn dump_with_empty_sessions_dir_returns_empty_json_array() {
     let (code, stdout, stderr) = run_cli(&["--dump"], &home, &config);
     assert_clean_success(code, &stderr);
 
-    let json: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("--dump must always emit valid JSON");
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("--dump must always emit valid JSON");
     assert!(json.is_array(), "--dump root must be an array, got: {stdout}");
     assert_eq!(json.as_array().unwrap().len(), 0);
 }
@@ -97,8 +72,7 @@ fn dump_with_missing_claude_dir_returns_empty_json_array() {
     let (code, stdout, stderr) = run_cli(&["--dump"], &home, &config);
     assert_clean_success(code, &stderr);
 
-    let json: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("--dump must always emit valid JSON");
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("--dump must always emit valid JSON");
     assert!(json.is_array());
     assert_eq!(json.as_array().unwrap().len(), 0);
 }
@@ -110,10 +84,7 @@ fn list_with_empty_sessions_dir_exits_cleanly() {
 
     let (code, stdout, stderr) = run_cli(&["--list"], &home, &config);
     assert_clean_success(code, &stderr);
-    assert!(
-        !stdout.is_empty(),
-        "--list should print at least an empty-state line, got nothing"
-    );
+    assert!(!stdout.is_empty(), "--list should print at least an empty-state line, got nothing");
 }
 
 #[test]
@@ -123,4 +94,14 @@ fn list_with_missing_claude_dir_exits_cleanly() {
 
     let (code, _stdout, stderr) = run_cli(&["--list"], &home, &config);
     assert_clean_success(code, &stderr);
+}
+
+// Only the first argument picks the command; anything else is an error
+// rather than a silent TUI launch or a flag found mid-argv.
+#[test]
+fn unknown_command_is_refused() {
+    let (_tmp, home, config) = fixture_dirs();
+    let (code, _stdout, stderr) = run_cli(&["frobnicate", "--list"], &home, &config);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("unknown command"), "stderr: {stderr}");
 }
