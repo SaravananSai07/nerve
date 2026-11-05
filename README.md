@@ -1,6 +1,8 @@
 # nerve
 
-TUI dashboard for monitoring and switching between Claude Code sessions across terminal tabs.
+A TUI for watching, answering and steering Claude Code sessions across
+terminal tabs, tmux panes and your other devices. It works with Claude
+Code sessions only, for now.
 
 ## What it does
 

@@ -1,17 +1,19 @@
 [package]
 name = "nerve-tui"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 # Two binaries since the `nerve-tui` alias; keep plain `cargo run` working.
 default-run = "nerve"
 rust-version = "1.85"
-description = "TUI for monitoring AI coding sessions across terminal tabs"
+description = "Watch, answer and steer Claude Code sessions across terminal tabs, tmux panes and your other devices, from one TUI. Works with Claude Code sessions only, for now."
 license = "MIT"
 repository = "https://github.com/SaravananSai07/nerve"
 authors = ["Sai Saravanan"]
 readme = "README.md"
 keywords = ["tui", "claude", "ai", "terminal", "monitoring"]
 categories = ["command-line-utilities", "development-tools"]
+# What goes into the crate: the code and the Claude Code mod it embeds.
+include = ["/src/**", "/mod/**", "/README.md", "/LICENSE"]
 
 # The crate is `nerve-tui` on crates.io (`nerve` was taken), but the
 # command is `nerve` however it's installed.
