@@ -1098,7 +1098,7 @@ checksum = "81c353b400a5503efdcf398f11a83fb7aa84f59f5d76fc4bf5bbc1e4f5366caa"
 
 [[package]]
 name = "nerve-tui"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "bitcoin_hashes 0.14.101",

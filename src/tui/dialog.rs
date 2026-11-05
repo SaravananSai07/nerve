@@ -189,6 +189,8 @@ pub(crate) enum Connect {
     /// Which of the devices the code offers to join.
     Pick {
         code: String,
+        /// The device that showed the code: always joined.
+        from: String,
         offer: Vec<String>,
         set: BTreeSet<String>,
         i: usize,
@@ -582,33 +584,48 @@ fn content(d: &Dialog, ink: &Ink, iw: u16) -> (String, Vec<Ln>, Option<Ln>) {
                     body.extend(para(
                         "It works once, for 10 minutes. Closing this cancels it. Waiting for the other device…",
                     ));
+                    if let Some(note) = crate::sync::connect::Invite::decode(code).ok().and_then(|i| i.reach_note()) {
+                        body.push(Ln::new());
+                        body.extend(paragraph(&note, x, iw - 2, ink.attention));
+                    }
                     (title, body, foot(vec![("c", "Copy".into()), ("Esc", "Cancel".into())]))
                 }
                 Connect::Enter { buf, err } => {
                     let mut body = para("Paste the code the other device shows.");
                     body.push(Ln::new());
-                    let mut l = Ln::new();
-                    let shown: String = buf
-                        .chars()
-                        .rev()
-                        .take(usize::from(iw.saturating_sub(6)))
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    let e = l.put(x, "› ", ink.accent);
-                    let e = l.put(e, shown, ink.text);
-                    l.put(e, " ", ink.text.add_modifier(Modifier::REVERSED));
-                    body.push(l);
+                    // Wrapped whole, so a paste can be checked end to end.
+                    let chunk = usize::from(iw.saturating_sub(6)).max(1);
+                    let chars: Vec<char> = buf.chars().collect();
+                    let mut parts: Vec<String> = chars.chunks(chunk).map(|p| p.iter().collect()).collect();
+                    if parts.last().is_none_or(|p| p.chars().count() == chunk) {
+                        parts.push(String::new());
+                    }
+                    let last = parts.len() - 1;
+                    for (n, part) in parts.into_iter().enumerate() {
+                        let mut l = Ln::new();
+                        if n == 0 {
+                            l.put(x, "› ", ink.accent);
+                        }
+                        let e = l.put(x + 2, part, ink.text);
+                        if n == last {
+                            l.put(e, " ", ink.text.add_modifier(Modifier::REVERSED));
+                        }
+                        body.push(l);
+                    }
                     if let Some(e) = err {
                         body.push(Ln::new());
                         body.extend(paragraph(e, x, iw - 2, ink.attention));
                     }
                     (title, body, foot(vec![("↵", "Connect".into()), ("Esc", "Back".into())]))
                 }
-                Connect::Pick { offer, set, i, .. } => {
+                Connect::Pick { from, offer, set, i, .. } => {
                     let mut body = para("Which of these devices should this one join?");
                     body.push(Ln::new());
+                    let mut l = Ln::new();
+                    l.put(x + 2, check_mark(true), ink.dim);
+                    let e = l.put(x + 6, from, ink.dim);
+                    l.put(e + 2, "showed the code", ink.dim);
+                    body.push(l);
                     for (n, d) in offer.iter().enumerate() {
                         let on = set.contains(d);
                         body.push(choice(n == *i, check_mark(on), on, d, ""));
@@ -621,7 +638,7 @@ fn content(d: &Dialog, ink: &Ink, iw: u16) -> (String, Vec<Ln>, Option<Ln>) {
                 }
                 Connect::Joining { to, words, err } => {
                     let mut body = vec![Ln::text(x, format!("Connecting to {to}…"), ink.bold), Ln::new()];
-                    if let Some(w) = words {
+                    if let (Some(w), None) = (words, err) {
                         body.extend(para(&format!("Check that {to} shows these words, and allow it there:")));
                         body.push(Ln::new());
                         body.push(Ln::text(x + 4, w.replace(' ', "  ·  "), ink.bold));
@@ -677,6 +694,23 @@ mod tests {
             err: None,
         }));
         assert!(s.contains("Connecting to laptop") && s.contains("oasis  ·  grape  ·  garlic"), "{s}");
+        let s = screen(&Dialog::Connect(Connect::Joining {
+            to: "laptop".into(),
+            words: Some("oasis grape garlic".into()),
+            err: Some("not connected: can't reach laptop's relay".into()),
+        }));
+        assert!(s.contains("can't reach") && !s.contains("oasis"), "a failed join hides the words: {s}");
+        let s = screen(&Dialog::Connect(Connect::Pick {
+            code: String::new(),
+            from: "laptop".into(),
+            offer: vec!["pi".into()],
+            set: BTreeSet::new(),
+            i: 0,
+        }));
+        assert!(s.contains("[×] laptop  showed the code") && s.contains("[ ] pi"), "{s}");
+        let code = format!("nerve1{}", "b".repeat(200));
+        let s = screen(&Dialog::Connect(Connect::Enter { buf: code, err: None }));
+        assert_eq!(s.matches('b').count(), 200, "the whole pasted code shows: {s}");
         let key = RowKey { device: None, id: "q".into() };
         let s = screen(&Dialog::Review {
             key,

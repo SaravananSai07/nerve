@@ -166,6 +166,9 @@ fn show_code(dir: &Path, fleet: &Fleet, keys: &nostr_sdk::prelude::Keys, o: &Opt
     if let Some(qr) = qr(&code) {
         println!("{qr}");
     }
+    if let Some(note) = inv.reach_note() {
+        print(false, &note);
+    }
     let joins = match (offer.is_empty(), later) {
         (true, _) => "this device".to_string(),
         (false, true) => "all your devices, and ones you add later".into(),
@@ -232,6 +235,14 @@ pub(crate) fn join(
     let (me, relays) = (fleet.device.clone(), fleet.relays.clone());
     let res = rt.block_on(async {
         let t = Transport::connect(keys.clone(), &relays).await?;
+        if !t.health().await.iter().any(|h| h.connected) {
+            t.disconnect().await;
+            return Err(format!(
+                "can't reach {}'s relay ({}). Put this device on the same network or VPN (such as Tailscale) and try again",
+                inv.n,
+                relays.join(", ")
+            ));
+        }
         t.subscribe(&[inviter], crate::util::now_secs().saturating_sub(5)).await?;
         let mut notes = t.client.notifications();
         let env = Envelope::new(
@@ -375,6 +386,19 @@ impl Invite {
             return Err("invite lists a relay that isn't ws:// or wss://".into());
         }
         Ok(inv)
+    }
+}
+
+impl Invite {
+    /// When the code lists only private (`ws://`) relays, the joiner must
+    /// reach one of them directly: say which, before it fails there.
+    pub(crate) fn reach_note(&self) -> Option<String> {
+        (!self.r.is_empty() && self.r.iter().all(|r| r.starts_with("ws://"))).then(|| {
+            format!(
+                "This device uses only a private relay ({}). The other device must reach it: same network, or a VPN such as Tailscale. Add a public relay with nerve sync relay add to connect from anywhere.",
+                self.r.join(", ")
+            )
+        })
     }
 }
 
@@ -543,6 +567,11 @@ mod tests {
         assert_eq!(Invite::decode(&format!("  {code}\n")).unwrap(), inv);
         assert!(Invite::decode("npub1abc").is_err());
         assert!(Invite::decode(&code[..code.len() - 5]).is_err());
+        assert!(inv.reach_note().is_none(), "a public relay reaches anywhere");
+        let private = Invite { r: vec!["ws://100.64.0.9:7777".into()], ..inv.clone() };
+        assert!(private.reach_note().is_some_and(|n| n.contains("ws://100.64.0.9:7777")));
+        let both = Invite { r: vec!["ws://100.64.0.9:7777".into(), "wss://relay.primal.net".into()], ..inv.clone() };
+        assert!(both.reach_note().is_none());
         let bad = Invite { r: vec!["http://evil".into()], ..inv };
         assert!(Invite::decode(&bad.encode()).is_err());
     }
