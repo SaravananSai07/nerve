@@ -1,9 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use super::run_applescript;
 use super::SessionTarget;
-use crate::util::applescript;
 
 struct TerminalInfo {
     terminal_id: String,
@@ -17,50 +19,68 @@ struct TerminalInfo {
 }
 
 pub(crate) struct GhosttyBridge {
-    /// Resolved lazily on a background thread so the 100 ms
-    /// osascript+sleep probe doesn't gate startup. Reads see
-    /// `None` until detection finishes; that window only affects
-    /// the "preview restores focus to nerve" courtesy step —
-    /// preview + go-to-session still work, they just don't bounce
-    /// focus back.
-    nerve_terminal_id: Arc<OnceLock<Option<String>>>,
+    probe: Arc<Probe>,
 }
 
+/// Finds nerve's own terminal: the UI thread shows `marker` as the window
+/// title, then a background thread asks Ghostty which terminal carries it.
+/// Only the UI thread writes to the screen, so the title can't interleave
+/// with a frame.
+struct Probe {
+    marker: String,
+    shown: Sender<()>,
+    /// `None` until the probe finishes.
+    id: OnceLock<Option<String>>,
+}
+
+/// How long the probe waits for the marker to be shown. A window in the
+/// background doesn't draw, so the probe falls back to matching the cwd.
+const PROBE_WAIT: Duration = Duration::from_secs(5);
+
 impl GhosttyBridge {
-    pub(crate) fn new() -> Self {
-        // Detection involves an osascript round-trip + a 100 ms
-        // sleep to let Ghostty propagate the title change. Used to
-        // happen synchronously during `App::new`; now it's deferred
-        // to a background thread so launch isn't gated on it.
-        let slot: Arc<OnceLock<Option<String>>> = Arc::new(OnceLock::new());
-        let writer = Arc::clone(&slot);
-        std::thread::Builder::new()
-            .name("nerve-ghostty-probe".into())
-            .spawn(move || {
-                let id = detect_own_terminal();
-                let _ = writer.set(id);
-            })
-            .ok();
-        Self {
-            nerve_terminal_id: slot,
+    /// Starts the probe; `on_found` gets nerve's own terminal id, off the
+    /// UI thread.
+    pub(crate) fn new(on_found: impl FnOnce(String) + Send + 'static) -> Self {
+        let (shown, rx) = channel();
+        let probe = Arc::new(Probe { marker: format!("nerve-{}", std::process::id()), shown, id: OnceLock::new() });
+        let p = Arc::clone(&probe);
+        let spawned = std::thread::Builder::new().name("nerve-ghostty-probe".into()).spawn(move || {
+            let marker = rx.recv_timeout(PROBE_WAIT).is_ok().then_some(p.marker.as_str());
+            let id = detect_own_terminal(marker);
+            if let Some(id) = &id {
+                on_found(id.clone());
+            }
+            let _ = p.id.set(id);
+        });
+        if spawned.is_err() {
+            let _ = probe.id.set(None);
         }
+        Self { probe }
     }
 
-    fn own_id(&self) -> Option<&str> {
-        // Returns None until the background probe completes. After
-        // that, the cached Option<String> is read directly without
-        // any locking — OnceLock guarantees the write happens
-        // exactly once.
-        self.nerve_terminal_id
-            .get()
-            .and_then(|o| o.as_deref())
+    /// The window title to show while the probe runs.
+    pub(crate) fn probe_title(&self) -> Option<&str> {
+        self.probe.id.get().is_none().then_some(self.probe.marker.as_str())
+    }
+
+    /// The UI thread has shown `probe_title`.
+    pub(crate) fn title_shown(&self) {
+        let _ = self.probe.shown.send(());
+    }
+
+    /// nerve's own terminal, once the probe has found it.
+    pub(crate) fn own_id(&self) -> Option<&str> {
+        self.probe.id.get().and_then(|o| o.as_deref())
     }
 
     pub(crate) fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
         let terminals = query_terminals().ok()?;
 
         let found = find_terminal_for_session(
-            &terminals, &target.cwd, &target.name, &target.dir_name,
+            &terminals,
+            &target.cwd,
+            &target.name,
+            &target.dir_name,
             self.own_id(),
             target.tty.as_deref(),
         )?;
@@ -110,7 +130,7 @@ end run"#;
         let term_idx_str = term_idx.to_string();
         let restore_id = self.own_id().unwrap_or("");
         let args = [&found.terminal_id[..], &term_idx_str, restore_id];
-        let output = applescript::run(SCRIPT, &args).ok()?;
+        let output = run_applescript(SCRIPT, &args).ok()?;
 
         if !output.status.success() {
             return None;
@@ -127,18 +147,6 @@ end run"#;
         let terminals = query_terminals()?;
 
         let found = find_terminal_for_session(
-            &terminals, &target.cwd, &target.name, &target.dir_name,
-            self.own_id(),
-            target.tty.as_deref(),
-        )
-        .ok_or_else(|| anyhow::anyhow!("session not in a visible tab"))?;
-
-        focus_terminal(&found.terminal_id)
-    }
-
-    pub(crate) fn resolve_terminal_id(&self, target: &SessionTarget) -> Option<String> {
-        let terminals = query_terminals().ok()?;
-        find_terminal_for_session(
             &terminals,
             &target.cwd,
             &target.name,
@@ -146,41 +154,27 @@ end run"#;
             self.own_id(),
             target.tty.as_deref(),
         )
-        .map(|t| t.terminal_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("session not in a visible tab"))?;
+
+        focus_terminal(&found.terminal_id)
     }
 }
 
-fn detect_own_terminal() -> Option<String> {
-    use std::io::Write;
-
-    let marker = format!("nerve-{}", std::process::id());
-    print!("\x1b]2;{}\x07", marker);
-    std::io::stdout().flush().ok();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let terminals = query_terminals().ok()?;
-    let result = terminals.iter()
-        .find(|t| t.name.contains(&marker))
-        .map(|t| t.terminal_id.clone());
-
-    print!("\x1b]2;nerve\x07");
-    std::io::stdout().flush().ok();
-
-    if result.is_some() {
-        return result;
+/// The terminal titled `marker`, else the one whose cwd is nerve's.
+fn detect_own_terminal(marker: Option<&str>) -> Option<String> {
+    if marker.is_some() {
+        // Let Ghostty pick up the new title.
+        std::thread::sleep(Duration::from_millis(100));
     }
-
+    let terminals = query_terminals().ok()?;
+    if let Some(t) = marker.and_then(|m| terminals.iter().find(|t| t.name.contains(m))) {
+        return Some(t.terminal_id.clone());
+    }
     let nerve_cwd = std::env::current_dir().ok()?;
-    let nerve_canonical = std::fs::canonicalize(&nerve_cwd)
-        .unwrap_or_else(|_| nerve_cwd.clone());
-    terminals.iter()
-        .find(|t| {
-            let t_path = std::path::Path::new(&t.cwd);
-            t_path == nerve_cwd.as_path()
-                || std::fs::canonicalize(t_path)
-                    .map(|c| c == nerve_canonical)
-                    .unwrap_or(false)
-        })
+    let nerve_canonical = std::fs::canonicalize(&nerve_cwd).unwrap_or_else(|_| nerve_cwd.clone());
+    terminals
+        .iter()
+        .find(|t| t.cwd_canonical == nerve_canonical || Path::new(&t.cwd) == nerve_cwd)
         .map(|t| t.terminal_id.clone())
 }
 
@@ -211,10 +205,7 @@ tell application "Ghostty"
 end tell
 "#;
 
-    let output = Command::new("osascript")
-        .args(["-e", script])
-        .stdin(Stdio::null())
-        .output()?;
+    let output = Command::new("osascript").args(["-e", script]).stdin(Stdio::null()).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -234,8 +225,7 @@ end tell
             continue;
         }
         let cwd = parts[1].trim().to_string();
-        let cwd_canonical =
-            std::fs::canonicalize(&cwd).unwrap_or_else(|_| PathBuf::from(&cwd));
+        let cwd_canonical = std::fs::canonicalize(&cwd).unwrap_or_else(|_| PathBuf::from(&cwd));
         terminals.push(TerminalInfo {
             terminal_id: parts[0].trim().to_string(),
             cwd,
@@ -250,11 +240,7 @@ end tell
 fn probe_terminal_by_tty(candidate_ids: &[&str], tty: &str) -> Option<String> {
     use std::io::Write;
 
-    let dev_path = if tty.starts_with("/dev/") {
-        tty.to_string()
-    } else {
-        format!("/dev/{tty}")
-    };
+    let dev_path = if tty.starts_with("/dev/") { tty.to_string() } else { format!("/dev/{tty}") };
 
     let marker = format!("nerve-probe-{}", std::process::id());
 
@@ -278,7 +264,7 @@ fn probe_terminal_by_tty(candidate_ids: &[&str], tty: &str) -> Option<String> {
     end tell
     return out
 end run"#;
-    let output = applescript::run(SCRIPT, candidate_ids).ok()?;
+    let output = run_applescript(SCRIPT, candidate_ids).ok()?;
 
     // Reset title
     if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&dev_path) {
@@ -312,13 +298,10 @@ fn find_terminal_for_session<'a>(
     nerve_terminal_id: Option<&str>,
     session_tty: Option<&str>,
 ) -> Option<&'a TerminalInfo> {
-    let is_nerve_terminal = |t: &TerminalInfo| {
-        nerve_terminal_id.is_some_and(|id| t.terminal_id == id)
-    };
+    let is_nerve_terminal = |t: &TerminalInfo| nerve_terminal_id.is_some_and(|id| t.terminal_id == id);
 
     let session_path = std::path::Path::new(session_cwd);
-    let session_canonical =
-        std::fs::canonicalize(session_path).unwrap_or(session_path.to_path_buf());
+    let session_canonical = std::fs::canonicalize(session_path).unwrap_or(session_path.to_path_buf());
 
     let mut exact_matches: Vec<&TerminalInfo> = Vec::new();
 
@@ -328,8 +311,7 @@ fn find_terminal_for_session<'a>(
         }
         // Pre-canonicalized at query time — no per-lookup
         // `realpath(3)` syscall here.
-        let is_match = t.cwd_canonical == session_canonical
-            || std::path::Path::new(&t.cwd) == session_path;
+        let is_match = t.cwd_canonical == session_canonical || std::path::Path::new(&t.cwd) == session_path;
         if is_match {
             exact_matches.push(t);
         }
@@ -377,9 +359,7 @@ fn find_terminal_for_session<'a>(
         // Pre-canonicalized terminal cwd — no syscall here.
         let t_canonical = &t.cwd_canonical;
         let session_for_match = &session_canonical;
-        if session_for_match.starts_with(t_canonical)
-            || t_canonical.starts_with(session_for_match)
-        {
+        if session_for_match.starts_with(t_canonical) || t_canonical.starts_with(session_for_match) {
             let common = common_prefix_len(session_for_match, t_canonical);
             if best.is_none_or(|(best_len, _)| common > best_len) {
                 best = Some((common, t));
@@ -390,10 +370,7 @@ fn find_terminal_for_session<'a>(
 }
 
 fn common_prefix_len(a: &std::path::Path, b: &std::path::Path) -> usize {
-    a.components()
-        .zip(b.components())
-        .take_while(|(ca, cb)| ca == cb)
-        .count()
+    a.components().zip(b.components()).take_while(|(ca, cb)| ca == cb).count()
 }
 
 fn find_terminal_position(target_id: &str) -> Option<(usize, usize)> {
@@ -420,11 +397,7 @@ tell application "Ghostty"
     return out
 end tell
 "#;
-    let output = Command::new("osascript")
-        .args(["-e", script])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    let output = Command::new("osascript").args(["-e", script]).stdin(Stdio::null()).output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -458,11 +431,38 @@ pub(super) fn focus_terminal(terminal_id: &str) -> anyhow::Result<()> {
         focus terminal id tid
     end tell
 end run"#;
-    let output = applescript::run(SCRIPT, &[terminal_id])?;
+    let output = run_applescript(SCRIPT, &[terminal_id])?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("focus terminal failed: {stderr}");
+    }
+    Ok(())
+}
+
+/// Terminal id for a session without the own-terminal probe, which needs
+/// a TUI to show its title and so can't run from a headless sync agent.
+pub(crate) fn terminal_id_headless(target: &SessionTarget) -> Option<String> {
+    let terminals = query_terminals().ok()?;
+    find_terminal_for_session(&terminals, &target.cwd, &target.name, &target.dir_name, None, target.tty.as_deref())
+        .map(|t| t.terminal_id.clone())
+}
+
+/// Type `text` into a terminal as a paste, then press Enter. Ghostty's
+/// `input text` pastes verbatim (no shell expansion; verified with
+/// `$(...)` and quotes), so multi-line instructions arrive intact.
+pub(crate) fn input_text(terminal_id: &str, text: &str) -> anyhow::Result<()> {
+    const SCRIPT: &str = r#"on run argv
+    set tid to item 1 of argv
+    tell application "Ghostty"
+        input text (item 2 of argv) to terminal id tid
+        delay 0.3
+        send key "enter" to terminal id tid
+    end tell
+end run"#;
+    let output = run_applescript(SCRIPT, &[terminal_id, text])?;
+    if !output.status.success() {
+        anyhow::bail!("ghostty input failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(())
 }

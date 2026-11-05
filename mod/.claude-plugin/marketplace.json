@@ -1,0 +1,11 @@
+{
+  "name": "nerve-local",
+  "owner": { "name": "nerve" },
+  "plugins": [
+    {
+      "name": "nerve",
+      "source": "./nerve",
+      "description": "Connects this Claude session to nerve's sync agent so your other devices can follow it, message it and answer its prompts."
+    }
+  ]
+}

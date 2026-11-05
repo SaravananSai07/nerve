@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use nix::fcntl::{Flock, FlockArg};
 
@@ -8,9 +9,11 @@ use crate::paths::Paths;
 
 const LOCK_PID_MAX_BYTES: u64 = 64;
 
-/// Owns the kernel `flock(2)` lease on `~/.config/nerve/nerve.lock`. Dropping
-/// the value releases the lease (kernel reaps the fd on close → flock auto-
-/// releases). The pid of the holder is written into the file for diagnostics.
+/// Owns the kernel `flock(2)` lease on a lock file: `~/.config/nerve/nerve.lock`
+/// for the TUI, `<sync>/agent.lock` for the sync agent. Dropping the value
+/// releases the lease (kernel reaps the fd on close → flock auto-releases),
+/// and so does a crash. The pid of the holder is written into the file for
+/// diagnostics.
 #[derive(Debug)]
 pub(crate) struct LockFile {
     _lock: Flock<File>,
@@ -22,28 +25,16 @@ pub(crate) enum LockError {
     Io(std::io::Error),
 }
 
-impl std::fmt::Display for LockError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyHeld { pid: Some(p) } => write!(f, "nerve is already running as PID {p}"),
-            Self::AlreadyHeld { pid: None } => write!(f, "nerve is already running"),
-            Self::Io(e) => write!(f, "lockfile io error: {e}"),
-        }
-    }
-}
-
 impl LockFile {
     pub(crate) fn acquire(paths: &Paths) -> Result<Self, LockError> {
         paths.ensure_config_dir().map_err(LockError::Io)?;
-        let path = paths.lock_file();
+        Self::at(&paths.lock_file())
+    }
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(LockError::Io)?;
+    /// Take the lease on `path`, whose directory must exist.
+    pub(crate) fn at(path: &Path) -> Result<Self, LockError> {
+        let file =
+            OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).map_err(LockError::Io)?;
 
         let mut lock = match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
             Ok(l) => l,
@@ -77,7 +68,7 @@ mod tests {
 
     fn fixture_paths() -> (tempfile::TempDir, Paths) {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = Paths::for_test(tmp.path().join("config"));
+        let paths = Paths::at(tmp.path().join("config"));
         std::fs::create_dir_all(paths.config_dir()).unwrap();
         (tmp, paths)
     }

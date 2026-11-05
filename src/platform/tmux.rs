@@ -14,10 +14,7 @@ impl TmuxBridge {
     pub(crate) fn capture_screen(&self, target: &SessionTarget) -> Option<String> {
         let pane = self.find_pane(target)?;
 
-        let output = Command::new("tmux")
-            .args(["capture-pane", "-t", &pane.id, "-p", "-S", "-100"])
-            .output()
-            .ok()?;
+        let output = Command::new("tmux").args(["capture-pane", "-t", &pane.id, "-p", "-S", "-100"]).output().ok()?;
 
         if !output.status.success() {
             return None;
@@ -32,12 +29,7 @@ impl TmuxBridge {
 
     fn enumerate_panes(&self) -> anyhow::Result<Vec<Pane>> {
         let output = Command::new("tmux")
-            .args([
-                "list-panes",
-                "-a",
-                "-F",
-                "#{pane_id} #{pane_tty} #{pane_current_path}",
-            ])
+            .args(["list-panes", "-a", "-F", "#{pane_id} #{pane_tty} #{pane_current_path}"])
             .output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -61,36 +53,26 @@ impl TmuxBridge {
 
         if let Some(tty) = target.tty.as_deref() {
             if let Some(p) = panes.iter().find(|p| p.tty == tty) {
-                return Some(Pane {
-                    id: p.id.clone(),
-                    tty: p.tty.clone(),
-                    cwd: p.cwd.clone(),
-                });
+                return Some(Pane { id: p.id.clone(), tty: p.tty.clone(), cwd: p.cwd.clone() });
             }
         }
 
-        panes
-            .into_iter()
-            .find(|p| p.cwd == target.cwd || std::path::Path::new(&p.cwd) == cwd_path)
+        panes.into_iter().find(|p| p.cwd == target.cwd || std::path::Path::new(&p.cwd) == cwd_path)
     }
 
     pub(crate) fn go_to_session(&self, target: &SessionTarget) -> anyhow::Result<()> {
-        let pane = self
-            .find_pane(target)
-            .ok_or_else(|| anyhow::anyhow!("no pane found for cwd {}", target.cwd))?;
+        let pane = self.find_pane(target).ok_or_else(|| anyhow::anyhow!("no pane found for cwd {}", target.cwd))?;
         focus_pane(&pane.id)
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(crate) fn resolve_pane_id(&self, target: &SessionTarget) -> Option<String> {
-        self.find_pane(target).map(|p| p.id)
     }
 }
 
+/// nerve's own pane.
+pub(super) fn own_pane() -> Option<String> {
+    std::env::var("TMUX_PANE").ok().filter(|p| crate::util::is_safe(p))
+}
+
 pub(super) fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
-    let status = Command::new("tmux")
-        .args(["select-pane", "-t", pane_id])
-        .status()?;
+    let status = Command::new("tmux").args(["select-pane", "-t", pane_id]).status()?;
     if !status.success() {
         anyhow::bail!("tmux select-pane failed for {pane_id}");
     }
@@ -100,10 +82,7 @@ pub(super) fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
 /// Run `argv` in a new pane split beside the current one. A single
 /// element is a shell command line, which tmux hands to the shell.
 pub(super) fn open_split(argv: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new("tmux")
-        .args(["split-window", "-h"])
-        .args(argv)
-        .status()?;
+    let status = Command::new("tmux").args(["split-window", "-h"]).args(argv).status()?;
     if !status.success() {
         anyhow::bail!("tmux split-window failed");
     }

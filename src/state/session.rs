@@ -1,11 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::state::activity::ActivityHistory;
-use crate::state::state_machine::StateMachine;
-use crate::state::token_usage::{OfficialUsage, TokenUsage};
 use crate::util::sanitize::Sanitised;
 
 /// Consecutive `propose_state` calls required before the visible
@@ -102,13 +99,6 @@ impl SessionState {
             Self::Vanished => "Gone".into(),
         }
     }
-
-    /// True for states where the session is no longer actively
-    /// producing work — `start_kill` uses this to refuse a redundant
-    /// SIGTERM on a dead/dormant session.
-    pub(crate) fn is_terminal(&self) -> bool {
-        matches!(self, Self::Vanished | Self::Dormant)
-    }
 }
 
 /// Where a session runs, which decides how nerve can reach it.
@@ -126,32 +116,71 @@ pub(crate) enum SessionKind {
 }
 
 impl SessionKind {
-    /// Where to find the session: its tty, or the kind's badge for
+    /// Where to find the session: its tty, or the kind's name for
     /// sessions without one.
     pub(crate) fn location(self, tty: Option<&Sanitised>) -> &str {
-        tty.map(Sanitised::as_str).or(self.badge()).unwrap_or("?")
+        tty.map(Sanitised::as_str).unwrap_or(match self {
+            Self::Terminal => "?",
+            Self::Desktop => "desktop",
+            Self::Background => "background",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct TokenUsage {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_creation_tokens: u64,
+    pub(crate) cost_usd: f64,
+}
+
+impl std::ops::AddAssign for TokenUsage {
+    fn add_assign(&mut self, o: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(o.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(o.output_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(o.cache_read_tokens);
+        self.cache_creation_tokens = self.cache_creation_tokens.saturating_add(o.cache_creation_tokens);
+        self.cost_usd += o.cost_usd;
+    }
+}
+
+impl TokenUsage {
+    pub(crate) fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_creation_tokens
     }
 
-    /// Card badge shown in place of the tty for sessions without one.
-    pub(crate) fn badge(self) -> Option<&'static str> {
-        match self {
-            Self::Terminal => None,
-            Self::Desktop => Some("desktop"),
-            Self::Background => Some("background"),
+    pub(crate) fn compact_display(&self) -> String {
+        let total_k = self.total_tokens() as f64 / 1000.0;
+        if self.cost_usd >= 0.01 {
+            format!("{:.0}k/${:.2}", total_k, self.cost_usd)
+        } else {
+            format!("{:.0}k", total_k)
         }
     }
 }
 
+/// Figures Claude Code reports about itself through the statusline hook
+/// (see `detect::statusline`). Unlike `TokenUsage` these aren't estimates:
+/// the cost reflects Claude Code's own pricing, including org overrides.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub(crate) struct OfficialUsage {
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) context_pct: Option<f64>,
+    pub(crate) model: Option<Sanitised>,
+}
+
 /// Claude's own cost when known, else nerve's estimate. Shared by the
-/// cards, the totals, and `--list` so they can't disagree.
+/// detail panel, sync, and `--list` so they can't disagree.
 pub(crate) fn effective_cost(official: Option<&OfficialUsage>, usage: &TokenUsage) -> f64 {
     official.and_then(|o| o.cost_usd).unwrap_or(usage.cost_usd)
 }
 
 /// Plain snapshot of everything the discovery worker can know about a
 /// session at a point in time. Decoupling this from `Session` means
-/// the worker never constructs registry-owned state (StateMachine,
-/// state_changed_at, ActivityHistory, last_notified_state) — those
+/// the worker never constructs registry-owned state (Debounce,
+/// state_changed_at, last_notified_state) — those
 /// belong to whichever `Session` the registry owns, and the worker
 /// has no business creating them just so they get overwritten.
 #[derive(Debug, Clone, Serialize)]
@@ -209,8 +238,8 @@ impl DiscoverySnapshot {
 }
 
 // Clone is test-only. A Session carries registry-owned mutable state
-// — `state_machine`'s confirmation counter, `last_notified_state` for
-// notification dedup, `activity` ring — so a production clone inserted
+// — `debounce`'s confirmation counter, `last_notified_state` for
+// notification dedup — so a production clone inserted
 // alongside the original would silently double-count. Tests need Clone
 // to set up fixtures; production paths only ever hand around &Session
 // references.
@@ -222,15 +251,13 @@ pub(crate) struct Session {
     state_changed_at: Instant,
     pub(crate) tty: Option<Sanitised>,
     pub(crate) branch: Option<Sanitised>,
-    pub(crate) cpu_percent: f32,
     /// Last tool the session was running. Sticks past the
     /// `ToolRunning` state into `Idle` so users can see what the
     /// session was last doing when it goes quiet — only `merge_snapshot`
     /// updates it (and only when the snapshot has a tool to give).
     pub(crate) current_tool: Option<Sanitised>,
-    activity: ActivityHistory,
     pub(crate) jsonl_path: Option<PathBuf>,
-    /// User-supplied custom name via the rename overlay. Privately
+    /// User-supplied custom name via the rename dialog. Privately
     /// owned because the legal write path is `rename_to`, which
     /// updates `name` in lockstep — letting external code flip this
     /// without setting the name (or vice versa) breaks the
@@ -244,20 +271,16 @@ pub(crate) struct Session {
     pub(crate) official: Option<OfficialUsage>,
     pub(crate) claude_root: PathBuf,
     last_notified_state: Option<SessionState>,
-    state_machine: StateMachine<SessionState>,
+    debounce: Debounce<SessionState>,
 }
 
 // Debug is hand-written rather than derived — the registry-side
-// invariants (state_machine confirmation counter, last_notified_state)
+// invariants (debounce confirmation counter, last_notified_state)
 // are noise in debug output. We surface only the load-bearing
 // identity + current state.
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session")
-            .field("id", &self.id)
-            .field("name", &self.name)
-            .field("state", self.state())
-            .finish()
+        f.debug_struct("Session").field("id", &self.id).field("name", &self.name).field("state", self.state()).finish()
     }
 }
 
@@ -278,9 +301,7 @@ impl Session {
             state_changed_at: Instant::now(),
             tty: snap.tty,
             branch: snap.branch,
-            cpu_percent: snap.cpu_percent,
             current_tool: snap.current_tool,
-            activity: ActivityHistory::new(),
             jsonl_path: snap.jsonl_path,
             renamed: false,
             usage: snap.usage,
@@ -291,7 +312,7 @@ impl Session {
             official: snap.official,
             claude_root: snap.claude_root,
             last_notified_state: None,
-            state_machine: StateMachine::new(snap.detected_state, CONFIRM_TICKS),
+            debounce: Debounce::new(snap.detected_state, CONFIRM_TICKS),
         }
     }
 
@@ -301,9 +322,7 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn new(id: SessionId, cwd: PathBuf) -> Self {
         let name = Sanitised::new(
-            cwd.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unknown".into()),
+            cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "unknown".into()),
         );
         Self {
             id,
@@ -312,9 +331,7 @@ impl Session {
             state_changed_at: Instant::now(),
             tty: None,
             branch: None,
-            cpu_percent: 0.0,
             current_tool: None,
-            activity: ActivityHistory::new(),
             jsonl_path: None,
             renamed: false,
             usage: TokenUsage::default(),
@@ -325,18 +342,18 @@ impl Session {
             official: None,
             claude_root: PathBuf::new(),
             last_notified_state: None,
-            state_machine: StateMachine::new(SessionState::Processing, CONFIRM_TICKS),
+            debounce: Debounce::new(SessionState::Processing, CONFIRM_TICKS),
         }
     }
 
     pub(crate) fn state(&self) -> &SessionState {
-        self.state_machine.current()
+        self.debounce.current()
     }
 
     /// Propose a transition. Returns true once the proposal has
     /// been confirmed `CONFIRM_TICKS` times in a row.
-    pub(crate) fn propose_state(&mut self, new_state: SessionState) -> bool {
-        if self.state_machine.propose(new_state) {
+    fn propose_state(&mut self, new_state: SessionState) -> bool {
+        if self.debounce.propose(new_state) {
             self.state_changed_at = Instant::now();
             true
         } else {
@@ -354,7 +371,7 @@ impl Session {
         }
         if self.state() == &new_state {
             // Same state: just drop any half-confirmed heuristic proposal.
-            self.state_machine.set(new_state);
+            self.debounce.set(new_state);
             return false;
         }
         self.set_state(new_state);
@@ -365,8 +382,8 @@ impl Session {
     /// comes from a side channel — e.g. discovery says the session's
     /// file vanished, so we mark it `Vanished` right away.
     pub(crate) fn set_state(&mut self, new_state: SessionState) {
-        if self.state_machine.current() != &new_state {
-            self.state_machine.set(new_state);
+        if self.debounce.current() != &new_state {
+            self.debounce.set(new_state);
             self.state_changed_at = Instant::now();
         }
     }
@@ -378,7 +395,7 @@ impl Session {
     /// cloned once, then split between the stored last-notified slot
     /// and the returned outgoing-notification value.
     pub(crate) fn take_pending_notification(&mut self) -> Option<SessionState> {
-        let current = self.state_machine.current();
+        let current = self.debounce.current();
         if self.last_notified_state.as_ref() == Some(current) {
             return None;
         }
@@ -393,7 +410,6 @@ impl Session {
     /// caller passes in any config-supplied name override; the
     /// renamed-by-user case wins over both.
     pub(crate) fn merge_snapshot(&mut self, snap: DiscoverySnapshot, name_override: Option<&str>) {
-        self.cpu_percent = snap.cpu_percent;
         self.tty = snap.tty;
         self.branch = snap.branch;
         self.pid = snap.pid;
@@ -405,9 +421,7 @@ impl Session {
             self.official = snap.official;
         }
         if !self.renamed {
-            self.name = name_override
-                .map(Sanitised::new)
-                .unwrap_or(snap.name);
+            self.name = name_override.map(Sanitised::new).unwrap_or(snap.name);
         }
         if let Some(tool) = snap.current_tool {
             // current_tool sticks past the ToolRunning state so users
@@ -423,45 +437,13 @@ impl Session {
         }
     }
 
-    /// Record an event-driven activity tick if the session is doing
-    /// work. The "record only when busy" invariant lives here so
-    /// callers can't accidentally light up the sparkline during idle
-    /// transitions.
-    pub(crate) fn record_activity_if_busy(&mut self, state: &SessionState) {
-        if matches!(state, SessionState::Processing | SessionState::ToolRunning(_)) {
-            self.activity.record_activity();
-        }
-    }
-
-    /// Time-driven shift of the activity ring. Called once per scan
-    /// by the registry so the sparkline keeps decaying when no events
-    /// arrive.
-    pub(crate) fn shift_activity(&mut self) {
-        self.activity.shift_if_needed();
-    }
-
-    pub(crate) fn activity_sparkline(&self) -> String {
-        self.activity.sparkline()
-    }
-
     pub(crate) fn name(&self) -> &Sanitised {
         &self.name
     }
 
-    /// The project folder, when the name doesn't already say it. Claude's
-    /// session names ("Analyze repository overview") don't say which repo.
-    /// Claude's worktrees (`<repo>/.claude/worktrees/<name>`) report the
-    /// repo, since the branch already identifies the worktree.
-    pub(crate) fn project(&self) -> Option<Sanitised> {
-        let parts: Vec<_> = self.cwd.components().map(|c| c.as_os_str()).collect();
-        let dir = match parts.as_slice() {
-            [.., repo, dot_claude, worktrees, _]
-                if *dot_claude == ".claude" && *worktrees == "worktrees" => repo,
-            [.., last] => last,
-            [] => return None,
-        }
-        .to_string_lossy();
-        (!self.name.as_str().starts_with(dir.as_ref())).then(|| Sanitised::new(dir.into_owned()))
+    /// The repo the session works in: see `project_dir`.
+    pub(crate) fn project_dir(&self) -> Sanitised {
+        project_dir(&self.cwd)
     }
 
     /// Claude's reported cost when the statusline hook supplies it, else
@@ -493,34 +475,66 @@ impl Session {
         self.renamed
     }
 
-    /// One-shot wrapper used by CLI paths and tests; samples its
-    /// own `Instant::now()`. Render and sort paths use
-    /// `state_duration_at` with a frame-level `now` instead, so all
-    /// cards in one frame share a single timestamp.
+    /// How long the session has been in its current state.
     pub(crate) fn state_duration(&self) -> std::time::Duration {
-        self.state_duration_at(Instant::now())
-    }
-
-    pub(crate) fn state_duration_at(&self, now: Instant) -> std::time::Duration {
         // `saturating_duration_since` so a clock that briefly walks
         // backwards (suspend/resume) returns zero rather than an
         // absurd Duration.
-        now.saturating_duration_since(self.state_changed_at)
+        Instant::now().saturating_duration_since(self.state_changed_at)
+    }
+}
+
+/// A value that only changes after `threshold` consecutive matching
+/// proposals, against flicker in heuristic signals (CPU spikes, transient
+/// file rewrites).
+#[derive(Debug, Clone)]
+struct Debounce<T: PartialEq + Clone> {
+    current: T,
+    pending: Option<T>,
+    count: u8,
+    threshold: u8,
+}
+
+impl<T: PartialEq + Clone> Debounce<T> {
+    fn new(initial: T, threshold: u8) -> Self {
+        debug_assert!(threshold > 0, "threshold must be at least 1");
+        Self { current: initial, pending: None, count: 0, threshold }
     }
 
-    pub(crate) fn format_duration(&self) -> String {
-        self.format_duration_at(Instant::now())
+    fn current(&self) -> &T {
+        &self.current
     }
 
-    pub(crate) fn format_duration_at(&self, now: Instant) -> String {
-        let secs = self.state_duration_at(now).as_secs();
-        if secs < 60 {
-            format!("{secs}s")
-        } else if secs < 3600 {
-            format!("{}m {:02}s", secs / 60, secs % 60)
-        } else {
-            format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    /// Propose a transition to `next`. Returns true when the proposal has
+    /// been confirmed `threshold` times in a row and the current value has
+    /// been updated. A different proposal resets the counter.
+    fn propose(&mut self, next: T) -> bool {
+        if next == self.current {
+            self.pending = None;
+            self.count = 0;
+            return false;
         }
+        if self.pending.as_ref() == Some(&next) {
+            self.count += 1;
+        } else {
+            self.pending = Some(next);
+            self.count = 1;
+        }
+        if self.count >= self.threshold {
+            self.current = self.pending.take().expect("pending is set when count > 0");
+            self.count = 0;
+            return true;
+        }
+        false
+    }
+
+    /// Change at once, dropping any half-confirmed proposal.
+    fn set(&mut self, next: T) {
+        if self.current != next {
+            self.current = next;
+        }
+        self.pending = None;
+        self.count = 0;
     }
 }
 
@@ -537,27 +551,68 @@ pub(crate) fn fuzzy_match(query_lower: &str, target: &str) -> bool {
     qi.peek().is_none()
 }
 
-impl Session {
-    pub(crate) fn matches_query(&self, query_lower: &str) -> bool {
-        if query_lower.is_empty() {
-            return true;
-        }
-        fuzzy_match(query_lower, self.name.as_str())
-            || self
-                .cwd
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|dir| fuzzy_match(query_lower, dir))
-                .unwrap_or(false)
-            || fuzzy_match(query_lower, &self.cwd.to_string_lossy())
-    }
+/// The folder a session's row and notifications name: the repo for
+/// Claude's worktrees (`<repo>/.claude/worktrees/<name>`), since the branch
+/// already names the worktree, else the cwd's last component.
+pub(crate) fn project_dir(cwd: &Path) -> Sanitised {
+    let parts: Vec<_> = cwd.components().map(|c| c.as_os_str()).collect();
+    let dir = match parts.as_slice() {
+        [.., repo, dot_claude, worktrees, _] if *dot_claude == ".claude" && *worktrees == "worktrees" => repo,
+        [.., last] => last,
+        [] => cwd.as_os_str(),
+    };
+    Sanitised::new(dir.to_string_lossy())
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn requires_threshold_confirmations() {
+        let mut m = Debounce::new("a", 3);
+        assert!(!m.propose("b"));
+        assert!(!m.propose("b"));
+        assert!(m.propose("b"));
+        assert_eq!(m.current(), &"b");
+    }
+
+    #[test]
+    fn different_proposal_resets_counter() {
+        let mut m = Debounce::new("a", 3);
+        assert!(!m.propose("b"));
+        assert!(!m.propose("b"));
+        assert!(!m.propose("c"));
+        assert!(!m.propose("c"));
+        assert!(m.propose("c"));
+        assert_eq!(m.current(), &"c");
+    }
+
+    #[test]
+    fn proposing_current_value_clears_pending() {
+        let mut m = Debounce::new("a", 3);
+        m.propose("b");
+        m.propose("b");
+        assert!(!m.propose("a"));
+        assert!(!m.propose("b"));
+    }
+
+    #[test]
+    fn set_forces_immediate_transition() {
+        let mut m = Debounce::new("a", 3);
+        m.propose("b");
+        m.set("c");
+        assert_eq!(m.current(), &"c");
+        assert!(!m.propose("b"));
+    }
+
+    #[test]
+    fn threshold_of_one_transitions_immediately() {
+        let mut m = Debounce::new("a", 1);
+        assert!(m.propose("b"));
+        assert_eq!(m.current(), &"b");
+    }
 
     #[test]
     fn fuzzy_match_exact() {
@@ -605,61 +660,10 @@ mod tests {
     }
 
     #[test]
-    fn matches_query_fuzzy_by_name() {
-        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-long-project"));
-        assert!(session.matches_query("mlp"));
-    }
-
-    #[test]
-    fn matches_query_fuzzy_by_dir() {
-        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-long-project"));
-        assert!(session.matches_query("mylong"));
-    }
-
-    #[test]
-    fn matches_query_by_name() {
-        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
-        assert!(session.matches_query("my-project"));
-        assert!(session.matches_query("my"));
-    }
-
-    #[test]
-    fn matches_query_by_directory_name() {
-        let mut session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
-        session.name = Sanitised::new("Custom Name");
-        assert!(session.matches_query("project"));
-    }
-
-    #[test]
-    fn matches_query_by_path_partial() {
-        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
-        assert!(session.matches_query("home"));
-        assert!(session.matches_query("user"));
-    }
-
-    #[test]
-    fn matches_query_fuzzy() {
-        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-long-project-name"));
-        assert!(session.matches_query("mlpn"));
-    }
-
-    #[test]
-    fn matches_query_no_match() {
-        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
-        assert!(!session.matches_query("nonexistent"));
-    }
-
-    #[test]
-    fn matches_query_empty() {
-        let session = Session::new("id1".into(), PathBuf::from("/home/user/my-project"));
-        assert!(session.matches_query(""));
-    }
-
-    #[test]
-    fn from_snapshot_seeds_state_machine_with_detected_state() {
+    fn from_snapshot_seeds_debounce_with_detected_state() {
         // A session first observed as Idle should report Idle
         // immediately — not Processing for the first 3 ticks while the
-        // confirmation counter climbs from the StateMachine default.
+        // confirmation counter climbs from the Debounce default.
         let snap = DiscoverySnapshot::for_test("id1", SessionState::Idle);
         let session = Session::from_snapshot(snap);
         assert_eq!(session.state(), &SessionState::Idle);
@@ -687,6 +691,13 @@ mod tests {
     }
 
     #[test]
+    fn name_override_is_sanitised() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
+        s.merge_snapshot(DiscoverySnapshot::for_test("id1", SessionState::Idle), Some("clean\u{1b}[2Jname"));
+        assert_eq!(s.name().as_str(), "cleanname");
+    }
+
+    #[test]
     fn merge_snapshot_skips_name_when_renamed() {
         let mut s = Session::new("id1".into(), PathBuf::from("/tmp/x"));
         s.rename_to("custom".into());
@@ -710,16 +721,16 @@ mod tests {
         assert_eq!(s.state(), &SessionState::Processing);
     }
 
-    // Cards show the repo next to Claude's session name, which doesn't
-    // say which repo it is. Worktrees name the repo, not the worktree.
+    // Worktrees name the repo, not the worktree, even when Claude's name
+    // starts with the repo's.
     #[test]
-    fn project_names_the_repo_unless_the_name_does() {
-        let mut s = Session::new("id1".into(), PathBuf::from("/home/u/ape"));
-        assert!(s.project().is_none(), "default name is already the folder");
-        s.rename_to("Analyze repository".into());
-        assert_eq!(s.project().unwrap(), "ape");
-        s.cwd = PathBuf::from("/home/u/nyan/.claude/worktrees/design-files-09cbde");
-        assert_eq!(s.project().unwrap(), "nyan");
+    fn project_dir_names_the_repo() {
+        let mut s = Session::new("id1".into(), PathBuf::from("/home/u/app"));
+        assert_eq!(s.project_dir(), "app");
+        s.cwd = PathBuf::from("/home/u/web/.claude/worktrees/design-files-09cbde");
+        s.rename_to("web: design files".into());
+        assert_eq!(s.project_dir(), "web");
+        assert_eq!(project_dir(Path::new("/")), "/");
     }
 
     #[test]
