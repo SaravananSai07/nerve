@@ -106,14 +106,37 @@ fn handle_update() -> std::io::Result<()> {
     // `--locked` builds against the published Cargo.lock. Without it cargo
     // resolves the newest dependencies, which can need a newer rustc than
     // the declared MSRV (instability/darling did).
-    println!("Updating nerve via cargo install nerve-tui --locked --force");
-    let status = std::process::Command::new("cargo").args(["install", "nerve-tui", "--locked", "--force"]).status()?;
+    // Without `--force` cargo still upgrades to a newer version, but skips
+    // rebuilding the one already installed.
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = latest_version();
+    if latest.as_deref() == Some(current) {
+        println!("nerve {current} is the latest version.");
+        return Ok(());
+    }
+    match &latest {
+        Some(v) => println!("Updating nerve {current} to {v} via cargo install nerve-tui --locked"),
+        None => println!("Updating nerve {current} via cargo install nerve-tui --locked"),
+    }
+    let status = std::process::Command::new("cargo").args(["install", "nerve-tui", "--locked"]).status()?;
     if status.success() {
         println!("\nnerve updated. Restart any running instance to use the new version.");
     } else {
-        eprintln!("\nUpdate failed. Run `cargo install nerve-tui --locked --force` directly to see errors.");
+        eprintln!("\nUpdate failed. Run `cargo install nerve-tui --locked` directly to see errors.");
     }
     Ok(())
+}
+
+/// The newest nerve on crates.io, from `cargo search`; None when it can't tell.
+fn latest_version() -> Option<String> {
+    let out = std::process::Command::new("cargo").args(["search", "nerve-tui", "--limit", "1"]).output().ok()?;
+    parse_search(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `nerve-tui = "0.6.1"    # …` → `0.6.1`.
+fn parse_search(out: &str) -> Option<String> {
+    let rest = out.lines().find_map(|l| l.strip_prefix("nerve-tui = \""))?;
+    rest.split('"').next().filter(|v| !v.is_empty()).map(String::from)
 }
 
 fn dump(paths: &Paths) {
@@ -249,4 +272,16 @@ fn main() -> std::io::Result<()> {
     }
     let mut guard = terminal::TerminalGuard::install()?;
     App::new(paths, shutdown).run(guard.terminal())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn update_reads_the_version_cargo_search_prints() {
+        let out =
+            "nerve-tui = \"0.6.1\"    # Watch, answer and steer…\n\nnote: to learn more, run `cargo info <name>`\n";
+        assert_eq!(super::parse_search(out).as_deref(), Some("0.6.1"));
+        assert_eq!(super::parse_search("nerve-tui-extra = \"9.0.0\"\n"), None);
+        assert_eq!(super::parse_search(""), None);
+    }
 }
