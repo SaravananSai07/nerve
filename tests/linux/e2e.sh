@@ -28,7 +28,7 @@ export HOME=/root
 ALT=/root/.claude-alt
 mkdir -p /root/.claude/sessions $ALT/sessions $ALT/jobs /tmp/nervecfg
 export CLAUDE_CONFIG_DIR=$ALT NERVE_CONFIG_DIR=/tmp/nervecfg
-printf '[notifications]\non_waiting = true\non_complete = true\nsound = false\n' > /tmp/nervecfg/config.toml
+printf '[notifications]\nsound = false\n' > /tmp/nervecfg/config.toml
 
 mkdir -p /tmp/bin && cp /fake/claude-proc /tmp/bin/claude
 session_file() { # root pid id cwd status [extra-json]
@@ -66,7 +66,7 @@ echo "== TUI: inotify on both roots, notification, clipboard, kill"
 Xvfb :99 >/dev/null 2>&1 & XVFB=$!; export DISPLAY=:99; sleep 1
 rm -f /tmp/notify.log /tmp/claude-cli.log
 mkdir -p /tmp/fakebin && cp /fake/notify-send /tmp/fakebin/ && cp /fake/claude-cli /tmp/fakebin/claude
-# NoOp bridge (no TMUX/TERM_PROGRAM) so Enter on a bg job takes the clipboard path.
+# NoOp bridge (no TMUX/TERM_PROGRAM) so `t` on a bg job takes the clipboard path.
 tmux -L t new-window -d -n nerve "env -u TMUX TERM_PROGRAM= PATH=/tmp/fakebin:\$PATH DISPLAY=:99 HOME=$HOME CLAUDE_CONFIG_DIR=$ALT NERVE_CONFIG_DIR=/tmp/nervecfg $NERVE"
 sleep 2
 screen() { tmux -L t capture-pane -p -t main:nerve; }
@@ -92,17 +92,17 @@ sleep 2
 check "notify-send fired with reason" "grep -q 'alpha: input needed' /tmp/notify.log 2>/dev/null"
 cat /tmp/notify.log 2>/dev/null
 
-# Background job (parked): Enter copies `claude attach` via xclip.
+# Background job (parked): `t` copies `claude attach` via xclip.
 mkdir -p $ALT/jobs/abcd1234
 printf '{"state":"blocked","sessionId":"abcd1234-ffff","cwd":"/work/bgjob","name":"bg job","needs":"pick A or B"}' > $ALT/jobs/abcd1234/state.json
 touch $ALT/sessions/.wake; sleep 2
 tmux -L t send-keys -t main:nerve / ; sleep 0.3; tmux -L t send-keys -t main:nerve "bg job" Enter; sleep 0.8
-tmux -L t send-keys -t main:nerve Enter; sleep 1
+tmux -L t send-keys -t main:nerve t; sleep 1
 CLIP=$(xclip -selection clipboard -o 2>/dev/null)
 echo "clipboard: $CLIP"
 check "clipboard holds the root-pinned attach" "[ \"\$CLIP\" = \"CLAUDE_CONFIG_DIR='$ALT' claude attach abcd1234\" ]"
-tmux -L t send-keys -t main:nerve i; sleep 0.8
-check "details name the folder and job" "screen | grep -q '/work/bgjob' && screen | grep -q 'job id *abcd1234'"
+tmux -L t send-keys -t main:nerve Enter; sleep 0.8
+check "its panel names the folder and what it waits for" "screen | grep -q '/work/bgjob' && screen | grep -q 'pick A or B'"
 tmux -L t send-keys -t main:nerve Escape; sleep 0.3
 tmux -L t send-keys -t main:nerve Escape; sleep 0.3
 
@@ -121,8 +121,8 @@ for _ in $(seq 1 50); do pgrep -x nerve >/dev/null || break; sleep 0.1; done
 tmux -L t new-window -d -n nerve2 "PATH=/tmp/fakebin:\$PATH HOME=$HOME CLAUDE_CONFIG_DIR=$ALT NERVE_CONFIG_DIR=/tmp/nervecfg $NERVE"
 sleep 2
 tmux -L t send-keys -t main:nerve2 / ; sleep 0.3; tmux -L t send-keys -t main:nerve2 "bg job" Enter; sleep 0.8
-tmux -L t send-keys -t main:nerve2 Enter; sleep 1.5
-check "Enter ran 'claude attach abcd1234' in a split" "grep -q 'attach abcd1234' /tmp/claude-cli.log 2>/dev/null"
+tmux -L t send-keys -t main:nerve2 t; sleep 1.5
+check "t ran 'claude attach abcd1234' in a split" "grep -q 'attach abcd1234' /tmp/claude-cli.log 2>/dev/null"
 
 echo "== orphan watchdog (Linux pty hangup)"
 NP=$(pgrep -x nerve)

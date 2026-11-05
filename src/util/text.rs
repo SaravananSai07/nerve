@@ -51,6 +51,15 @@ pub(crate) fn truncate_width(s: &str, max_cols: usize) -> String {
     out
 }
 
+/// `a`, `a and b`, `a, b and c`.
+pub(crate) fn list_join(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Single-quote for a POSIX shell. Safe for any input: an embedded `'`
 /// closes the quote, emits an escaped quote, and reopens.
 pub(crate) fn shell_quote(s: &str) -> String {
@@ -105,6 +114,16 @@ pub(crate) fn wrap_words(text: &str, cols: usize) -> Vec<String> {
         }
     }
     lines
+}
+
+/// `1.5 MiB`: a byte count for people.
+pub(crate) fn format_bytes(b: u64) -> String {
+    match b {
+        0..1024 => format!("{b} B"),
+        1024..1_048_576 => format!("{:.1} KiB", b as f64 / 1024.0),
+        1_048_576..1_073_741_824 => format!("{:.1} MiB", b as f64 / 1_048_576.0),
+        _ => format!("{:.1} GiB", b as f64 / 1_073_741_824.0),
+    }
 }
 
 #[cfg(test)]

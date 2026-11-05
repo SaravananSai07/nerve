@@ -95,6 +95,11 @@ fn is_safe_char(c: char) -> bool {
 /// `is_control` filter drops. The second pass is the source of
 /// truth for "safe to render"; treat `strip_ansi` as a CSI/OSC/DCS
 /// pre-filter, not a complete sanitiser.
+/// `raw` made safe to render, as a plain `String`.
+pub(crate) fn clean(raw: impl Into<String>) -> String {
+    Sanitised::new(raw).into_string()
+}
+
 // DO NOT add `impl From<String> for Sanitised` or `impl From<&str>`:
 // either would let callers bypass `Sanitised::new` and silently
 // undo the type-level guarantee crate-wide. The only inhabited-
@@ -107,15 +112,16 @@ impl Sanitised {
     pub(crate) fn new(raw: impl Into<String>) -> Self {
         let raw = raw.into();
         let cleaned = strip_ansi(&raw).into_owned();
-        let filtered: String = cleaned
-            .chars()
-            .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
-            .collect();
+        let filtered: String = cleaned.chars().filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r')).collect();
         Self(filtered)
     }
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.0
     }
 
     pub(crate) fn is_empty(&self) -> bool {

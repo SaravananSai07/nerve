@@ -9,6 +9,8 @@ set -euo pipefail
 #
 # When run from the repo, builds from source.
 # When run via curl | bash, installs from crates.io.
+# On Termux it installs what nerve needs from pkg (rust, git, tmux).
+# Connecting your other devices happens in nerve itself (Settings).
 
 BOLD='\033[1m'
 DIM='\033[2m'
@@ -20,6 +22,18 @@ RESET='\033[0m'
 info()  { printf "${GREEN}✓${RESET} %s\n" "$1"; }
 warn()  { printf "${YELLOW}!${RESET} %s\n" "$1"; }
 err()   { printf "${RED}✗${RESET} %s\n" "$1"; }
+
+if [[ $# -gt 0 ]]; then
+    printf "install.sh takes no arguments. After it, connect devices with: nerve setup [<code>]\n"
+    exit 2
+fi
+
+# Termux (Android): no rustup, no glibc. Everything comes from pkg, and
+# nerve is built against Termux's own libc.
+if [[ "${PREFIX:-}" == *com.termux* ]]; then
+    printf "\n${BOLD}Termux detected${RESET}: installing rust, git, tmux from pkg\n"
+    pkg install -y rust git tmux openssh >/dev/null
+fi
 
 printf "\n${BOLD}nerve installer${RESET}\n"
 printf "${DIM}First-time install takes a few minutes — Rust toolchain (if missing)${RESET}\n"
@@ -57,6 +71,15 @@ fi
 INSTALL_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 mkdir -p "$INSTALL_DIR"
 
+# Copy beside the old binary, then rename over it. Writing into the old
+# file in place makes macOS kill the new one on launch, and a running
+# agent sees the rename and restarts as the new version.
+place() {
+    cp "$1" "$INSTALL_DIR/.nerve.new"
+    chmod 755 "$INSTALL_DIR/.nerve.new"
+    mv -f "$INSTALL_DIR/.nerve.new" "$INSTALL_DIR/nerve"
+}
+
 # ---------------------------------------------------------------------------
 # 1. Build or fetch nerve
 # ---------------------------------------------------------------------------
@@ -68,13 +91,13 @@ if [[ -f "Cargo.toml" ]] && grep -q '^name = "nerve-tui"' Cargo.toml 2>/dev/null
         err "Build failed — binary not found at $SRC_BINARY"
         exit 1
     fi
-    cp "$SRC_BINARY" "$INSTALL_DIR/nerve"
+    place "$SRC_BINARY"
 else
     printf "\n${BOLD}Installing nerve from crates.io...${RESET}\n"
     TMP_ROOT="$(mktemp -d)"
     trap 'rm -rf "$TMP_ROOT"' EXIT
     cargo install nerve-tui --locked --root "$TMP_ROOT" --quiet
-    cp "$TMP_ROOT/bin/nerve" "$INSTALL_DIR/nerve"
+    place "$TMP_ROOT/bin/nerve"
 fi
 
 info "Installed to $INSTALL_DIR/nerve"
@@ -157,5 +180,6 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Done
 # ---------------------------------------------------------------------------
-printf "\n${GREEN}${BOLD}nerve installed successfully.${RESET}\n"
-printf "Run ${BOLD}nerve${RESET} to start the TUI.\n\n"
+printf "\n${GREEN}${BOLD}nerve $("$INSTALL_DIR/nerve" --version | cut -d' ' -f2) installed.${RESET}\n"
+printf "Run ${BOLD}nerve${RESET} to start it. To add your other devices, open Settings there.\n"
+printf "${DIM}On a device without a screen: nerve setup <code from your other device>${RESET}\n\n"

@@ -1,0 +1,6 @@
+{
+  "name": "nerve",
+  "version": "0.1.0",
+  "description": "Connects this Claude session to nerve's sync agent so your other devices can follow it, message it and answer its prompts.",
+  "author": { "name": "nerve" }
+}

@@ -1,10 +1,11 @@
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::log_warn;
 use crate::paths::Paths;
+use crate::util::now_secs;
+use crate::util::sanitize::Sanitised;
 
 const CRATES_API: &str = "https://crates.io/api/v1/crates/nerve-tui";
 const CHECK_INTERVAL_SECS: u64 = 24 * 3600;
@@ -31,28 +32,12 @@ fn write_cache(path: &Path, cache: &Cache) -> Option<()> {
     std::fs::write(path, json).ok()
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn fetch_latest_version() -> Option<String> {
     // `--max-filesize 65536`: refuse a hostile / corrupted response that
     // attempts to feed us a multi-MB payload. The real crates.io response
     // is well under 10 KiB.
     let output = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "--max-time",
-            "5",
-            "--max-filesize",
-            "65536",
-            "-A",
-            "nerve-update-check",
-            CRATES_API,
-        ])
+        .args(["-s", "--max-time", "5", "--max-filesize", "65536", "-A", "nerve-update-check", CRATES_API])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -68,19 +53,11 @@ fn fetch_latest_version() -> Option<String> {
     let raw = json.get("crate")?.get("max_version")?.as_str()?;
     // Sanitise at the network boundary. A hostile crates.io response
     // (or TLS MITM) could plant ANSI / control bytes in a string
-    // that later renders in the cards view via the update banner
-    // and persists into prefs.toml via the `u` dismissal. Every
+    // that later renders in the footer's update notice. Every
     // other ingestion point in the codebase strips at boundary;
     // this one shouldn't be the exception.
-    let cleaned: String = crate::util::sanitize::strip_ansi(raw)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
-    }
+    let cleaned = Sanitised::new(raw);
+    (!cleaned.is_empty()).then(|| cleaned.as_str().to_string())
 }
 
 /// Spawn a background thread that hits crates.io if the cached check is older
@@ -92,25 +69,25 @@ pub(crate) fn maybe_check_in_background(paths: &Paths, enabled: bool) {
     }
     let path = paths.update_cache_file();
     let cache = read_cache(&path);
-    if now_unix().saturating_sub(cache.last_check_unix) < CHECK_INTERVAL_SECS {
+    if now_secs().saturating_sub(cache.last_check_unix) < CHECK_INTERVAL_SECS {
         return;
     }
-    std::thread::spawn(move || {
+    let spawned = std::thread::Builder::new().name("nerve-update".into()).spawn(move || {
         if let Some(latest) = fetch_latest_version() {
-            let updated = Cache {
-                last_check_unix: now_unix(),
-                last_known_version: latest,
-            };
+            let updated = Cache { last_check_unix: now_secs(), last_known_version: latest };
             if write_cache(&path, &updated).is_none() {
                 log_warn!("updater: failed to persist update cache at {}", path.display());
             }
         }
     });
+    if let Err(e) = spawned {
+        log_warn!("updater: cannot start check thread: {e}");
+    }
 }
 
 /// Read the cached latest version and return it iff strictly newer than the
-/// running binary. None means "no banner" — either no cache yet, network down,
-/// or we're already on the latest.
+/// running binary. None means "nothing to announce" — either no cache yet,
+/// network down, or we're already on the latest.
 ///
 /// The cached value is re-sanitised on read. `fetch_latest_version` strips at
 /// the network boundary, but `update_cache.json` is a second trust boundary:
@@ -122,18 +99,8 @@ pub(crate) fn pending_update(paths: &Paths, current: &str) -> Option<String> {
     if cache.last_known_version.is_empty() {
         return None;
     }
-    let cleaned: String = crate::util::sanitize::strip_ansi(&cache.last_known_version)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
-    if cleaned.is_empty() {
-        return None;
-    }
-    if is_newer(&cleaned, current) {
-        Some(cleaned)
-    } else {
-        None
-    }
+    let cleaned = Sanitised::new(cache.last_known_version);
+    (!cleaned.is_empty() && is_newer(cleaned.as_str(), current)).then(|| cleaned.as_str().to_string())
 }
 
 /// True if `latest` parses as a strictly greater version than `current`.
@@ -143,10 +110,9 @@ pub(crate) fn pending_update(paths: &Paths, current: &str) -> Option<String> {
 /// and unequal to `0.4.0-rc2`). Nerve doesn't publish pre-releases
 /// today; if that changes, swap in a real `semver::Version` parse.
 ///
-/// Used by the banner-suppression path to ignore yanked-release
-/// downgrades — if `pending_update` reverts to a version older than
-/// the one a user explicitly dismissed, we don't bother them again.
-pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
+/// A yanked release that reverts the latest version below the running
+/// one never raises a notice.
+fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
     parse(latest) > parse(current)
 }

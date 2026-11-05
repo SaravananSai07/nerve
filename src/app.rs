@@ -1,823 +1,1101 @@
-use std::time::Duration;
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::DefaultTerminal;
 
-use crate::config::Config;
-use crate::detect::jsonl;
+use crate::config::{Config, Prefs};
+use crate::detect::worker::DiscoveryWorker;
 use crate::log_info;
-use crate::notify::Notifier;
+use crate::notify::NotifyBook;
+use crate::notify::{self, Alert, Click, Notifier};
 use crate::paths::Paths;
-use crate::platform::{Bridge, SessionTarget};
-use crate::signals::ShutdownFlag;
-use crate::state::filtered_view::FilteredView;
-use crate::state::session::{Session, SessionId, SessionKind};
-use crate::state::prefs::Prefs;
+use crate::platform::Bridge;
 use crate::state::registry::SessionRegistry;
-use crate::tui::preview::PreviewSource;
-use crate::tui::{cards, confirm_kill, confirm_preview, help, preview, rename};
+use crate::state::session::{DiscoverySnapshot, SessionState};
+use crate::terminal::ShutdownFlag;
+use crate::tui::dialog::Dialog;
+use crate::tui::model::{self, Band, Row, RowKey, Said, Status};
 use crate::tui::theme::Theme;
-use crate::workers::discovery::DiscoveryWorker;
+use crate::tui::{Body, DetailView, Footer, Page, View};
+use crate::util::sanitize::Sanitised;
+
+mod dialog;
+mod fleet;
+mod sessions;
+use sessions::WHEEL;
+mod settings;
+mod sync;
 
 /// Lower bound on iteration time. Defends the loop against runaway poll-true
 /// situations (closed stdin returning POLLHUP, etc.) without introducing
 /// noticeable input lag for human typing (50 ms ≈ 20 Hz cap).
 const MIN_LOOP_INTERVAL: Duration = Duration::from_millis(50);
+/// A spinner frame, and how often the screen redraws while one shows.
+const FRAME: Duration = Duration::from_millis(100);
+/// How long a message stays on the bottom line.
+const TOAST: Duration = Duration::from_millis(3500);
+/// How long a row that arrived or was landed on stays lit, in two beats.
+const FLASH: Duration = Duration::from_millis(2200);
 
-/// True when the given fd is attached to a controlling terminal. When Ghostty
-/// (or any host terminal) tears the pty down without delivering SIGHUP, this
-/// is the canary that lets us exit cleanly instead of orphaning.
-fn is_controlling_tty<F: std::os::fd::AsFd>(fd: F) -> bool {
-    nix::unistd::tcgetpgrp(fd.as_fd()).is_ok()
+/// Detect the host terminal, leaving nerve's own tab id where
+/// notification clicks find it.
+fn detect_bridge(paths: &Paths) -> Bridge {
+    let file = paths.focus_file();
+    Bridge::detect(move |id| {
+        let _ = std::fs::write(file, id.to_string());
+    })
 }
 
-/// True once the far side of the pty has closed. When a tmux server or
-/// terminal dies abruptly, macOS keeps the slave as our controlling tty
-/// (`tcgetpgrp` still succeeds) but `poll` reports the hang-up.
-fn is_hung_up<F: std::os::fd::AsFd>(fd: F) -> bool {
-    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-    let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
-    poll(&mut fds, PollTimeout::ZERO).is_ok()
-        && fds[0].revents().is_some_and(|r| r.contains(PollFlags::POLLHUP))
-}
-
-fn stdin_tty_alive() -> bool {
-    let stdin = std::io::stdin();
-    is_controlling_tty(&stdin) && !is_hung_up(&stdin)
-}
-
-/// How long the main loop gets to notice a lost tty on its own before the
-/// watchdog force-exits.
-const WATCHDOG_GRACE: Duration = Duration::from_secs(2);
-
-/// Exit the process when the tty goes away even if the main loop is stuck.
-///
-/// crossterm 0.28/0.29 `try_read` spins forever when `read(2)` on a hung-up
-/// tty returns `Ok(0)`, so `event::poll` never returns and the loop's own
-/// tty check is never reached — the orphaned process (reparented to
-/// launchd) pins a core indefinitely. This thread doesn't depend on
-/// crossterm returning. It acts only on tty loss: with the tty gone there's
-/// no terminal state worth restoring, whereas exiting on a mere shutdown
-/// signal could leave a live terminal in raw mode. The flock is released by
-/// the kernel on exit.
-fn spawn_tty_watchdog() {
-    let spawned = std::thread::Builder::new()
-        .name("nerve-tty-watchdog".into())
-        .spawn(|| {
-            let mut lost_since: Option<std::time::Instant> = None;
-            loop {
-                std::thread::sleep(Duration::from_millis(500));
-                if stdin_tty_alive() {
-                    lost_since = None;
-                    continue;
-                }
-                let since = *lost_since.get_or_insert_with(std::time::Instant::now);
-                if since.elapsed() >= WATCHDOG_GRACE {
-                    log_info!("app: main loop unresponsive after losing tty; forcing exit");
-                    std::process::exit(0);
-                }
-            }
-        });
-    if let Err(e) = spawned {
-        crate::log_warn!("app: tty watchdog failed to start: {e}");
-    }
-}
-
-/// Best-effort clipboard write. Tries each platform tool in turn
-/// (Wayland, then X11 on Linux) and returns false if none worked.
-fn copy_to_clipboard(text: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    const TOOLS: &[&[&str]] = &[&["pbcopy"]];
-    #[cfg(not(target_os = "macos"))]
-    const TOOLS: &[&[&str]] = &[
-        &["wl-copy"],
-        &["xclip", "-selection", "clipboard"],
-        &["xsel", "--clipboard", "--input"],
-    ];
-    TOOLS.iter().any(|argv| pipe_to(argv, text))
-}
-
-fn pipe_to(argv: &[&str], text: &str) -> bool {
-    use std::io::Write;
-    let Ok(mut child) = std::process::Command::new(argv[0])
-        .args(&argv[1..])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    let wrote = child
-        .stdin
-        .take()
-        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    child.wait().is_ok_and(|s| s.success()) && wrote
-}
-
-/// Free function so preview-overlay constructors don't have to
-/// borrow `&mut self` just to read a transcript tail.
-fn load_log_entries(
-    jsonl_path: &Option<std::path::PathBuf>,
-) -> Vec<crate::state::log_entry::LogEntry> {
-    match jsonl_path {
-        Some(jp) => jsonl::read_tail_entries(jp, 50),
-        None => Vec::new(),
-    }
-}
-
-use crate::tui::status::StatusMessage;
-#[cfg(test)]
-use crate::util::sanitize::Sanitised;
-
-enum Overlay {
-    None,
-    Help,
-    Search,
-    Rename(String),
-    /// The variant owns its content so closing the overlay drops
-    /// the captured buffer with it — nothing stale hangs around on
-    /// `App` after the user dismisses preview.
-    Preview {
-        scroll: usize,
-        source: PreviewSource,
+/// A question on the bottom line, answered with `y`.
+enum Confirm {
+    Stop {
+        key: RowKey,
+        label: String,
     },
-    ConfirmKill { name: String, id: SessionId, kind: SessionKind, root: std::path::PathBuf },
-    ConfirmPreview,
-    /// Full details of one session, read live each frame. Held by id so a
-    /// re-sort can't swap in another session under the user.
-    Details { id: SessionId },
+    /// Capturing a screen briefly switches tabs; `d` stops asking.
+    Capture {
+        key: RowKey,
+    },
+    /// Stop syncing a folder on this device.
+    StopSync {
+        name: String,
+        path: String,
+    },
+    /// Drop a device from every device.
+    Forget {
+        device: String,
+    },
 }
 
-mod discovery;
-mod input;
-mod overlays;
+/// What is on screen and where the cursor is: everything a fresh app
+/// starts empty.
+#[derive(Default)]
+struct Ui {
+    page: Page,
+    /// The session under the cursor, by identity.
+    cur: Option<RowKey>,
+    /// Its panel is open.
+    open: bool,
+    /// The prompt being typed into the panel.
+    compose: Option<crate::tui::editor::Editor>,
+    find: Option<String>,
+    finding: bool,
+    toast: Option<(String, Instant)>,
+    confirm: Option<Confirm>,
+    flash: Option<(RowKey, Instant)>,
+    dialog: Option<Dialog>,
+    settings_cursor: usize,
+    settings_col: u8,
+    /// The folder under the cursor on the Sync page.
+    sync_cursor: usize,
+    /// Lines the panel is scrolled up, and the session it is for.
+    scroll: Cell<usize>,
+    scroll_for: Option<RowKey>,
+    screen: Option<(RowKey, Vec<String>)>,
+    /// An answer on its way: shown under the question until it resolves.
+    sending: Option<(RowKey, String, Instant)>,
+    /// A notification click waiting for its session to show up.
+    landing: Option<(RowKey, Instant)>,
+    /// Sessions asked of a device, until it reports them.
+    starting: Vec<fleet::Starting>,
+    /// The open session last told to the sync agent: (device, session).
+    viewing: Option<(String, String)>,
+    /// Each row's group last frame, to light up rows that start needing you.
+    seen_bands: HashMap<RowKey, Band>,
+    /// The screen's width at the last draw, to place mouse events.
+    width: u16,
+    /// The window title last set, so it is only written on change.
+    title: String,
+}
 
 pub(crate) struct App {
     paths: Paths,
     shutdown: ShutdownFlag,
     config: Config,
     registry: SessionRegistry,
-    filtered: FilteredView,
-    /// Discovery runs on its own thread; the UI never blocks on
-    /// `ps -eo` forks or slow JSONL reads. We drain the latest
-    /// snapshot per tick via `try_recv`.
+    /// Discovery runs on its own thread; the UI never blocks on `ps -eo`
+    /// forks or slow JSONL reads.
     discovery: DiscoveryWorker,
-    /// True while the host terminal has focus. The render is the
-    /// expensive part of a tick; when unfocused we skip it and let
-    /// the discovery worker keep the registry warm for when we
-    /// come back.
+    /// While the host terminal is in the background nerve skips drawing
+    /// and the worker keeps the registry warm.
     focused: bool,
     claude_installed: bool,
-    /// Built-ins followed by anything loaded from
-    /// `~/.config/nerve/themes/*.toml`. Cycle order is deterministic.
     themes: Vec<Theme>,
-    theme: Theme,
     theme_index: usize,
     bridge: Bridge,
-    selected: usize,
-    cols: usize,
-    overlay: Overlay,
-    search_query: Option<String>,
-    status_message: Option<StatusMessage>,
-    should_quit: bool,
-    notifier: Notifier,
     prefs: Prefs,
-    visited_session: Option<String>,
-    update_banner: Option<String>,
-    /// Eviction sweep cadence — `remove_stale` only does work once
-    /// per minute (the grace window), so running it every tick at
-    /// 200 sessions was clear waste.
-    last_stale_sweep: std::time::Instant,
-    /// Set once after surfacing the "discovery worker stopped" banner
-    /// so we don't re-overwrite a fresh status message on every tick.
+    /// Shows this device's notifications when no sync agent does.
+    notifier: Notifier,
+    /// Who hears about what, when there is no sync agent to keep it.
+    book: NotifyBook,
+    /// This device's name.
+    me: String,
+    ui: Ui,
+    /// Local transcripts read so far, so a session opens on the last
+    /// one at once while discovery reads it again.
+    transcripts: HashMap<PathBuf, Vec<Said>>,
+    /// The transcript the open session wants.
+    transcript_path: Option<PathBuf>,
+    rows: Vec<Row>,
+    /// When the app started: the spinner turns by the clock.
+    epoch: Instant,
+    last_tick: Instant,
+    last_stale_sweep: Instant,
+    /// Set once the "discovery stopped" message has shown.
     discovery_warned: bool,
     /// Outcomes of slow external actions (`claude stop`, SIGTERM via a
-    /// fresh `ps`) run off the UI thread; drained into the status bar.
-    action_tx: std::sync::mpsc::Sender<StatusMessage>,
-    action_rx: std::sync::mpsc::Receiver<StatusMessage>,
+    /// fresh `ps`), run off the UI thread.
+    action_tx: std::sync::mpsc::Sender<String>,
+    action_rx: std::sync::mpsc::Receiver<String>,
+    should_quit: bool,
+    /// Cross-device sync agent, once this device is connected.
+    sync: Option<crate::sync::agent::AgentHandle>,
+    /// The agent's view as of this tick.
+    agent: crate::sync::agent::SyncView,
+    /// A worker connecting this device, when one runs.
+    conn: Option<std::sync::mpsc::Receiver<fleet::ConnEvent>>,
+    remote: fleet::Remote,
 }
 
 impl App {
     pub(crate) fn new(paths: Paths, shutdown: ShutdownFlag) -> Self {
         let config = Config::load(&paths);
-        let themes_dir = paths.themes_dir();
-        let themes = Theme::catalog(Some(&themes_dir));
-        let theme_name = &config.appearance.theme;
-        let theme_index = themes
-            .iter()
-            .position(|t| t.name.as_str() == theme_name.as_str())
-            .unwrap_or(0);
-        let theme = themes[theme_index].clone();
-        let bridge = Bridge::auto_detect();
-        let terminal_app = match &bridge {
-            #[cfg(target_os = "macos")]
-            Bridge::Ghostty(_) => Some("Ghostty".to_string()),
-            _ => None,
-        };
-        let notifier = Notifier::new(config.notifications.clone(), terminal_app);
         let prefs = Prefs::load(&paths);
-
+        let themes = Theme::catalog(Some(&paths.themes_dir()));
+        let wanted = prefs.theme.clone().unwrap_or_else(|| config.appearance.theme.clone());
+        let theme_index = themes.iter().position(|t| t.name.as_str() == wanted).unwrap_or(0);
+        let bridge = detect_bridge(&paths);
         crate::updater::maybe_check_in_background(&paths, config.updates.check_on_launch);
-        // Banner suppression uses `is_newer`'s dot-separated u32
-        // compare (not strict semver): a yanked release that reverts
-        // `pending_update` to a version older than the one the user
-        // dismissed shouldn't re-open the banner.
-        let update_banner = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"))
-            .filter(|v| match prefs.dismissed_update_version.as_deref() {
-                Some(dismissed) => crate::updater::is_newer(v, dismissed),
-                None => true,
-            });
-        // Merge config + prefs load errors so neither gets clobbered if
-        // both files are malformed. Joined with " | " — the status bar
-        // is one line, so two short messages on one line beats losing one.
-        let load_errors: Vec<&str> = [&config.load_error, &prefs.load_error]
+        let update = crate::updater::pending_update(&paths, env!("CARGO_PKG_VERSION"));
+        let first_message = [config.load_error.clone(), prefs.load_error.clone()]
             .into_iter()
-            .filter_map(|o| o.as_deref())
-            .collect();
-        let status_message = if load_errors.is_empty() {
-            None
-        } else {
-            Some(StatusMessage::error(load_errors.join(" | ")))
-        };
+            .flatten()
+            .next()
+            .or_else(|| update.map(|v| format!("nerve {v} is out. Run nerve update to get it.")));
+
+        let sync = crate::sync::start_for_tui(&paths, config.notifications.sound);
+        let me = sync.as_ref().map(|h| h.snapshot().me).unwrap_or_else(crate::util::hostname);
 
         let (action_tx, action_rx) = std::sync::mpsc::channel();
         let claude_roots = crate::detect::claude_roots();
         let claude_installed = claude_roots.iter().any(|r| r.exists());
-
-        let refresh_interval =
-            Duration::from_millis(config.general.refresh_interval_ms);
-        let process_scan_interval =
-            Duration::from_millis(config.general.process_scan_interval_ms);
-        let discovery = crate::workers::discovery::spawn(
-            refresh_interval,
-            process_scan_interval,
+        let discovery = crate::detect::worker::spawn(
+            Duration::from_millis(config.general.refresh_interval_ms),
+            Duration::from_millis(config.general.process_scan_interval_ms),
             claude_roots.iter().map(|r| r.join("sessions")).collect(),
             paths.statusline_dir(),
+            paths.land_file(),
             shutdown.clone(),
         )
         .expect("discovery worker must start");
 
         Self {
+            notifier: Notifier::new(config.notifications.sound),
+            book: NotifyBook::load(paths.config_dir()),
+            ui: Ui { toast: first_message.map(|m| (m, Instant::now() + Duration::from_secs(5))), ..Ui::default() },
             paths,
             shutdown,
             config,
             registry: SessionRegistry::new(),
-            filtered: FilteredView::new(),
             discovery,
             focused: true,
             claude_installed,
             themes,
-            theme,
             theme_index,
             bridge,
-            selected: 0,
-            cols: 2,
-            overlay: Overlay::None,
-            search_query: None,
-            status_message,
-            should_quit: false,
-            notifier,
             prefs,
-            visited_session: None,
-            update_banner,
-            last_stale_sweep: std::time::Instant::now(),
+            me,
+            transcripts: HashMap::new(),
+            transcript_path: None,
+            rows: Vec::new(),
+            epoch: Instant::now(),
+            last_tick: Instant::now(),
+            last_stale_sweep: Instant::now(),
             discovery_warned: false,
             action_tx,
             action_rx,
+            should_quit: false,
+            sync,
+            agent: Default::default(),
+            conn: None,
+            remote: Default::default(),
         }
+    }
+
+    fn theme(&self) -> &Theme {
+        &self.themes[self.theme_index]
+    }
+
+    /// A message on the bottom line for a few seconds.
+    fn say(&mut self, text: impl Into<String>) {
+        self.ui.toast = Some((text.into(), Instant::now() + TOAST));
     }
 
     /// Run a slow external action on its own thread so a wedged CLI can't
-    /// freeze the UI. `pending` shows until the outcome arrives.
-    fn run_action(&mut self, pending: String, action: impl FnOnce() -> StatusMessage + Send + 'static) {
-        self.set_status_info(pending);
+    /// freeze the UI; its outcome comes back as a message.
+    fn run_action(&mut self, pending: String, action: impl FnOnce() -> String + Send + 'static) {
+        self.say(pending);
         let tx = self.action_tx.clone();
-        let spawned = std::thread::Builder::new()
-            .name("nerve-action".into())
-            .spawn(move || {
-                let _ = tx.send(action());
-            });
+        let spawned = std::thread::Builder::new().name("nerve-action".into()).spawn(move || {
+            let _ = tx.send(action());
+        });
         if let Err(e) = spawned {
-            self.set_status_error(format!("could not start action: {e}"));
+            self.say(format!("Could not start that: {e}"));
         }
-    }
-
-    fn drain_action_results(&mut self) {
-        while let Ok(msg) = self.action_rx.try_recv() {
-            self.status_message = Some(msg);
-        }
-    }
-
-    fn set_status_info(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage::info(text));
-    }
-
-    fn set_status_error(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage::error(text));
     }
 
     /// Floor each loop iteration to `MIN_LOOP_INTERVAL` so a runaway
     /// poll-true (closed stdin returning `POLLHUP`, etc.) can't burn
     /// CPU at MHz rates.
-    fn floor_iteration(&self, loop_start: std::time::Instant) {
+    fn floor_iteration(&self, loop_start: Instant) {
         let elapsed = loop_start.elapsed();
         if elapsed < MIN_LOOP_INTERVAL {
             std::thread::sleep(MIN_LOOP_INTERVAL - elapsed);
         }
     }
 
-    /// Unfocused tick: drain pending events so focus/quit/signal
-    /// flags stay fresh and pump discovery once, but skip the entire
-    /// draw path. With the FS watcher driving the worker, idle CPU
-    /// drops to near zero.
-    fn tick_unfocused(&mut self) -> std::io::Result<()> {
-        // Drain any queued events so a FocusGained or quit keystroke
-        // arrives promptly when the user comes back. Block up to a
-        // beat so we don't busy-poll while hidden.
-        if event::poll(Duration::from_millis(250))? {
-            match event::read()? {
-                Event::Key(key) => self.handle_key(key.code, key.modifiers),
-                Event::FocusGained => self.focused = true,
-                Event::FocusLost => self.focused = false,
-                _ => {}
-            }
+    pub(crate) fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        crate::terminal::spawn_tty_watchdog();
+        // Seed from the worker's first snapshot so the first frame isn't
+        // blank; it usually arrives within 50–100 ms.
+        if let Some(scan) = self.discovery.first_sessions(Duration::from_millis(500)) {
+            self.take_scan(scan);
         }
         self.tick();
-        Ok(())
-    }
 
-    pub(crate) fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
-        spawn_tty_watchdog();
-
-        // Seed the registry from the worker's first snapshot so the
-        // initial paint isn't blank. Generous 500 ms cap — in practice
-        // the worker produces its first snapshot in ~50-100 ms on a
-        // warm laptop. Past this point all reads are non-blocking.
-        if let Some(snap) = self
-            .discovery
-            .next_snapshot_blocking(Duration::from_millis(500))
-        {
-            let pending = self.apply_discovery(snap);
-            self.dispatch_notifications(pending);
-        }
-
-        while !self.should_quit && !self.shutdown.requested() && stdin_tty_alive() {
-            let loop_start = std::time::Instant::now();
-            // Hoist preview scroll so the draw closure can take `&mut`
-            // without conflicting with the `&self.overlay` borrow it
-            // also needs. The new value is written back after draw.
-            let mut preview_scroll = match &self.overlay {
-                Overlay::Preview { scroll, .. } => *scroll,
-                _ => 0,
+        while !self.should_quit && !self.shutdown.requested() && crate::terminal::tty_alive() {
+            let loop_start = Instant::now();
+            if self.focused {
+                self.draw(terminal)?;
+            }
+            let refresh = Duration::from_millis(self.config.general.refresh_interval_ms);
+            let wait = match (self.focused, self.animating()) {
+                (false, _) => Duration::from_millis(250),
+                (true, true) => FRAME.min(refresh),
+                (true, false) => refresh,
             };
-
-            // Skip the draw when unfocused — the terminal is showing
-            // whatever's underneath us, and the worker keeps the
-            // registry warm for when we come back.
-            if !self.focused {
-                self.tick_unfocused()?;
-                self.floor_iteration(loop_start);
-                continue;
-            }
-
-            // Refresh the cached FilteredView before drawing. On
-            // steady state (registry version + query unchanged)
-            // this is one comparison; only mutations or query
-            // keystrokes trigger a rebuild.
-            self.filtered
-                .refresh(&self.registry, self.search_query.as_deref());
-
-            terminal.draw(|frame| {
-                let area = frame.area();
-                // Mirror cards::render_cards thresholds so h/l
-                // navigation matches the rendered layout.
-                self.cols = match area.width {
-                    0..80 => 1,
-                    80..160 => 2,
-                    _ => 3,
-                };
-
-                let visible: Vec<&Session> = self.filtered.iter(&self.registry).collect();
-
-                cards::render(
-                    frame,
-                    area,
-                    cards::RenderContext {
-                        registry: &self.registry,
-                        sessions: &visible,
-                        selected: self.selected,
-                        theme: &self.theme,
-                        status_message: self.status_message.as_ref(),
-                        notifications_muted: self.prefs.notifications_muted,
-                        update_banner: self.update_banner.as_deref(),
-                        search_query: self.search_query.as_deref(),
-                        claude_installed: self.claude_installed,
-                    },
-                );
-                match &self.overlay {
-                    Overlay::Help => help::render(frame, &self.theme),
-                    Overlay::Rename(buf) => rename::render(frame, &self.theme, buf),
-                    Overlay::Search => {
-                        let query = self.search_query.as_deref().unwrap_or("");
-                        let search_area = crate::tui::centered(frame.area(), 60, 4);
-                        frame.render_widget(ratatui::widgets::Clear, search_area);
-                        let block = ratatui::widgets::Block::default()
-                            .title(ratatui::text::Span::styled(
-                                format!(" search  ({} matches) ", visible.len()),
-                                ratatui::style::Style::default()
-                                    .fg(self.theme.processing)
-                                    .add_modifier(ratatui::style::Modifier::BOLD),
-                            ))
-                            .borders(ratatui::widgets::Borders::ALL)
-                            .border_type(ratatui::widgets::BorderType::Rounded)
-                            .border_style(ratatui::style::Style::default().fg(self.theme.processing));
-                        let inner = block.inner(search_area);
-                        frame.render_widget(block, search_area);
-                        let display = if query.is_empty() {
-                            " type to search (name, dir, path)... "
-                        } else {
-                            query
-                        };
-                        // Make the match semantics visible — users wondered
-                        // whether the match was substring vs fuzzy and whether
-                        // case mattered. Now they can see.
-                        let lines = vec![
-                            ratatui::text::Line::from(ratatui::text::Span::styled(
-                                format!("/{display}"),
-                                ratatui::style::Style::default().fg(self.theme.text),
-                            )),
-                            ratatui::text::Line::from(vec![
-                                ratatui::text::Span::styled(
-                                    " fuzzy · case-insensitive  ",
-                                    ratatui::style::Style::default()
-                                        .fg(self.theme.muted)
-                                        .add_modifier(ratatui::style::Modifier::DIM),
-                                ),
-                                ratatui::text::Span::styled(
-                                    "[Enter] keep  [Esc] clear",
-                                    ratatui::style::Style::default().fg(self.theme.muted),
-                                ),
-                            ]),
-                        ];
-                        frame.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
-                    }
-                    Overlay::Preview { source, .. } => {
-                        if let Some(session) = visible.get(self.selected) {
-                            preview::render(
-                                frame,
-                                &self.theme,
-                                session,
-                                source,
-                                &mut preview_scroll,
-                            );
-                        }
-                    }
-                    Overlay::ConfirmKill { ref name, kind, .. } => {
-                        confirm_kill::render(frame, &self.theme, name, *kind);
-                    }
-                    Overlay::ConfirmPreview => {
-                        confirm_preview::render(frame, &self.theme);
-                    }
-                    Overlay::Details { id } => {
-                        if let Some(session) = visible.iter().find(|s| s.id == *id) {
-                            crate::tui::details::render(frame, &self.theme, session);
-                        }
-                    }
-                    Overlay::None => {}
-                }
-            })?;
-
-            // Write back the (possibly clamped) scroll position.
-            if let Overlay::Preview { scroll, .. } = &mut self.overlay {
-                *scroll = preview_scroll;
-            }
-
-            if event::poll(Duration::from_millis(self.config.general.refresh_interval_ms))? {
+            if event::poll(wait)? {
                 match event::read()? {
-                    Event::Key(key) => self.handle_key(key.code, key.modifiers),
+                    ev @ (Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) => {
+                        self.handle_event(ev);
+                        // Fast typing arrives as many keys at once, a
+                        // wheel turn as many scrolls: take them all
+                        // before drawing again.
+                        while event::poll(Duration::ZERO)? {
+                            self.handle_event(event::read()?);
+                        }
+                        self.rebuild();
+                    }
                     Event::FocusGained => {
                         self.focused = true;
-                        if let Some(name) = self.visited_session.take() {
-                            self.set_status_info(format!("returned from '{name}'"));
-                        }
-                        // If we started with NoOp (TERM_PROGRAM
-                        // wasn't recognised at launch) but the user
-                        // has since moved nerve into a supported
-                        // terminal, pick it up on focus-gain rather
-                        // than requiring a relaunch.
+                        // Started outside a supported terminal and moved
+                        // into one since: pick it up now.
                         if !self.bridge.is_active() {
-                            self.bridge = Bridge::auto_detect();
+                            self.bridge = detect_bridge(&self.paths);
                         }
                     }
-                    Event::FocusLost => {
-                        self.focused = false;
-                    }
+                    Event::FocusLost => self.focused = false,
                     Event::Resize(_, _) => {
-                        // Coalesce burst Resize events that fire
-                        // during a window-edge drag — drain every
-                        // queued resize so we render once per drag
-                        // tick, not once per pixel.
+                        // Coalesce a window-edge drag into one redraw.
                         while event::poll(Duration::from_millis(0))? {
                             if !matches!(event::read()?, Event::Resize(_, _)) {
                                 break;
                             }
                         }
                     }
-                    _ => {}
                 }
-            } else {
-                self.tick();
             }
-
+            // Discovery is drained every pass, so a transcript shows the
+            // moment it is read; the rest waits for the refresh tick.
+            if self.last_tick.elapsed() >= refresh {
+                self.tick();
+            } else if self.drain() {
+                self.rebuild();
+            }
+            self.share_viewing();
             self.floor_iteration(loop_start);
         }
 
-        if !stdin_tty_alive() {
+        // Straight to the spool: a viewing TUI's agent dies with it before
+        // it could pass the request on.
+        if self.sync.is_some() && self.ui.viewing.is_some() {
+            let (dir, id) = (crate::sync::fleet::sync_dir(&self.paths), crate::sync::protocol::new_id());
+            let _ = crate::sync::ipc::put(&dir, &id, &crate::sync::agent::Request::Viewing(None));
+        }
+        let _ = std::fs::remove_file(self.paths.focus_file());
+        if !crate::terminal::tty_alive() {
             log_info!("app: lost controlling tty; exiting cleanly");
         } else if self.shutdown.requested() {
             log_info!("app: shutdown signal received; exiting cleanly");
         }
-
         Ok(())
     }
 
-    fn cycle_theme(&mut self) {
-        if self.themes.is_empty() {
-            return;
-        }
-        self.theme_index = (self.theme_index + 1) % self.themes.len();
-        self.theme = self.themes[self.theme_index].clone();
+    /// Something on screen moves: a working or starting session's
+    /// spinner, or the panel waiting for its transcript.
+    fn animating(&self) -> bool {
+        self.ui.page == Page::Sessions
+            && (self.rows.iter().any(|r| matches!(r.status, Status::Working | Status::Starting))
+                || self.transcript_path.as_ref().is_some_and(|p| !self.transcripts.contains_key(p)))
     }
 
-    fn go_to_selected_tab(&mut self) {
-        let Some(session) = self.nth_filtered(self.selected) else {
+    /// Background work for one quiet tick: discovery, the agent's view,
+    /// outcomes of actions, expired messages.
+    fn tick(&mut self) {
+        self.last_tick = Instant::now();
+        self.drain();
+        if self.last_stale_sweep.elapsed() >= Duration::from_secs(5) {
+            self.registry.remove_stale(60);
+            self.last_stale_sweep = Instant::now();
+            // Keep only the transcripts of sessions still here.
+            let live: Vec<&PathBuf> = self.registry.sessions().filter_map(|s| s.jsonl_path.as_ref()).collect();
+            self.transcripts.retain(|p, _| live.contains(&p));
+        }
+        if !self.discovery.is_alive() && !self.discovery_warned {
+            self.say(format!("Session discovery stopped. See {}", self.paths.log_file().display()));
+            self.discovery_warned = true;
+        }
+        if let Some(h) = &self.sync {
+            self.agent = h.snapshot();
+        }
+        self.follow_connect();
+        self.follow_start();
+        self.follow_transcript();
+        let now = Instant::now();
+        if self.ui.toast.as_ref().is_some_and(|(_, until)| now >= *until) {
+            self.ui.toast = None;
+        }
+        self.rebuild();
+    }
+
+    /// Take what discovery and finished actions sent; true if anything
+    /// arrived. Channel reads only, so it runs every pass.
+    fn drain(&mut self) -> bool {
+        let drained = self.discovery.drain();
+        let mut any = drained.sessions.is_some() || drained.transcript.is_some() || drained.land.is_some();
+        if let Some(scan) = drained.sessions {
+            self.take_scan(scan);
+        }
+        if let Some((path, entries)) = drained.transcript {
+            self.transcripts.insert(path, model::conversation(&entries));
+        }
+        if let Some(land) = drained.land {
+            self.land(&land);
+        }
+        while let Ok(msg) = self.action_rx.try_recv() {
+            self.say(msg);
+            any = true;
+        }
+        any
+    }
+
+    /// Apply a discovery scan and show this device's notifications,
+    /// unless a running sync agent does: it knows every device and must
+    /// not double them. One still connecting, or retrying an unreachable
+    /// relay, notifies nobody, so this device's own still show here.
+    fn take_scan(&mut self, scan: Vec<DiscoverySnapshot>) {
+        let pending = self.registry.apply(scan, &self.config.session_names);
+        if self.sync.is_some() && self.agent.running {
             return;
+        }
+        let book = self.notify_book();
+        let prefs = &book.prefs;
+        for note in pending {
+            let why = note.waiting_for.as_ref().map(Sanitised::as_str);
+            let (alert, detail) = match note.state {
+                SessionState::WaitingForInput if prefs.attention_on(&self.me) => {
+                    (Alert::waiting(why), why.unwrap_or("Needs input").to_string())
+                }
+                SessionState::Error if prefs.attention_on(&self.me) => {
+                    (Alert::Failed, why.unwrap_or("Stopped with an error").to_string())
+                }
+                SessionState::Idle
+                    if notify::tell_finished(
+                        book.finished_to(&note.id),
+                        &self.me,
+                        self.open_here().is_some_and(|k| k.device.is_none() && k.id == note.id),
+                    ) =>
+                {
+                    (Alert::Finished, note.name.to_string())
+                }
+                _ => continue,
+            };
+            let click = Click { device: self.me.clone(), session: note.id, focus: self.bridge.own_tab() };
+            self.notifier.send(&alert.title(&self.me), &format!("{}: {detail}", note.project), &click);
+        }
+    }
+
+    /// The session open in nerve while its terminal has focus. Its finished
+    /// turns don't notify this device: you are reading it.
+    fn open_here(&self) -> Option<&RowKey> {
+        self.ui.cur.as_ref().filter(|_| self.focused && self.ui.open && self.ui.page == Page::Sessions)
+    }
+
+    /// Tell the sync agent what `open_here` became, on change only. It may
+    /// be another process (`nerve sync agent`), so the agent notifies.
+    fn share_viewing(&mut self) {
+        let now = self.open_here().map(|k| (k.device.clone().unwrap_or_else(|| self.me.clone()), k.id.clone()));
+        if now == self.ui.viewing {
+            return;
+        }
+        if let Some(h) = &self.sync {
+            h.request(crate::sync::agent::Request::Viewing(now.clone()));
+        }
+        self.ui.viewing = now;
+    }
+
+    /// Rebuild the rows from discovery and the agent's view, keep the
+    /// cursor on its session, and follow the open session's transcript.
+    fn rebuild(&mut self) {
+        let rows: Vec<Row> = {
+            let facts = self.local_facts();
+            self.registry.sessions().map(|s| model::local_row(s, facts.as_ref())).collect()
         };
-
-        // Every per-kind decision for "go to session" lives here; bridges
-        // only ever see terminal sessions.
-        match session.kind {
-            SessionKind::Terminal => {
-                let target = SessionTarget::from(session);
-                match self.bridge.go_to_session(&target) {
-                    Ok(()) => self.visited_session = Some(target.name),
-                    Err(e) => self.set_status_error(e.to_string()),
-                }
+        let rows = [rows, self.peer_rows(), self.start_rows(), self.approval_rows()].concat();
+        // Light up a row the moment it starts needing you.
+        let first = self.ui.seen_bands.is_empty();
+        for r in &rows {
+            let band = r.status.band();
+            let before = self.ui.seen_bands.insert(r.key.clone(), band);
+            if !first && band == Band::Need && before.is_some_and(|b| b != Band::Need) {
+                self.ui.flash = Some((r.key.clone(), Instant::now()));
             }
-            SessionKind::Desktop => {
-                if let Err(e) = crate::platform::focus_desktop_app() {
-                    self.set_status_error(e.to_string());
-                }
+        }
+        self.ui.seen_bands.retain(|k, _| rows.iter().any(|r| r.key == *k));
+        // An answer resolves once the question is gone.
+        if let Some((key, _, at)) = &self.ui.sending {
+            let still_asking = rows.iter().any(|r| r.key == *key && r.ask.is_some());
+            if (!still_asking && at.elapsed() > Duration::from_secs(2)) || at.elapsed() > Duration::from_secs(20) {
+                self.ui.sending = None;
             }
-            SessionKind::Background => {
-                let (id, root) = (session.id.clone(), session.claude_root.clone());
-                self.attach_background(id.as_str(), &root);
+        }
+        self.rows = rows;
+        if let Some((key, at)) = self.ui.landing.take() {
+            if let Some(r) = self.rows.iter().find(|r| r.key == key) {
+                self.ui.open = r.status != Status::Request;
+                self.ui.cur = Some(key.clone());
+                self.ui.flash = Some((key, Instant::now()));
+            } else if at.elapsed() < Duration::from_secs(10) {
+                self.ui.landing = Some((key, at));
             }
+        }
+        let order = self.order();
+        if !self.ui.cur.as_ref().is_some_and(|k| order.contains(k)) {
+            self.ui.cur = order.first().cloned();
+            self.ui.compose = None;
+        }
+        let want = match (&self.ui.cur, self.ui.open && self.ui.page == Page::Sessions) {
+            (Some(k), true) if k.device.is_none() => self.registry.get(&k.id).and_then(|s| s.jsonl_path.clone()),
+            _ => None,
+        };
+        if want != self.transcript_path {
+            self.discovery.want_transcript(want.clone());
+            self.transcript_path = want;
+        }
+        // Another session starts at its newest lines.
+        if self.ui.scroll_for != self.ui.cur {
+            self.ui.scroll.set(0);
+            self.ui.scroll_for = self.ui.cur.clone();
         }
     }
 
-    /// Background sessions have no tab to jump to: open `claude attach`
-    /// in a split where the terminal allows it, else hand the user the
-    /// command on the clipboard.
-    fn attach_background(&mut self, session_id: &str, root: &std::path::Path) {
-        // One shell-quoted string: tmux hands a single argument to the
-        // shell, and the same text is what the user would paste.
-        let cmd = crate::detect::claude::attach_command(session_id, root);
-        let job = crate::detect::claude::job_id(session_id);
-        match self.bridge.open_command(&[&cmd]) {
-            Ok(true) => self.set_status_info(format!("attached to background job {job}")),
-            Ok(false) => {
-                if copy_to_clipboard(&cmd) {
-                    self.set_status_info(format!("copied `{cmd}` — paste it in any terminal"));
+    /// Row keys in screen order, after the find filter.
+    fn order(&self) -> Vec<RowKey> {
+        model::arrange(&self.rows, self.ui.find.as_deref())
+            .into_iter()
+            .flat_map(|(_, rows)| rows.into_iter().map(|r| r.key.clone()))
+            .collect()
+    }
+
+    fn row(&self, key: &RowKey) -> Option<&Row> {
+        self.rows.iter().find(|r| r.key == *key)
+    }
+
+    fn cur_row(&self) -> Option<&Row> {
+        self.ui.cur.as_ref().and_then(|k| self.row(k))
+    }
+
+    /// A notification click: `<device>/<session>`.
+    fn land(&mut self, land: &str) {
+        let Some((device, id)) = land.split_once('/') else { return };
+        let key = RowKey { device: (device != self.me).then(|| device.to_string()), id: id.to_string() };
+        self.ui.page = Page::Sessions;
+        self.ui.dialog = None;
+        self.ui.confirm = None;
+        self.ui.find = None;
+        self.ui.finding = false;
+        self.ui.landing = Some((key, Instant::now()));
+    }
+}
+
+impl App {
+    pub(super) fn handle_event(&mut self, ev: Event) {
+        match ev {
+            Event::Key(k) => self.handle_key(k.code, k.modifiers),
+            Event::Paste(text) => self.paste(&text),
+            // The wheel scrolls the transcript under the pointer, and
+            // moves through lists everywhere else, as arrows would.
+            Event::Mouse(m) => {
+                let up = match m.kind {
+                    MouseEventKind::ScrollUp => true,
+                    MouseEventKind::ScrollDown => false,
+                    _ => return,
+                };
+                let free = self.ui.dialog.is_none()
+                    && self.ui.confirm.is_none()
+                    && self.ui.compose.is_none()
+                    && !self.ui.finding;
+                if free
+                    && self.ui.page == Page::Sessions
+                    && self.ui.open
+                    && crate::tui::sessions::over_panel(self.ui.width, m.column)
+                {
+                    self.scroll_by(if up { WHEEL as isize } else { -(WHEEL as isize) });
                 } else {
-                    self.set_status_info(format!("run `{cmd}` in any terminal"));
+                    self.handle_key(if up { KeyCode::Up } else { KeyCode::Down }, KeyModifiers::NONE);
                 }
             }
-            Err(e) => self.set_status_error(e.to_string()),
+            _ => {}
         }
     }
 
-    /// Refresh the cached `FilteredView` against the current registry +
-    /// search query, then clamp `selected` to the new visible count.
-    /// Call whenever the filter result may have shrunk: keystroke, sort,
-    /// rename, refresh.
-    fn apply_filter(&mut self) {
-        self.filtered
-            .refresh(&self.registry, self.search_query.as_deref());
-        let count = self.filtered.len();
-        if count == 0 {
-            self.selected = 0;
-        } else if self.selected >= count {
-            self.selected = count - 1;
+    pub(super) fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Ctrl+C always quits, whatever is open. Both cases, so Caps Lock
+        // or Shift can't defeat it.
+        if matches!(code, KeyCode::Char('c' | 'C')) && modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return;
+        }
+        if let Some(c) = self.ui.confirm.take() {
+            self.confirm_key(c, code);
+            return;
+        }
+        if self.ui.dialog.is_some() {
+            self.dialog_key(code, modifiers);
+            return;
+        }
+        if self.ui.finding {
+            self.find_key(code);
+            return;
+        }
+        if self.ui.compose.is_some() {
+            self.compose_key(code, modifiers);
+            return;
+        }
+        match code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                let i = Page::ALL.iter().position(|p| *p == self.ui.page).unwrap_or(0);
+                let n = Page::ALL.len();
+                self.ui.page = Page::ALL[if code == KeyCode::Tab { (i + 1) % n } else { (i + n - 1) % n }];
+                return;
+            }
+            KeyCode::Char('?') => {
+                self.ui.dialog = Some(Dialog::Keys);
+                return;
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+                return;
+            }
+            _ => {}
+        }
+        match self.ui.page {
+            Page::Sessions => self.sessions_key(code),
+            Page::Sync => self.sync_key(code),
+            Page::Settings => self.settings_key(code),
         }
     }
 
-    fn num_filtered(&self) -> usize {
-        self.filtered.len()
+    /// Draw a frame. Until nerve has found its own Ghostty tab, the window
+    /// title is the probe's marker.
+    pub(super) fn draw(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        self.ui.width = terminal.size()?.width;
+        let need = self.rows.iter().filter(|r| r.status.band() == Band::Need).count();
+        let title = match self.bridge.probe_title() {
+            Some(marker) => marker.to_string(),
+            None if need > 0 => format!("({need}) nerve"),
+            None => "nerve".to_string(),
+        };
+        if title != self.ui.title {
+            crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title))?;
+            if self.bridge.probe_title().is_some() {
+                self.bridge.title_shown();
+            }
+            self.ui.title = title;
+        }
+        let bands = model::arrange(&self.rows, self.ui.find.as_deref());
+        let body = self.body();
+        let footer = self.footer(&body);
+        let now = Instant::now();
+        let flash = self
+            .ui
+            .flash
+            .as_ref()
+            .filter(|(_, at)| now.duration_since(*at) < FLASH)
+            .map(|(k, at)| (k, now.duration_since(*at) > FLASH / 2));
+        let screen =
+            self.ui.screen.as_ref().filter(|(k, _)| Some(k) == self.ui.cur.as_ref()).map(|(_, l)| l.as_slice());
+        let sending =
+            self.ui.sending.as_ref().filter(|(k, ..)| Some(k) == self.ui.cur.as_ref()).map(|(_, s, _)| s.as_str());
+        let view = View {
+            theme: self.theme(),
+            page: self.ui.page,
+            me: &self.me,
+            others_online: self.others_online(),
+            rows: &self.rows,
+            bands: &bands,
+            cur: self.ui.cur.as_ref(),
+            open: self.ui.open,
+            find: self.ui.find.as_deref(),
+            flash,
+            spin: (self.epoch.elapsed().as_millis() / FRAME.as_millis()) as usize,
+            detail: DetailView {
+                transcript: match self.cur_row() {
+                    Some(r) if matches!(r.status, Status::Starting | Status::NotStarted) => None,
+                    Some(r) if !r.is_local() => self.remote_transcript(&r.key),
+                    _ => match &self.transcript_path {
+                        Some(p) => self.transcripts.get(p).map(Vec::as_slice),
+                        None => Some(&[]),
+                    },
+                },
+                scroll: &self.ui.scroll,
+                screen,
+                compose: self.ui.compose.as_ref(),
+                sending,
+                can_compose: self.can_compose(),
+            },
+            body,
+            footer,
+            dialog: self.ui.dialog.as_ref(),
+        };
+        terminal.draw(|frame| crate::tui::draw(frame, &view))?;
+        Ok(())
     }
 
-    fn nth_filtered(&self, index: usize) -> Option<&Session> {
-        self.filtered.get(&self.registry, index)
+    /// The page being shown, built from the app's state.
+    pub(super) fn body(&self) -> Body<'_> {
+        match self.ui.page {
+            Page::Sessions => Body::Sessions,
+            Page::Sync => Body::Sync(self.sync_page()),
+            Page::Settings => Body::Settings(self.settings_view()),
+        }
     }
 
+    pub(super) fn footer(&self, body: &Body) -> Footer {
+        if let Some(c) = &self.ui.confirm {
+            return match c {
+                Confirm::Stop { label, .. } => Footer::Confirm {
+                    text: format!("Stop {label}?"),
+                    hints: vec![("y", "Stop".into()), ("Any other key", "Cancel".into())],
+                },
+                Confirm::Capture { .. } => Footer::Confirm {
+                    text: "Capturing switches to its tab for a moment.".into(),
+                    hints: vec![
+                        ("y", "Capture".into()),
+                        ("d", "Don't ask again".into()),
+                        ("Any other key", "Cancel".into()),
+                    ],
+                },
+                Confirm::StopSync { path, .. } => Footer::Confirm {
+                    text: format!("Stop syncing {path}?"),
+                    hints: vec![("y", "Stop syncing".into()), ("Any other key", "Cancel".into())],
+                },
+                Confirm::Forget { device } => Footer::Confirm {
+                    text: format!("Forget {device}? None of your devices will trust it."),
+                    hints: vec![("y", "Forget".into()), ("Any other key", "Cancel".into())],
+                },
+            };
+        }
+        if self.ui.finding {
+            return Footer::Find(self.ui.find.clone().unwrap_or_default());
+        }
+        if let Some((t, _)) = &self.ui.toast {
+            return Footer::Toast(t.clone());
+        }
+        if self.ui.dialog.is_some() {
+            return Footer::Hints(Vec::new());
+        }
+
+        Footer::Hints(match body {
+            Body::Sync(page) => Self::sync_hints(page),
+            Body::Settings(view) => self.settings_hints(view),
+            Body::Sessions => self.sessions_hints(),
+        })
+    }
 }
 
 #[cfg(test)]
 impl App {
     /// App with no worker thread, update check, or terminal detection,
-    /// seeded through the same `apply_discovery` path production uses.
-    fn for_test(bridge: Bridge, snaps: Vec<crate::state::session::DiscoverySnapshot>) -> Self {
-        let themes = Theme::catalog(None);
+    /// seeded through the registry as production is, without notifying.
+    fn for_test(bridge: Bridge, snaps: Vec<DiscoverySnapshot>) -> Self {
+        let dir = tempfile::tempdir().unwrap().keep();
         let (action_tx, action_rx) = std::sync::mpsc::channel();
         let mut app = Self {
-            paths: Paths::for_test(tempfile::tempdir().unwrap().keep()),
+            paths: Paths::at(dir),
             shutdown: ShutdownFlag::for_test(),
             config: Config::default(),
             registry: SessionRegistry::new(),
-            filtered: FilteredView::new(),
             discovery: DiscoveryWorker::idle(),
+            ui: Ui::default(),
             focused: true,
             claude_installed: true,
-            theme: themes[0].clone(),
-            themes,
+            themes: Theme::catalog(None),
             theme_index: 0,
             bridge,
-            selected: 0,
-            cols: 2,
-            overlay: Overlay::None,
-            search_query: None,
-            status_message: None,
-            should_quit: false,
-            notifier: Notifier::new(Default::default(), None),
             prefs: Prefs::default(),
-            visited_session: None,
-            update_banner: None,
-            last_stale_sweep: std::time::Instant::now(),
+            notifier: Notifier::new(false),
+            book: NotifyBook::default(),
+            me: "laptop".into(),
+            transcripts: HashMap::new(),
+            transcript_path: None,
+            rows: Vec::new(),
+            epoch: Instant::now(),
+            last_tick: Instant::now(),
+            last_stale_sweep: Instant::now(),
             discovery_warned: false,
             action_tx,
             action_rx,
+            should_quit: false,
+            sync: None,
+            agent: Default::default(),
+            conn: None,
+            remote: Default::default(),
         };
-        app.apply_discovery(snaps);
-        app.apply_filter();
+        app.scan(snaps);
         app
     }
 
-    fn status_text(&self) -> &str {
-        self.status_message.as_ref().map(|m| m.text.as_str()).unwrap_or("")
+    /// Apply a scan without notifying, then rebuild.
+    fn scan(&mut self, snaps: Vec<DiscoverySnapshot>) {
+        self.registry.apply(snaps, &self.config.session_names);
+        self.rebuild();
+    }
+
+    fn toast_text(&self) -> &str {
+        self.ui.toast.as_ref().map(|(t, _)| t.as_str()).unwrap_or("")
     }
 }
 
 #[cfg(test)]
 mod app_tests {
     use super::*;
-    use crate::state::session::{DiscoverySnapshot, SessionState};
+    use crate::state::session::SessionKind;
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn snap(id: &str, kind: SessionKind, state: SessionState) -> DiscoverySnapshot {
         let mut s = DiscoverySnapshot::for_test(id, state);
         s.kind = kind;
+        s.state_authoritative = true;
         s
     }
 
     fn press(app: &mut App, code: KeyCode) {
         app.handle_key(code, KeyModifiers::NONE);
-    }
-
-    #[test]
-    fn devnull_is_not_a_controlling_tty() {
-        let dev_null = std::fs::File::open("/dev/null").expect("/dev/null open");
-        assert!(!is_controlling_tty(&dev_null));
-    }
-
-    // Regression: SIGKILLing a tmux server orphaned nerve at 100% CPU.
-    // The slave stayed nerve's controlling tty, so the watchdog's
-    // `tcgetpgrp` check never fired; only `poll` sees the hang-up.
-    #[test]
-    fn closed_pty_master_reads_as_hung_up() {
-        use nix::fcntl::OFlag;
-        use nix::pty::{grantpt, posix_openpt, ptsname, unlockpt};
-        let master = posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY).unwrap();
-        grantpt(&master).unwrap();
-        unlockpt(&master).unwrap();
-        let slave_path = unsafe { ptsname(&master) }.unwrap();
-        let slave = std::fs::OpenOptions::new().read(true).write(true).open(slave_path).unwrap();
-        assert!(!is_hung_up(&slave));
-        drop(master);
-        assert!(is_hung_up(&slave));
+        app.rebuild();
     }
 
     // Killing the desktop app's embedded claude from outside leaves the
-    // app showing a dead session; nerve must refuse before any dialog.
+    // app showing a dead session; nerve must refuse before asking.
     #[test]
-    fn kill_refuses_desktop_session() {
-        let mut app = App::for_test(
-            Bridge::NoOp,
-            vec![snap("d1", SessionKind::Desktop, SessionState::Processing)],
-        );
+    fn stop_refuses_a_desktop_session() {
+        let mut app = App::for_test(Bridge::NoOp, vec![snap("d1", SessionKind::Desktop, SessionState::Processing)]);
         press(&mut app, KeyCode::Char('x'));
-        assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.status_text().contains("desktop session"));
+        assert!(app.ui.confirm.is_none());
+        assert!(app.toast_text().contains("Claude app"));
     }
 
-    // The confirm dialog must carry the kind so `y` routes a background
-    // job to `claude stop` (resumable) rather than SIGTERM.
+    // `y` stops; Enter is never the confirming key.
     #[test]
-    fn kill_dialog_carries_session_kind() {
+    fn stop_asks_first_and_enter_cancels() {
         for kind in [SessionKind::Background, SessionKind::Terminal] {
             let mut app = App::for_test(Bridge::NoOp, vec![snap("s1", kind, SessionState::Processing)]);
             press(&mut app, KeyCode::Char('x'));
-            match &app.overlay {
-                Overlay::ConfirmKill { kind: k, .. } => assert_eq!(*k, kind),
-                _ => panic!("no confirm dialog for {kind:?}"),
-            }
-            // Enter is cancel, never confirm.
+            assert!(matches!(app.ui.confirm, Some(Confirm::Stop { .. })), "no question for {kind:?}");
             press(&mut app, KeyCode::Enter);
-            assert!(matches!(app.overlay, Overlay::None));
+            assert!(app.ui.confirm.is_none());
         }
     }
 
-    // P on a non-terminal session must not start a tab-switching screen
-    // capture (or its confirm prompt): there is no pane, and the tmux/
-    // Ghostty cwd fallback would capture an unrelated one.
+    // A session left for days shows as Dormant but is still alive: a
+    // parked job in the daemon, or a claude at a prompt. `x` stops both.
     #[test]
-    fn live_preview_never_captures_for_non_terminal_sessions() {
-        for kind in [SessionKind::Background, SessionKind::Desktop] {
-            let mut app = App::for_test(
-                Bridge::Tmux(crate::platform::tmux::TmuxBridge),
-                vec![snap("s1", kind, SessionState::Idle)],
-            );
-            press(&mut app, KeyCode::Char('P'));
-            assert!(
-                matches!(app.overlay, Overlay::Preview { source: PreviewSource::LogEntries(_), .. }),
-                "{kind:?} opened something other than the log view"
-            );
+    fn a_dormant_session_can_still_be_stopped() {
+        for kind in [SessionKind::Background, SessionKind::Terminal] {
+            let mut app = App::for_test(Bridge::NoOp, vec![snap("s1", kind, SessionState::Dormant)]);
+            press(&mut app, KeyCode::Char('x'));
+            assert!(app.ui.confirm.is_some(), "{kind:?}");
         }
     }
 
-    // Claude's own status needs no debounce: the first observation
-    // must commit and notify. Heuristic states still wait 3 ticks.
+    // The cursor holds a session, not a line: when another session starts
+    // waiting and moves above it, the cursor stays on its own.
     #[test]
-    fn authoritative_state_notifies_on_first_tick() {
+    fn cursor_follows_its_session_across_reorders() {
         let mut app = App::for_test(
             Bridge::NoOp,
-            vec![snap("s1", SessionKind::Terminal, SessionState::Processing)],
+            vec![
+                snap("s1", SessionKind::Terminal, SessionState::Idle),
+                snap("s2", SessionKind::Terminal, SessionState::Idle),
+            ],
         );
-        let mut waiting = snap("s1", SessionKind::Terminal, SessionState::WaitingForInput);
-        waiting.state_authoritative = true;
-        waiting.waiting_for = Some(Sanitised::new("permission prompt"));
-        let pending = app.apply_discovery(vec![waiting]);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].state, SessionState::WaitingForInput);
-        assert_eq!(pending[0].waiting_for.as_ref().map(Sanitised::as_str), Some("permission prompt"));
+        press(&mut app, KeyCode::Char('j'));
+        let held = app.ui.cur.clone().unwrap();
+        press(&mut app, KeyCode::Enter);
+        assert!(app.ui.open);
+        let other = if held.id == "s1" { "s2" } else { "s1" };
+        app.scan(vec![
+            snap(other, SessionKind::Terminal, SessionState::WaitingForInput),
+            snap(&held.id, SessionKind::Terminal, SessionState::Idle),
+        ]);
+        assert_eq!(app.ui.cur.as_ref(), Some(&held));
+        assert_eq!(app.order()[0].id, other, "the waiting session sorts first");
+        assert!(app.ui.flash.as_ref().is_some_and(|(k, _)| k.id == other), "and lights up as it arrives");
+    }
 
+    #[test]
+    fn a_click_lands_on_its_session_with_the_panel_open() {
         let mut app = App::for_test(
             Bridge::NoOp,
-            vec![snap("s1", SessionKind::Terminal, SessionState::Processing)],
+            vec![
+                snap("s1", SessionKind::Terminal, SessionState::Idle),
+                snap("s2", SessionKind::Terminal, SessionState::Idle),
+            ],
         );
-        let heuristic = snap("s1", SessionKind::Terminal, SessionState::WaitingForInput);
-        assert!(app.apply_discovery(vec![heuristic]).is_empty());
+        app.ui.page = Page::Settings;
+        app.land("laptop/s2");
+        app.rebuild();
+        assert_eq!(
+            (app.ui.page, app.ui.open, app.ui.cur.as_ref().map(|k| k.id.as_str())),
+            (Page::Sessions, true, Some("s2"))
+        );
     }
 
-    // A job blocked for days shows as Dormant but still exists in the
-    // daemon; `x` must still stop it. A dormant terminal session can't.
     #[test]
-    fn dormant_background_job_can_still_be_stopped() {
-        let mut app = App::for_test(Bridge::NoOp, vec![snap("b1", SessionKind::Background, SessionState::Dormant)]);
-        press(&mut app, KeyCode::Char('x'));
-        assert!(matches!(app.overlay, Overlay::ConfirmKill { .. }));
-
-        let mut app = App::for_test(Bridge::NoOp, vec![snap("t1", SessionKind::Terminal, SessionState::Dormant)]);
-        press(&mut app, KeyCode::Char('x'));
-        assert!(matches!(app.overlay, Overlay::None));
-    }
-
-    // Regression: details was keyed by list index, so a re-sort swapped
-    // in another session and `c` / Enter acted on it.
-    #[test]
-    fn details_follow_their_session_across_resorts() {
-        let idle = |id| {
-            let mut s = snap(id, SessionKind::Terminal, SessionState::Idle);
-            s.state_authoritative = true;
-            s
+    fn the_wheel_scrolls_the_transcript_under_it_and_moves_the_list_beside_it() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let snaps = (0..30).map(|i| snap(&format!("s{i:02}"), SessionKind::Terminal, SessionState::Idle)).collect();
+        let mut app = App::for_test(Bridge::NoOp, snaps);
+        app.ui.width = 140;
+        let wheel = |app: &mut App, kind, column| {
+            app.handle_event(Event::Mouse(MouseEvent { kind, column, row: 10, modifiers: KeyModifiers::NONE }));
+            app.rebuild();
         };
-        let mut app = App::for_test(Bridge::NoOp, vec![idle("s1"), idle("s2")]);
-        let shown = app.nth_filtered(app.selected).unwrap().id.clone();
-        press(&mut app, KeyCode::Char('i'));
-        assert!(matches!(&app.overlay, Overlay::Details { id } if *id == shown));
+        press(&mut app, KeyCode::Enter);
+        let first = app.ui.cur.clone();
+        wheel(&mut app, MouseEventKind::ScrollUp, 90);
+        wheel(&mut app, MouseEventKind::ScrollUp, 90);
+        assert_eq!(
+            (app.ui.scroll.get(), &app.ui.cur),
+            (6, &first),
+            "over the panel: the transcript scrolls, the cursor stays"
+        );
+        wheel(&mut app, MouseEventKind::ScrollDown, 10);
+        assert_ne!(app.ui.cur, first, "over the list: the cursor moves");
+        assert_eq!(app.ui.scroll.get(), 0, "another session starts at its newest lines");
+        // Every session can be reached and left, both ways.
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.ui.cur.as_ref().map(|k| k.id.as_str()), app.order().last().map(|k| k.id.as_str()));
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Up);
+        }
+        assert_eq!(app.ui.cur, app.order().first().cloned());
+    }
 
-        // The other session starts waiting and sorts above ours.
-        let other = if shown.as_str() == "s1" { "s2" } else { "s1" };
-        let mut waiting = idle(other);
-        waiting.detected_state = SessionState::WaitingForInput;
-        let mine = idle(shown.as_str());
-        app.apply_discovery(vec![waiting, mine]);
-        app.follow_details_session();
-        assert_eq!(app.nth_filtered(app.selected).unwrap().id, shown);
+    #[test]
+    fn a_session_opens_on_its_cached_transcript() {
+        let mut app = App::for_test(Bridge::NoOp, vec![snap("s1", SessionKind::Terminal, SessionState::Idle)]);
+        let path = PathBuf::from("/t/s1.jsonl");
+        app.transcript_path = Some(path.clone());
+        assert!(app.animating(), "the panel waits for its transcript");
+        app.transcripts.insert(path, vec![Said::You("hi".into())]);
+        assert!(!app.animating());
+    }
 
-        // Gone from the list: the overlay closes rather than swallowing keys.
-        app.overlay = Overlay::Details { id: SessionId::new("nope".to_string()) };
-        app.follow_details_session();
-        assert!(matches!(app.overlay, Overlay::None));
+    #[test]
+    fn find_filters_and_esc_clears() {
+        let mut app = App::for_test(Bridge::NoOp, vec![snap("s1", SessionKind::Terminal, SessionState::Idle)]);
+        press(&mut app, KeyCode::Char('/'));
+        for c in "zz".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(app.order().is_empty());
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.order().len(), 1);
+    }
+
+    fn keys(app: &App) -> Vec<&'static str> {
+        match app.footer(&app.body()) {
+            crate::tui::Footer::Hints(h) => h.into_iter().map(|(k, _)| k).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn add_folder_steps_forward_and_esc_goes_back() {
+        use crate::tui::dialog::{Dialog, FolderStep};
+        let mut app = App::for_test(Bridge::NoOp, Vec::new());
+        app.ui.dialog = Some(Dialog::AddFolder {
+            step: FolderStep::Folder,
+            cands: vec![(PathBuf::from("/w/site"), "~/w/site".into(), "site".into())],
+            pick: 0,
+            devices: vec![("laptop".into(), "This device"), ("studio".into(), "")],
+            set: std::collections::BTreeSet::from(["laptop".to_string()]),
+            when: 0,
+            i: 0,
+        });
+        let at = |app: &App| match &app.ui.dialog {
+            Some(Dialog::AddFolder { step, i, .. }) => Some((*step, *i)),
+            _ => None,
+        };
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(at(&app), Some((FolderStep::Devices, 0)));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(at(&app), Some((FolderStep::Devices, 0)), "needs a second device");
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(at(&app), Some((FolderStep::When, 0)));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(at(&app), Some((FolderStep::Rules, 0)));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(at(&app), Some((FolderStep::When, 1)), "back to when, on the choice made");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(at(&app), Some((FolderStep::Folder, 0)));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.ui.dialog.is_none());
+    }
+
+    #[test]
+    fn who_modes_pick_all_now_or_chosen_devices() {
+        use crate::tui::dialog::{Dialog, WhoMode};
+        let mut app = App::for_test(Bridge::NoOp, Vec::new());
+        app.ui.dialog = Some(Dialog::Who {
+            link: Some("phone".into()),
+            devices: vec!["studio".into()],
+            set: std::collections::BTreeSet::new(),
+            mode: WhoMode::AllLater,
+            i: 0,
+        });
+        let at = |app: &App| match &app.ui.dialog {
+            Some(Dialog::Who { mode, i, set, .. }) => Some((*mode, *i, set.len())),
+            _ => None,
+        };
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(at(&app), Some((WhoMode::AllNow, 1, 0)));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(at(&app), Some((WhoMode::Picked, 2, 1)), "a device picks the third mode");
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(at(&app), Some((WhoMode::Picked, 2, 0)), "and toggles off");
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(at(&app), Some((WhoMode::AllLater, 0, 0)));
+    }
+
+    #[test]
+    fn review_types_a_folder_but_jk_move_elsewhere() {
+        use crate::tui::dialog::{Dialog, Landing};
+        let mut app = App::for_test(Bridge::NoOp, Vec::new());
+        app.ui.dialog = Some(Dialog::Review {
+            key: RowKey { device: None, id: "a1".into() },
+            title: "t".into(),
+            detail: String::new(),
+            words: None,
+            folder: Some(Landing { lands: "~/code/app".into(), other: String::new() }),
+            step: crate::tui::dialog::ReviewStep::Where,
+            i: 0,
+        });
+        let at = |app: &App| match &app.ui.dialog {
+            Some(Dialog::Review { i, folder: Some(f), .. }) => Some((*i, f.other.clone())),
+            _ => None,
+        };
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(at(&app), Some((1, String::new())), "j moves off the first choice");
+        for c in "jkn".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(at(&app), Some((1, "jkn".into())), "on the typed choice they are letters");
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(at(&app), Some((0, "jk".into())));
+    }
+
+    #[test]
+    fn the_footer_follows_the_page_and_state() {
+        let mut app = App::for_test(Bridge::NoOp, Vec::new());
+        assert_eq!(keys(&app), ["/", "Tab", "?", "q"]);
+        app.claude_installed = false;
+        assert_eq!(keys(&app), ["Tab", "?", "q"]);
+        app.scan(vec![snap("s1", SessionKind::Terminal, SessionState::Idle)]);
+        assert_eq!(keys(&app), ["↵", "n", "t", "/", "Tab", "?"]);
+        app.ui.open = true;
+        assert_eq!(keys(&app), ["n", "t", "Esc", "Tab", "?"]);
+        app.ui.page = Page::Sync;
+        assert_eq!(keys(&app), ["c", "Tab", "?"], "sync not running");
+        app.ui.page = Page::Settings;
+        assert_eq!(keys(&app), ["c", "Tab", "?"], "this device");
+        app.ui.settings_cursor = 1;
+        assert_eq!(keys(&app), ["↵", "Tab", "?"], "Connect a device");
+        app.ui.settings_cursor = 99;
+        assert_eq!(keys(&app), ["← →", "Tab", "?"], "clamped to the theme");
+        app.ui.page = Page::Sessions;
+        app.ui.dialog = Some(crate::tui::dialog::Dialog::Keys);
+        assert!(keys(&app).is_empty());
+        app.ui.dialog = None;
+        app.ui.finding = true;
+        assert!(matches!(app.footer(&app.body()), crate::tui::Footer::Find(_)));
+        app.ui.finding = false;
+        app.ui.confirm = Some(Confirm::Forget { device: "studio".into() });
+        assert!(matches!(app.footer(&app.body()), crate::tui::Footer::Confirm { .. }));
+        app.ui.confirm = None;
+        app.say("Hello.");
+        assert!(matches!(app.footer(&app.body()), crate::tui::Footer::Toast(t) if t == "Hello."));
+    }
+
+    #[test]
+    fn the_settings_cursor_stays_on_an_item() {
+        let mut app = App::for_test(Bridge::NoOp, Vec::new());
+        app.ui.page = Page::Settings;
+        let last = app.settings_view().items().len() - 1;
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(app.ui.settings_cursor, last);
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Char('k'));
+        }
+        assert_eq!(app.ui.settings_cursor, 0);
+        app.ui.settings_cursor = 99;
+        assert_eq!(app.settings_view().cursor, last, "a stale cursor reads as the last item");
+    }
+
+    #[test]
+    fn sync_move_stays_within_the_folders() {
+        use crate::sync::protocol::{DeviceState, FolderStatus};
+        let mut app = App::for_test(Bridge::NoOp, Vec::new());
+        app.sync_move(1);
+        app.sync_move(-1);
+        assert_eq!(app.ui.sync_cursor, 0, "no folders");
+        app.agent.local = Some(DeviceState { folders: vec![FolderStatus::default(); 3], ..Default::default() });
+        for _ in 0..5 {
+            app.sync_move(1);
+        }
+        assert_eq!(app.ui.sync_cursor, 2);
+        app.sync_move(-1);
+        assert_eq!(app.ui.sync_cursor, 1);
+        app.ui.sync_cursor = 9;
+        app.sync_move(-1);
+        assert_eq!(app.ui.sync_cursor, 1, "a stale cursor counts from the last folder");
     }
 }

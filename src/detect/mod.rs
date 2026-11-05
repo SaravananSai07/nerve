@@ -4,6 +4,7 @@ pub(crate) mod jsonl;
 pub(crate) mod jsonl_cache;
 pub(crate) mod process;
 pub(crate) mod statusline;
+pub(crate) mod worker;
 
 use std::path::PathBuf;
 
@@ -14,10 +15,12 @@ use std::path::PathBuf;
 /// the Claude desktop app writes its sessions there even when the user's
 /// shell points the CLI somewhere else.
 pub(crate) fn claude_roots() -> Vec<PathBuf> {
-    roots_from(
-        std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
-        dirs::home_dir(),
-    )
+    roots_from(std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from), dirs::home_dir())
+}
+
+/// The stock root, `~/.claude`: what Claude uses when nothing relocates it.
+pub(crate) fn default_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude"))
 }
 
 fn roots_from(config_dir: Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
