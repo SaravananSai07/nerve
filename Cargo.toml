@@ -1,6 +1,6 @@
 [package]
 name = "nerve-tui"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 # Two binaries since the `nerve-tui` alias; keep plain `cargo run` working.
 default-run = "nerve"

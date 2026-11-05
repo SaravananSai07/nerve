@@ -283,6 +283,7 @@ impl App {
                             let offer: Vec<String> = inv.d.iter().map(crate::util::sanitize::clean).collect();
                             d = Dialog::Connect(Connect::Pick {
                                 code: std::mem::take(buf),
+                                from: crate::util::sanitize::clean(&inv.n),
                                 set: offer.iter().cloned().collect(),
                                 offer,
                                 i: 0,
@@ -291,7 +292,7 @@ impl App {
                     },
                     _ => {}
                 },
-                Connect::Pick { code: c, offer, set, i } => {
+                Connect::Pick { code: c, offer, set, i, .. } => {
                     if down || up {
                         *i = if down { (*i + 1).min(offer.len().saturating_sub(1)) } else { i.saturating_sub(1) };
                     } else if code == KeyCode::Char(' ') {
