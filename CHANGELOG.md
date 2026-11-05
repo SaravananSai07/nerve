@@ -1,5 +1,219 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A new interface.** The card grid is replaced by one list of
+  sessions grouped as Needs you, Working and Idle, with status as a
+  shape (● asking, ◆ permission, ▲ failed, a spinner, ○ idle, ◌ offline)
+  so it reads without colour. The cursor stays on its session when the
+  list reorders. `Enter` opens a panel with the question, the
+  transcript and a prompt box, beside the list at 110 columns or wider
+  and full screen below. A Settings page (`Tab`) holds devices, private
+  folders and sessions, who gets notified and the theme. The bottom line
+  shows the keys that work right now; `?` lists them all.
+- **Answer and prompt from nerve.** `1`–`9` answers the question or
+  permission prompt under the cursor, and `i` sends a prompt (queued
+  while a turn runs).
+- **A readable transcript.** The panel renders Claude's markdown
+  (headings, lists, tables, code) and folds long runs of tool calls
+  into one line. What Claude Code adds to a turn (reminders, command
+  output, compaction summaries) stays out. The wheel, `PgUp`/`PgDn` and
+  `Home`/`End` scroll it. A session opens at once on the transcript
+  last read, and a spinner shows while the first read runs. Working
+  sessions spin about ten times a second.
+- **Notify when it finishes.** Every session's finished turn notifies
+  the devices ticked under Finished turns in Settings, except on the
+  device where nerve has that session open. `n` overrides it for one
+  session (⚑ marks those that notify): switch it off or pick other
+  devices. Sessions switched on with `n` before keep notifying.
+  Questions, permission prompts and failures notify every device ticked
+  under Needs you in Settings. Titles say what and where
+  (`Question on laptop`). On macOS a
+  click runs the new `nerve --land <device>/<session>`, which opens that
+  session in the running nerve, lit up for a moment. Choices are kept in
+  `notify.toml`.
+- **Cross-device sync (experimental).** Devices pair
+  by Nostr key and exchange NIP-44-encrypted state and commands through
+  public relays or a private one (`nerve sync serve-relay`). Sessions on
+  every paired device share the one list, named by device, and the same
+  keys answer, prompt, stop (`x`) and open them; `H` hands a session to
+  another device. See docs/DEPLOYMENT.md and docs/ARCHITECTURE.md.
+- **Start a session on a device.** `s` (or `nerve sync start <device>
+  <dir> <prompt> [--wait] [--timeout S]`) runs `claude <prompt>` in a
+  detached tmux session in a folder on any connected device, the way a
+  hand-off resumes one, so it is an ordinary session: it shows in the
+  list, takes prompts and approvals, and can be attached to. The prompt
+  is one argument, never through a shell. The folder must exist inside
+  the device's home, a place or `handoff_root`, and not be private. The
+  CLI prints the session id, then the tmux session; `--wait` also waits
+  for the first turn to end and prints the reply. It replaces the
+  headless `nerve sync job`, whose peers could pick a `verify` shell
+  command and `bypassPermissions`; a device still sending a job gets a
+  refusal.
+- **Private sessions.** Every session is visible on every paired
+  device unless you keep it private: `p` keeps the session, or its whole
+  folder, on this device (marked ⊡), as does `nerve sync private
+  [<dir>]`. Peers can't see, type into, stop or answer a private
+  session. fleet.toml keeps the lists as `private` and
+  `private_sessions`.
+- **`nerve setup [code]`** sets a device up in one step. It creates the
+  identity, installs the nerve mod into Claude Code, installs the agent as
+  a launchd, systemd or Termux service, and pairs by a one-time invite
+  code. `nerve sync doctor` checks a device; `nerve sync invite` makes a
+  new code.
+- **Claude Code mod** (`mod/nerve`, Claude Code ≥ 2.1.287). It submits
+  remote prompts inside Claude (queued while busy, works for `--bg`
+  sessions), and answers permissions and questions from other devices
+  while the local dialog stays up.
+- **Incremental hand-off.** Only the commits the target lacks and
+  content-defined chunks it doesn't hold are sent. A repeat hand-off of a
+  700 KiB session moved 16–19 KiB.
+- **Places, runs and refs.** Each device names
+  directories under `[places]` in its fleet.toml, so peers address a
+  place by name and never need its remote path.
+  - `nerve sync put|get <device> <place> <paths…> [--delete] [--wait]`
+    moves files through the hand-off's chunk store. Either side can
+    start it. A repeat put of a 1 MiB folder with one changed file moved
+    8.9 KiB (2 of 237 chunks). Files are written atomically, with their
+    modes, only inside the place and never through a symlink.
+  - `nerve sync refs <device> <place> [--pull] <src>:<dst>…` sends only
+    the commits the target lacks and sets exactly the named refs. It
+    never checks out and never touches HEAD, the index or the working
+    tree.
+  - `nerve sync run <device> [--place P | --cwd DIR] [--timeout S]
+    [--wait] -- <argv…>` runs a command that a `[run] allow` rule on the
+    target names (a trailing `"*"` admits further arguments). The argv is
+    passed as given, with no shell. Runs stream an output tail, show in
+    `nerve sync status`, and with `--wait` the CLI
+    exits with the remote exit code. The 5-minute expiry bounds only
+    *starting* a run.
+- **Synced folders.** A folder can stay the same on the devices
+  you choose: `a` on the new Sync page, or `nerve sync <dir> --with
+  <devices> [--when turn|watch|manual]`. It syncs when a session
+  there finishes a turn, when files change, or only when asked (`s`,
+  `nerve sync <folder>`). Small changes travel through the relays in
+  batches and files over `[xfer] bulk_over` go over rsync. A file both
+  devices changed keeps the version from one device, chosen alike on
+  every device, and saves the other as `<file>.conflict-<device>`. The
+  Sync page shows how each folder stands and what went where; sessions
+  in a synced folder carry ⇄. Keeping a synced folder private stops
+  syncing it.
+- **One build, one install.** Sync is always built in: the `sync` cargo
+  feature and `install.sh --sync` are gone, and nothing talks to a relay
+  until a device is connected. `nerve --version` prints the version.
+- **Connect devices from nerve.** `c` in Settings (or `nerve connect`)
+  shows a code; the other device enters it (or runs
+  `nerve connect <code>`). The join then waits for a yes on any of your
+  devices, with three words both screens show. A code works once, for 10
+  minutes. The inviter chooses who the new device joins (every device and
+  later ones, the devices there now, or some), and the new device picks
+  among those. It is introduced to each of them. `l` and `nerve link`
+  connect a device to more devices later; `f` and `nerve forget` drop it
+  from all of them.
+- **Requests.** A folder another device shares waits for a yes under
+  Needs you, on every device, unless a rule covers it: each synced folder
+  says what its devices may sync next (`ask`, `inside` its parent folder,
+  or `any`), set when it starts and with `o` on the Sync page. A sync
+  started in the TUI is your yes; one started from a shell asks.
+  `nerve requests`, `nerve allow <id> [--at] [--others]` and
+  `nerve refuse <id>` do the same from a shell. Keys, credentials and
+  nerve's and Claude's own settings never sync.
+- **Undo a sync.** Files a sync replaces or deletes are kept for 48 hours
+  (`keep_versions_hours`), stored by content hash. `v` on the Sync page,
+  `nerve versions` and `nerve restore <id>` put one back.
+- **Everyday commands at the top level:** `nerve connect`, `devices`,
+  `link`, `forget`, `requests`, `allow`, `refuse`, `sync <dir>`,
+  `unsync`, `folders`, `versions`, `restore` (`nerve help` lists them).
+  `nerve sync folder …` and `nerve sync invite` are gone; `nerve setup`
+  stays as another name for `nerve connect`.
+
+- **Starts show at once.** A session started on another device (`s`)
+  joins the list straight away as Starting, with its prompt and how far
+  it got, and becomes the real session once that device reports it. A
+  device that refuses it or never answers moves it to Needs you with
+  the reason, to retry (`r`), edit (`e`) or dismiss (`x`).
+- **A multi-line prompt box.** Starting a session and `i` wrap long
+  prompts instead of scrolling sideways, take new lines (`⌥↵`, `⇧↵`,
+  `Ctrl+J`) and keep a paste's line breaks; past a few lines the box
+  scrolls to follow the cursor.
+
+### Changed
+
+- **Keys.** `t` jumps to the terminal (was `Enter`), `Enter` opens the
+  panel (was `i`), `r` renames (was `n`), `P` captures the screen into the panel,
+  `/` finds across title, project, folder and device.
+- **Themes have four roles:** `text`, `dim`, `attention` and `accent`,
+  plus optional `selection` and `flash`. Older theme files still load
+  (`muted`, `waiting`, `processing` and `selected_bg` map onto them).
+  The default theme is now `terminal`, which uses your terminal's own
+  colours.
+- **Hand-offs land only where you said.** A hand-off goes to the place
+  given with `--to <place>`, else the `path_map`-mapped path, else under
+  `handoff_root` when that is set. With none of them it is refused, and
+  the message names the config to add. It no longer falls back to
+  `~/nerve-handoff`. An existing checkout on another branch, or one whose
+  branch has commits the hand-off lacks, is refused unless you pass
+  `--force`; it is no longer switched with `git checkout -B`.
+- **Services find `claude`.** `nerve setup` writes a PATH into the
+  launchd plist and systemd unit that includes `~/.local/bin`,
+  `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin` where they
+  exist. Hand-offs, started sessions and runs also look in those
+  directories when PATH misses, and the error lists where they looked.
+
+### Fixed
+
+- **Whole transcripts from other devices.** A session elsewhere showed
+  only its last eight lines, each cut at 240 characters, so replies
+  broke off mid-sentence and your prompt dropped out once tools ran. Its
+  device now sends the whole recent transcript while you have it open.
+- **No doubled or invented prompts.** A prompt the transcript holds
+  twice shows once, and what Claude Code adds as a hidden user turn (a
+  skill's or command's expanded text, a subagent's report) no longer
+  reads as something you typed.
+- **Stopping or attaching to a background job failed when it lived under
+  the other Claude config dir.** nerve watches both `~/.claude` and
+  `$CLAUDE_CONFIG_DIR`, but ran `claude stop` / `claude attach` with
+  whichever one it inherited, so the CLI couldn't see the job ("couldn't
+  confirm … was stopped"). Every CLI call now targets the session's own
+  config dir.
+- **nerve still pinned a CPU core when its tmux server was killed.** The
+  pty stays nerve's controlling tty in that case, so the 0.5.0 watchdog
+  never fired. It now also checks the tty for a hang-up.
+- **Background jobs blocked for months showed as "Waiting 3m".** With no
+  transcript, nothing dated them; the job file now does, and after 48 h
+  they show as Dormant like any stale prompt.
+- Plain `cargo run` works again (it broke when the `nerve-tui` alias
+  binary was added).
+- **A fresh install crashed on launch on macOS.** `install.sh` copied the
+  new binary over the old one in place, and macOS kills a binary
+  rewritten that way. It now copies beside it and renames.
+- **Upgrades left the background agent and the Claude mod on the old
+  version.** The agent now restarts itself when its binary is replaced,
+  and rewrites the mod's files when they differ from its own copy.
+- **A pasted code typed in slowly**, one key per frame; keys that
+  arrive together are now taken together.
+- **`nerve sync …` without a terminal crashed** in a build without sync,
+  falling through to the dashboard. Every build has sync now, and the
+  dashboard refuses to start with no terminal instead of panicking.
+
+### Removed
+
+- Sorting (`s`), the activity sparkline, muting (`m`), the update banner
+  and its dismissal (`u`; a new release is now mentioned once at
+  launch), the Devices view (`D`) and the details view (`i`).
+- The `on_waiting`, `on_error` and `on_complete` options under
+  `[notifications]`: Settings and `n` decide who hears about what.
+  `sound` stays.
+
+### New
+
+- **Rows name the repo** when Claude's session name doesn't. For Claude
+  worktrees it's the repo, not the worktree folder.
+- **Background jobs blocked for days can still be stopped** with `x`,
+  though they show as Dormant.
+
 ## 0.5.2 — 2026-10-09
 
 - Repackage of 0.5.1 without stray build artifacts (cargo-install
