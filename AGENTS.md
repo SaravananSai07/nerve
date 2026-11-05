@@ -43,7 +43,7 @@ docker build -t nerve-linux-e2e tests/linux && \
 
 - No screenshots, demos, experiments or research in commits. Keep them in
   the git-ignored `ignored/` directory.
-- Docs are only `README.md`, `CHANGELOG.md`, `AGENTS.md` and the three below.
+- Docs are only `README.md`, `AGENTS.md` and the three below.
   Do not add others.
 
 ## Docs
