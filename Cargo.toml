@@ -1,17 +1,17 @@
 [package]
 name = "nerve-tui"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 # Two binaries since the `nerve-tui` alias; keep plain `cargo run` working.
 default-run = "nerve"
 rust-version = "1.85"
-description = "Watch, answer and steer Claude Code sessions across terminal tabs, tmux panes and your other devices, from one TUI. Works with Claude Code sessions only, for now."
+description = "Watch, answer and steer Claude Code sessions across terminal tabs, tmux panes and your other devices, and help split and coordinate work between devices from one TUI. [Works with Claude Code sessions only, for now]"
 license = "MIT"
 repository = "https://github.com/SaravananSai07/nerve"
 authors = ["Sai Saravanan"]
 readme = "README.md"
-keywords = ["tui", "claude", "ai", "terminal", "monitoring"]
-categories = ["command-line-utilities", "development-tools"]
+keywords = ["tui", "claude", "ai", "terminal", "agents"]
+categories = ["command-line-utilities", "development-tools", "agentic-work"]
 # What goes into the crate: the code and the Claude Code mod it embeds.
 include = ["/src/**", "/mod/**", "/README.md", "/LICENSE"]
 
