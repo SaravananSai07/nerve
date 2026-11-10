@@ -112,8 +112,7 @@ marketplace and installs `nerve@nerve-local` into Claude Code. New Claude
 sessions load it; restart older ones. It talks to the agent over
 `<config>/sync/agent.sock` (mode 0600) and submits remote prompts, offers
 permission prompts and questions to other devices, and reports turn cost.
-It shows a status line only when something needs attention. Use
-`--no-claude` to skip it.
+Use `--no-claude` to skip it.
 
 ## Relays
 

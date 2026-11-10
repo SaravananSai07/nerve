@@ -45,7 +45,7 @@ mod approvals;
 mod folder_sync;
 mod publish;
 use crate::detect::jsonl;
-use publish::{status_line, tail_lines, Alerts};
+use publish::{tail_lines, Alerts};
 mod transfer;
 pub(crate) use approvals::FleetReq;
 pub(crate) use folder_sync::FolderReq;
@@ -1077,18 +1077,6 @@ impl Agent {
                 }
             }
         }
-        let pending: usize = hub.pending().len() + self.mailbox.pending().len();
-        let peers: Vec<(String, Option<u64>)> = self
-            .view
-            .lock()
-            .map(|v| {
-                v.peers
-                    .iter()
-                    .map(|p| (p.name.clone(), p.state_generated_at.map(|g| crate::util::now_secs().saturating_sub(g))))
-                    .collect()
-            })
-            .unwrap_or_default();
-        hub.set_status(status_line(&peers, pending));
     }
 
     // ---- runs ----

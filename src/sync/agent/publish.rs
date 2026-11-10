@@ -19,9 +19,6 @@ const HEARTBEAT: Duration = Duration::from_secs(60);
 
 const MIN_GAP: Duration = Duration::from_secs(2);
 
-/// A peer silent this long has missed at least one heartbeat.
-const PEER_STALE_SECS: u64 = 2 * 60;
-
 /// Which notifications a new state calls for. A device's first state only
 /// primes: nothing that was already waiting notifies again on restart.
 #[derive(Default)]
@@ -124,39 +121,6 @@ fn fingerprint(state: &DeviceState) -> String {
         s.active_age_secs = None;
     }
     serde_json::to_string(&fp).unwrap_or_default()
-}
-
-/// The line the mod shows under Claude's prompt, or "" (cleared) while
-/// nothing needs attention: no remote request waiting, no peer gone quiet.
-/// The full peer list lives in Settings.
-pub(super) fn status_line(peers: &[(String, Option<u64>)], pending: usize) -> String {
-    let stale: Vec<String> = peers
-        .iter()
-        .filter_map(|(name, age)| match age {
-            Some(a) if *a < PEER_STALE_SECS => None,
-            Some(a) => Some(format!("{name} {}", short_age(*a))),
-            None => Some(format!("{name} –")),
-        })
-        .collect();
-    let mut parts = Vec::new();
-    if !stale.is_empty() {
-        parts.push(format!("quiet: {}", stale.join(" ")));
-    }
-    if pending > 0 {
-        parts.push(format!("{pending} waiting on another device"));
-    }
-    if parts.is_empty() {
-        return String::new();
-    }
-    format!("⇄ nerve · {}", parts.join(" · "))
-}
-
-fn short_age(s: u64) -> String {
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m", s / 60),
-        _ => format!("{}h", s / 3600),
-    }
 }
 
 /// Transcript tail as display lines (the same parser the preview uses).
@@ -391,18 +355,5 @@ mod tests {
         assert!(alerts.update("mac", &mac, &[("ap1".into(), "join".into())], "mac", &prefs).len() == 1);
         alerts.update("pi", &pi, &[], "mac", &prefs);
         assert!(alerts.update("mac", &mac, &[("ap1".into(), "join".into())], "mac", &prefs).is_empty());
-    }
-
-    #[test]
-    fn status_line_is_empty_while_peers_are_fresh_and_nothing_waits() {
-        assert_eq!(status_line(&[("pi".into(), Some(3))], 0), "");
-        assert_eq!(status_line(&[], 0), "");
-    }
-
-    #[test]
-    fn status_line_names_quiet_peers_and_waiting_requests() {
-        let peers = [("pi".into(), Some(3)), ("mac".into(), Some(600)), ("box".into(), None)];
-        assert_eq!(status_line(&peers, 0), "⇄ nerve · quiet: mac 10m box –");
-        assert_eq!(status_line(&peers[..1], 2), "⇄ nerve · 2 waiting on another device");
     }
 }
