@@ -28,8 +28,8 @@ const PEER_STALE_SECS: u64 = 2 * 60;
 pub(super) struct Alerts {
     /// Last state label per (device, session).
     last: HashMap<(String, String), String>,
-    /// Prompts already notified about.
-    told: HashSet<String>,
+    /// Prompts already notified about, per (device, request).
+    told: HashSet<(String, String)>,
     primed: HashSet<String>,
     /// (device, session) a focused nerve on this device has open: its
     /// finished turns don't notify here. From `Request::Viewing`.
@@ -58,7 +58,7 @@ impl Alerts {
                 .unwrap_or_default()
         };
         for r in &state.requests {
-            if self.told.insert(r.id.clone()) && attention {
+            if self.told.insert((device.to_string(), r.id.clone())) && attention {
                 let (alert, what) = match r.questions.first() {
                     Some(q) if r.kind == "question" => (Alert::Question, q.question.clone()),
                     _ => (Alert::Permission, format!("{} {}", r.tool, r.summary)),
@@ -67,11 +67,13 @@ impl Alerts {
             }
         }
         for (id, what) in asks {
-            if self.told.insert(id.clone()) && attention {
+            if self.told.insert((device.to_string(), id.clone())) && attention {
                 due.push((Alert::Request, id.clone(), what.clone()));
             }
         }
-        self.told.retain(|id| state.requests.iter().any(|r| r.id == *id) || asks.iter().any(|(a, _)| a == id));
+        self.told.retain(|(d, id)| {
+            d != device || state.requests.iter().any(|r| r.id == *id) || asks.iter().any(|(a, _)| a == id)
+        });
         let busy = |label: &str| label == "Processing" || label.starts_with("Tool");
         for s in &state.sessions {
             let prev = self.last.insert((device.to_string(), s.id.clone()), s.state.clone());
@@ -368,6 +370,28 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn another_devices_state_does_not_renotify_a_question_here() {
+        let prefs = NotifyPrefs::default();
+        let mut mac = DeviceState::default();
+        mac.requests.push(protocol::PendingRequest {
+            id: "ad71".into(),
+            session: "s1".into(),
+            kind: "question".into(),
+            ..Default::default()
+        });
+        let pi = DeviceState::default();
+        let mut alerts = Alerts::default();
+        alerts.update("pi", &pi, &[], "mac", &prefs);
+        alerts.update("mac", &DeviceState::default(), &[], "mac", &prefs);
+        assert_eq!(alerts.update("mac", &mac, &[], "mac", &prefs).len(), 1, "a new question notifies");
+        alerts.update("pi", &pi, &[], "mac", &prefs);
+        assert!(alerts.update("mac", &mac, &[], "mac", &prefs).is_empty(), "pi's state must not reset it");
+        assert!(alerts.update("mac", &mac, &[("ap1".into(), "join".into())], "mac", &prefs).len() == 1);
+        alerts.update("pi", &pi, &[], "mac", &prefs);
+        assert!(alerts.update("mac", &mac, &[("ap1".into(), "join".into())], "mac", &prefs).is_empty());
+    }
 
     #[test]
     fn status_line_is_empty_while_peers_are_fresh_and_nothing_waits() {
