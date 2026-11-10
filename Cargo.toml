@@ -1,6 +1,6 @@
 [package]
 name = "nerve-tui"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 # Two binaries since the `nerve-tui` alias; keep plain `cargo run` working.
 default-run = "nerve"
@@ -11,7 +11,7 @@ repository = "https://github.com/SaravananSai07/nerve"
 authors = ["Sai Saravanan"]
 readme = "README.md"
 keywords = ["tui", "claude", "ai", "terminal", "agents"]
-categories = ["command-line-utilities", "development-tools", "agentic-work"]
+categories = ["command-line-utilities", "development-tools"]
 # What goes into the crate: the code and the Claude Code mod it embeds.
 include = ["/src/**", "/mod/**", "/README.md", "/LICENSE"]
 
