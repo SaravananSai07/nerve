@@ -18,7 +18,7 @@
 //! | call | body / query | answer |
 //! |---|---|---|
 //! | `POST /v1/hello` | `{sid, cwd, surface, version}` | `{ok}` |
-//! | `GET /v1/poll?sid=` | long-poll, up to 8 s | `{cmds: [...], status}` |
+//! | `GET /v1/poll?sid=` | long-poll, up to 8 s | `{cmds: [...]}` |
 //! | `POST /v1/event` | `{sid, kind, ...}` turn.start / turn.complete | `{ok}` |
 //! | `POST /v1/request` | `{sid, id, kind, tool, input}` | `{ok}` |
 //! | `GET /v1/wait?sid=&id=` | long-poll, up to 2 s | `{answer}`, `{pending}` or `{gone}` |
@@ -60,8 +60,6 @@ struct ModSession {
     last_seen: Option<Instant>,
     queue: VecDeque<Value>,
     running: bool,
-    /// The status line this session's mod last received.
-    status_sent: String,
     last_turn: Option<TurnInfo>,
 }
 
@@ -89,7 +87,6 @@ struct Inner {
     sessions: HashMap<String, ModSession>,
     requests: HashMap<String, ModRequest>,
     events: Vec<HubEvent>,
-    status: String,
 }
 
 #[derive(Default)]
@@ -178,19 +175,6 @@ impl ModHub {
         std::mem::take(&mut g.events)
     }
 
-    /// One line the mod shows under Claude's prompt (`$.ui.status`).
-    pub(crate) fn set_status(&self, s: String) {
-        let changed = {
-            let mut g = self.lock();
-            let changed = g.status != s;
-            g.status = s;
-            changed
-        };
-        if changed {
-            self.wake.notify_waiters();
-        }
-    }
-
     /// Handle one request. Pure apart from the shared state, so the
     /// protocol is unit-testable without a socket.
     async fn route(&self, method: &str, path: &str, body: &Value) -> Value {
@@ -218,15 +202,12 @@ impl ModHub {
                     let wake = self.wake.notified();
                     {
                         let mut g = self.lock();
-                        let status = g.status.clone();
                         let s = g.sessions.entry(sid.clone()).or_default();
                         s.last_seen = Some(Instant::now());
-                        // Answer at once for a command or a changed status
-                        // line, else at the deadline.
-                        if !s.queue.is_empty() || s.status_sent != status || Instant::now() >= deadline {
+                        // Answer at once for a command, else at the deadline.
+                        if !s.queue.is_empty() || Instant::now() >= deadline {
                             let cmds: Vec<Value> = s.queue.drain(..).collect();
-                            s.status_sent = status.clone();
-                            return json!({"cmds": cmds, "status": status});
+                            return json!({"cmds": cmds});
                         }
                     }
                     let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), wake).await;
@@ -490,26 +471,17 @@ mod tests {
     }
 
     #[test]
-    fn a_status_change_ends_the_long_poll_early() {
+    fn a_submitted_prompt_ends_the_long_poll_early() {
         rt().block_on(async {
             let hub = Arc::new(ModHub::default());
-            let poll = format!("/v1/poll?sid={SID}");
-            hub.route("GET", &poll, &Value::Null).await; // first poll hands over the (empty) status
-            hub.set_status("⇄ nerve · server 1s · 1 waiting on another device".into());
-            let h = hub.clone();
-            let t = Instant::now();
-            let got = tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await })
-                .await
-                .unwrap();
-            assert!(t.elapsed() < Duration::from_secs(1), "returned at once");
-            assert!(got["status"].as_str().unwrap().contains("1 waiting"));
+            hub.route("POST", "/v1/hello", &json!({"sid": SID})).await;
             let h = hub.clone();
             let waiter =
                 tokio::spawn(async move { h.route("GET", &format!("/v1/poll?sid={SID}"), &Value::Null).await });
             tokio::time::sleep(Duration::from_millis(100)).await;
-            hub.set_status("⇄ nerve · server 2s".into());
-            let got = tokio::time::timeout(Duration::from_secs(1), waiter).await.expect("woken by the change").unwrap();
-            assert_eq!(got["status"], "⇄ nerve · server 2s");
+            assert!(hub.submit(SID, "c1", "hi"));
+            let got = tokio::time::timeout(Duration::from_secs(1), waiter).await.expect("woken by the prompt").unwrap();
+            assert_eq!(got["cmds"][0]["text"], "hi");
         });
     }
 

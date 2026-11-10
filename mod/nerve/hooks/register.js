@@ -13,7 +13,6 @@ const VERSION = '0.1.0'
 let sock = ''
 let sid = ''
 let online = false
-let lastStatus = ''
 // Tool calls whose permission flow has ended (allowed, denied or run),
 // newest last. Claude doesn't abort a PermissionRequest hook when the
 // user answers its dialog here (E21), so the hook looks for its call in
@@ -58,11 +57,6 @@ async function pump($) {
       online = true
     }
     const got = await call($, 'GET', '/v1/poll?sid=' + encodeURIComponent(sid))
-    if (got.status !== undefined && got.status !== lastStatus) {
-      lastStatus = got.status
-      // "" means nothing needs attention; undefined clears the line.
-      $.ui.status(got.status || undefined)
-    }
     for (const c of got.cmds || []) {
       if (c.t !== 'prompt') continue
       try {
